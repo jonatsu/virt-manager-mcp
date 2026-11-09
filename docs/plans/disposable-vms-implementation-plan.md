@@ -36,10 +36,14 @@ These apply to every unit, which names only its additions.
 - **Test bed.** Run cases as `tests/testbed/README.md` describes. The client has no assertions, so a case passes when
   a reader of its replies sees each expected result; record what was seen in the execution record. Touch only
   `trial-deb13` and VMs and volumes named `t-*` or `tpl-*` in the `agent-vms` pool on `qemu:///system`.
+- **Memory.** The host shares its RAM with the user's work and once crashed when memory ran out. Give each test VM at
+  most 1 GiB, run at most three throwaway VMs at once, check `free -m` before starting several, and shut a VM down as
+  soon as its check is done. No test asks for more memory than the host has free.
 - **Template config.** Template cases use `tests/testbed/config-templates.toml`, so the existing cases keep their
   `max_vms = 1` config. It leaves `trial-deb13` out of `allowed_vms`, sets `create`, `delete`, `reconfigure` and
-  `snapshots` on, `max_vms = 4`, and lists `t-listed` in `allowed_vms`, `power_vms` and `manage_vms`. Its templates
-  are `debian13` on `tpl-debian13.qcow2`, `debian13-uefi` on the same volume with `firmware = "uefi"`, `scratch` on
+  `snapshots` on, `max_vms = 3`, `max_memory_mib = 1024`, and lists `t-listed` in `allowed_vms`, `power_vms` and
+  `manage_vms`. Its templates are `debian13` on `tpl-debian13.qcow2`, `debian13-uefi` on the same volume with
+  `firmware = "uefi"`, `scratch` on
   `tpl-scratch.qcow2`, and `missing` on a volume that does not exist.
 - **Template safety.** Never delete or rebuild `tpl-debian13.qcow2` during a test. A failure path that needs a
   missing template deletes `tpl-scratch.qcow2`, a `virsh vol-clone` of it.
@@ -136,12 +140,10 @@ names them. Add `tests/testbed/config-templates.toml` and the case `templates-cr
 - creates `t-vm1` between two `__time__` marks, expecting a responding agent in about 10 s, then `t-vm2` from the same
   template while `t-vm1` runs;
 - creates `t-uefi` from `debian13-uefi` and sees its agent respond;
-- refuses an invalid hostname, `max_vms`, and a lifetime above the cap;
-- creates `t-big` with memory above the host's free memory but within `max_memory_mib`, and expects the VM kept and the
-  start failure reported;
+- refuses an invalid hostname, `max_vms`, memory above `max_memory_mib`, and a lifetime above the cap;
 - attaches a disk to `t-vm1`, then deletes every VM it made.
 
-Afterwards `virsh vol-list agent-vms` shows no `t-vm*`, `t-uefi` or `t-big` volume. A run with the default test-bed
+Afterwards `virsh vol-list agent-vms` shows no `t-vm*` or `t-uefi` volume. A run with the default test-bed
 config shows the tools are not advertised. The template's checksum matches unit 2's.
 
 ### 6. Reset (reviewed, Opus)
@@ -183,9 +185,9 @@ waits 130 s, which covers one 60 s sweep after expiry, and lists VMs: `t-exp` is
 and `t-listed` remain. For the command, a short case creates `t-exp2` with a 1-minute lifetime and exits; after 70 s
 with no server running, `virtmanager-mcp --config ... sweep` exits 0, and `t-exp2` and its volumes are gone.
 
-Two processes sweeping one VM, a failed upload and a failed define have no test-bed case, because they need fault
-injection in libvirt. Their handling is reviewed in code, and the unit tests cover the logic that does not need
-libvirt.
+Two processes sweeping one VM, a failed upload, a failed define and a start failure after define have no test-bed
+case, because they need fault injection in libvirt or a memory overcommit the host cannot afford. Their handling is
+reviewed in code, and the unit tests cover the logic that does not need libvirt.
 
 ### 8. Docs and final gate
 
