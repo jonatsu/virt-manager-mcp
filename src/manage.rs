@@ -16,6 +16,7 @@ use virt::domain_snapshot::DomainSnapshot;
 use virt::network::Network;
 use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
+use virt::stream::Stream;
 use virt::sys;
 
 use crate::config::Manage;
@@ -31,6 +32,74 @@ static LOCK: Mutex<()> = Mutex::new(());
 pub fn is_owned(dom: &Domain) -> bool {
     dom.get_metadata(sys::VIR_DOMAIN_METADATA_ELEMENT as i32, Some(OWNER_NS), 0)
         .is_ok()
+}
+
+/// Attributes of the owner element. VMs made by `create_vm` carry none; VMs made from a template carry the
+/// template's name and the disk generation, and an expiry when they have a lifetime. Only the server writes them,
+/// when it defines a domain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owner {
+    pub template: Option<String>,
+    pub generation: Option<u32>,
+    /// UTC time in seconds since the epoch after which the VM is deleted.
+    pub expires: Option<u64>,
+}
+
+impl Owner {
+    /// The owner element as it goes into a domain's `<metadata>`.
+    fn element(&self) -> String {
+        let mut attrs = String::new();
+        if let Some(t) = &self.template {
+            attrs.push_str(&format!(" template='{}'", esc(t)));
+        }
+        if let Some(g) = self.generation {
+            attrs.push_str(&format!(" generation='{g}'"));
+        }
+        if let Some(e) = self.expires {
+            attrs.push_str(&format!(" expires='{e}'"));
+        }
+        format!("<vmm:owner xmlns:vmm='{OWNER_NS}'{attrs}/>")
+    }
+
+    /// Reads the attributes from an owner element, as libvirt returns it for the `OWNER_NS` metadata. An
+    /// attribute that does not parse counts as absent.
+    fn from_element(xml: &str) -> Result<Self> {
+        let doc = roxmltree::Document::parse(xml)?;
+        Ok(Self::from_node(doc.root_element()))
+    }
+
+    fn from_node(node: roxmltree::Node<'_, '_>) -> Self {
+        Self {
+            template: node.attribute("template").map(str::to_string),
+            generation: node.attribute("generation").and_then(|g| g.parse().ok()),
+            expires: node.attribute("expires").and_then(|e| e.parse().ok()),
+        }
+    }
+}
+
+/// The owner attributes of `dom`, or `None` when this server did not create it.
+#[expect(dead_code, reason = "reset and expiry, later changes, read owners")]
+pub fn owner_of(dom: &Domain) -> Option<Owner> {
+    let xml = dom
+        .get_metadata(sys::VIR_DOMAIN_METADATA_ELEMENT as i32, Some(OWNER_NS), 0)
+        .ok()?;
+    Owner::from_element(&xml).ok()
+}
+
+/// The owner attributes in a domain's XML, or `None` when it has no owner element in `OWNER_NS`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "reset and expiry, later changes, read owners")
+)]
+fn owner_in_domain_xml(xml: &str) -> Result<Option<Owner>> {
+    let doc = roxmltree::Document::parse(xml)?;
+    let Some(metadata) = child(doc.root_element(), "metadata") else {
+        return Ok(None);
+    };
+    Ok(metadata
+        .children()
+        .find(|n| n.has_tag_name((OWNER_NS, "owner")))
+        .map(Owner::from_node))
 }
 
 /// Parameters of a new VM, already validated against the config by `create`.
@@ -84,7 +153,23 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         let vol_name = format!("{}.qcow2", vm.name);
         let vol = create_volume(&pool, &vol_name, vm.disk_gib)?;
         let disk = vol.get_path()?;
-        let xml = domain_xml(&vm, &disk, iso.as_deref(), driver_iso.as_deref(), network.as_deref());
+        let mut disks = vec![Disk::Qcow2(&disk), Disk::Cdrom(iso.as_deref())];
+        if driver_iso.is_some() {
+            disks.push(Disk::Cdrom(driver_iso.as_deref()));
+        }
+        let xml = domain_xml(&DomainSpec {
+            name: &vm.name,
+            windows: vm.windows,
+            vcpus: vm.vcpus,
+            memory_mib: vm.memory_mib,
+            uefi: vm.uefi,
+            tpm: vm.tpm,
+            disks,
+            network: network.as_deref(),
+            uuid: None,
+            mac: None,
+            owner: Owner::default(),
+        });
         if let Err(e) = Domain::define_xml(conn, &xml) {
             let _ = vol.delete(0);
             bail!("cannot define VM '{}': {}", vm.name, e.message());
@@ -658,6 +743,104 @@ fn create_volume(pool: &StoragePool, name: &str, gib: u64) -> Result<StorageVol>
         .map_err(|e| anyhow!("cannot create volume '{name}': {}", e.message()))
 }
 
+/// Creates a qcow2 overlay of `capacity` bytes whose backing file is the qcow2 at `backing`.
+#[expect(
+    dead_code,
+    reason = "create_vm_from_template, a later change, calls this"
+)]
+fn create_overlay(
+    pool: &StoragePool,
+    name: &str,
+    capacity: u64,
+    backing: &str,
+) -> Result<StorageVol> {
+    if StorageVol::lookup_by_name(pool, name).is_ok() {
+        bail!("volume '{name}' already exists in the disk pool");
+    }
+    StorageVol::create_xml(pool, &overlay_xml(name, capacity, backing), 0)
+        .map_err(|e| anyhow!("cannot create volume '{name}': {}", e.message()))
+}
+
+fn overlay_xml(name: &str, capacity: u64, backing: &str) -> String {
+    format!(
+        "<volume><name>{}</name><capacity unit='bytes'>{capacity}</capacity><allocation>0</allocation>\
+         <target><format type='qcow2'/></target>\
+         <backingStore><path>{}</path><format type='qcow2'/></backingStore></volume>",
+        esc(name),
+        esc(backing)
+    )
+}
+
+/// Creates a raw volume holding exactly `data`, uploaded through a libvirt stream.
+#[expect(
+    dead_code,
+    reason = "create_vm_from_template, a later change, calls this"
+)]
+fn create_raw_volume(
+    conn: &Connect,
+    pool: &StoragePool,
+    name: &str,
+    data: &[u8],
+) -> Result<StorageVol> {
+    if StorageVol::lookup_by_name(pool, name).is_ok() {
+        bail!("volume '{name}' already exists in the disk pool");
+    }
+    let xml = format!(
+        "<volume><name>{}</name><capacity unit='bytes'>{}</capacity><allocation>0</allocation>\
+         <target><format type='raw'/></target></volume>",
+        esc(name),
+        data.len()
+    );
+    let vol = StorageVol::create_xml(pool, &xml, 0)
+        .map_err(|e| anyhow!("cannot create volume '{name}': {}", e.message()))?;
+    if let Err(e) = upload(conn, &vol, data) {
+        let _ = vol.delete(0);
+        return Err(e.context(format!("cannot upload volume '{name}'")));
+    }
+    Ok(vol)
+}
+
+/// Writes `data` to the start of `vol`. Every error path aborts the stream: the `virt` crate's `Stream` panics on
+/// drop when freeing an unfinished stream fails.
+#[expect(
+    dead_code,
+    reason = "create_vm_from_template, a later change, calls this"
+)]
+fn upload(conn: &Connect, vol: &StorageVol, data: &[u8]) -> Result<()> {
+    let stream = Stream::new(conn, 0).map_err(|e| anyhow!("{}", e.message()))?;
+    if let Err(e) = vol.upload(&stream, 0, data.len() as u64, 0) {
+        let _ = stream.abort();
+        bail!("{}", e.message());
+    }
+    let mut sent = 0;
+    while sent < data.len() {
+        match stream.send(&data[sent..]) {
+            Ok(0) => {
+                let _ = stream.abort();
+                bail!("the stream accepted no data");
+            }
+            Ok(n) => sent += n,
+            Err(e) => {
+                let _ = stream.abort();
+                bail!("{}", e.message());
+            }
+        }
+    }
+    stream.finish().map_err(|e| anyhow!("{}", e.message()))
+}
+
+/// A new random UUID for a domain, chosen before the domain exists because its seed's instance ID contains it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "create_vm_from_template, a later change, calls this"
+    )
+)]
+fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// The pool volume backing `disk`, if it lives in the pool named `pool_name`.
 fn pool_volume(
     conn: &Connect,
@@ -824,42 +1007,101 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn domain_xml(
-    vm: &NewVm,
-    disk: &str,
-    iso: Option<&Path>,
-    driver_iso: Option<&Path>,
-    network: Option<&str>,
-) -> String {
-    let cdrom = |dev: &str, iso: Option<&Path>, boot: &str| {
-        let source = iso
-            .map(|p| format!("<source file='{}'/>", esc(&p.to_string_lossy())))
-            .unwrap_or_default();
-        format!(
-            "<disk type='file' device='cdrom'><driver name='qemu' type='raw'/>{source}\
-             <target dev='{dev}' bus='sata'/><readonly/>{boot}</disk>"
+/// A disk of a new domain. Every disk refers to its file by path: a seed given as a pool-volume reference failed
+/// to open on a later start (`docs/research/2026-11-10-fatfs-seed-boot.md`).
+enum Disk<'a> {
+    /// A writable qcow2 disk on the virtio bus.
+    Qcow2(&'a str),
+    /// A read-only raw disk on the virtio bus, such as a NoCloud seed.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "create_vm_from_template, a later change, uses this"
         )
-    };
+    )]
+    ReadOnlyRaw(&'a str),
+    /// A SATA CD-ROM, empty when `None`.
+    Cdrom(Option<&'a Path>),
+}
+
+/// Everything `domain_xml` puts into a new domain.
+struct DomainSpec<'a> {
+    name: &'a str,
+    windows: bool,
+    vcpus: u32,
+    memory_mib: u64,
+    uefi: bool,
+    tpm: bool,
+    /// In order: the first writable disk boots first, the first CD-ROM second.
+    disks: Vec<Disk<'a>>,
+    network: Option<&'a str>,
+    /// Kept by a reset; libvirt picks one when `None`.
+    uuid: Option<&'a str>,
+    /// MAC address of the network interface; libvirt picks one when `None`.
+    mac: Option<&'a str>,
+    owner: Owner,
+}
+
+fn disk_xml(disks: &[Disk<'_>]) -> Vec<String> {
+    let (mut virtio, mut sata) = (b'a', b'a');
+    let (mut disk_boot, mut cdrom_boot) = (false, false);
+    disks
+        .iter()
+        .map(|d| match d {
+            Disk::Qcow2(path) | Disk::ReadOnlyRaw(path) => {
+                let dev = format!("vd{}", char::from(virtio));
+                virtio += 1;
+                let (driver, tail) = match d {
+                    Disk::Qcow2(_) if !disk_boot => {
+                        disk_boot = true;
+                        ("type='qcow2' discard='unmap'", "<boot order='1'/>")
+                    }
+                    Disk::Qcow2(_) => ("type='qcow2' discard='unmap'", ""),
+                    _ => ("type='raw'", "<readonly/>"),
+                };
+                format!(
+                    "<disk type='file' device='disk'><driver name='qemu' {driver}/>\
+                     <source file='{}'/><target dev='{dev}' bus='virtio'/>{tail}</disk>",
+                    esc(path)
+                )
+            }
+            Disk::Cdrom(iso) => {
+                let dev = format!("sd{}", char::from(sata));
+                sata += 1;
+                let source = iso
+                    .map(|p| format!("<source file='{}'/>", esc(&p.to_string_lossy())))
+                    .unwrap_or_default();
+                let boot = if cdrom_boot {
+                    ""
+                } else {
+                    cdrom_boot = true;
+                    "<boot order='2'/>"
+                };
+                format!(
+                    "<disk type='file' device='cdrom'><driver name='qemu' type='raw'/>{source}\
+                     <target dev='{dev}' bus='sata'/><readonly/>{boot}</disk>"
+                )
+            }
+        })
+        .collect()
+}
+
+fn domain_xml(spec: &DomainSpec<'_>) -> String {
     // Root ports for every PCIe device plus spares, so disks and NICs can be hot-plugged.
     let mut devices = vec!["<controller type='pci' index='0' model='pcie-root'/>".to_string()];
     devices.extend(std::iter::repeat_n(
         "<controller type='pci' model='pcie-root-port'/>".to_string(),
         14,
     ));
-    devices.extend([
-        format!(
-            "<disk type='file' device='disk'><driver name='qemu' type='qcow2' discard='unmap'/>\
-             <source file='{}'/><target dev='vda' bus='virtio'/><boot order='1'/></disk>",
-            esc(disk)
-        ),
-        cdrom("sda", iso, "<boot order='2'/>"),
-    ]);
-    if driver_iso.is_some() {
-        devices.push(cdrom("sdb", driver_iso, ""));
-    }
-    if let Some(n) = network {
+    devices.extend(disk_xml(&spec.disks));
+    if let Some(n) = spec.network {
+        let mac = spec
+            .mac
+            .map(|m| format!("<mac address='{}'/>", esc(m)))
+            .unwrap_or_default();
         devices.push(format!(
-            "<interface type='network'><source network='{}'/><model type='virtio'/></interface>",
+            "<interface type='network'>{mac}<source network='{}'/><model type='virtio'/></interface>",
             esc(n)
         ));
     }
@@ -877,17 +1119,17 @@ fn domain_xml(
         ]
         .map(String::from),
     );
-    if vm.tpm {
+    if spec.tpm {
         devices.push("<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>".into());
     }
-    let features = if vm.windows {
+    let features = if spec.windows {
         "<acpi/><apic/><hyperv mode='custom'><relaxed state='on'/><vapic state='on'/>\
          <spinlocks state='on' retries='8191'/><vpindex state='on'/><synic state='on'/>\
          <stimer state='on'/><frequencies state='on'/></hyperv>"
     } else {
         "<acpi/><apic/>"
     };
-    let clock = if vm.windows {
+    let clock = if spec.windows {
         "<clock offset='localtime'><timer name='rtc' tickpolicy='catchup'/><timer name='pit' tickpolicy='delay'/>\
          <timer name='hpet' present='no'/><timer name='hypervclock' present='yes'/></clock>"
     } else {
@@ -896,8 +1138,8 @@ fn domain_xml(
     };
     format!(
         "<domain type='kvm'>\
-         <name>{name}</name>\
-         <metadata><vmm:owner xmlns:vmm='{OWNER_NS}'/></metadata>\
+         <name>{name}</name>{uuid}\
+         <metadata>{owner}</metadata>\
          <memory unit='MiB'>{mem}</memory><currentMemory unit='MiB'>{mem}</currentMemory>\
          <vcpu>{vcpus}</vcpu>\
          <os{firmware}><type arch='x86_64' machine='q35'>hvm</type></os>\
@@ -907,10 +1149,15 @@ fn domain_xml(
          <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='no'/></pm>\
          <devices>{devices}</devices>\
          </domain>",
-        name = esc(&vm.name),
-        mem = vm.memory_mib,
-        vcpus = vm.vcpus,
-        firmware = if vm.uefi { " firmware='efi'" } else { "" },
+        name = esc(spec.name),
+        uuid = spec
+            .uuid
+            .map(|u| format!("<uuid>{}</uuid>", esc(u)))
+            .unwrap_or_default(),
+        owner = spec.owner.element(),
+        mem = spec.memory_mib,
+        vcpus = spec.vcpus,
+        firmware = if spec.uefi { " firmware='efi'" } else { "" },
         devices = devices.concat(),
     )
 }
@@ -927,32 +1174,158 @@ mod tests {
         }
     }
 
-    #[test]
-    fn domain_xml_parses_and_escapes() {
-        let vm = NewVm {
-            name: "t".into(),
-            windows: true,
+    fn spec<'a>(disks: Vec<Disk<'a>>) -> DomainSpec<'a> {
+        DomainSpec {
+            name: "t",
+            windows: false,
             vcpus: 2,
             memory_mib: 2048,
-            disk_gib: 10,
+            uefi: false,
+            tpm: false,
+            disks,
+            network: Some("net"),
+            uuid: None,
+            mac: None,
+            owner: Owner::default(),
+        }
+    }
+
+    #[test]
+    fn domain_xml_parses_and_escapes() {
+        let xml = domain_xml(&DomainSpec {
+            windows: true,
             uefi: true,
             tpm: true,
-            iso: None,
-            driver_iso: None,
-            network: Some("default".into()),
-        };
-        let xml = domain_xml(
-            &vm,
-            "/pool/t.qcow2",
-            Some(Path::new("/isos/a'b&c.iso")),
-            None,
-            Some("net"),
-        );
+            ..spec(vec![
+                Disk::Qcow2("/pool/t.qcow2"),
+                Disk::Cdrom(Some(Path::new("/isos/a'b&c.iso"))),
+                Disk::Cdrom(None),
+            ])
+        });
         let doc = roxmltree::Document::parse(&xml).unwrap();
         let disks = parse_disks(&xml).unwrap();
-        assert_eq!(disks[1].file.as_deref(), Some("/isos/a'b&c.iso"));
         assert_eq!(disks[0].file.as_deref(), Some("/pool/t.qcow2"));
+        assert_eq!(disks[1].file.as_deref(), Some("/isos/a'b&c.iso"));
+        let targets: Vec<_> = disks.iter().map(|d| d.target.as_str()).collect();
+        assert_eq!(targets, ["vda", "sda", "sdb"]);
+        let boots: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("boot"))
+            .filter_map(|n| n.attribute("order"))
+            .collect();
+        assert_eq!(boots, ["1", "2"]);
         assert!(doc.descendants().any(|n| n.has_tag_name("tpm")));
+        assert!(doc.descendants().any(|n| n.has_tag_name("hyperv")));
+        assert_eq!(
+            child(doc.root_element(), "os")
+                .unwrap()
+                .attribute("firmware"),
+            Some("efi")
+        );
+        assert!(child(doc.root_element(), "uuid").is_none());
         assert_eq!(kib_text(&xml, "memory"), Some(2048 * 1024));
+        assert_eq!(owner_in_domain_xml(&xml).unwrap(), Some(Owner::default()));
+    }
+
+    #[test]
+    fn template_domain_xml() {
+        let owner = Owner {
+            template: Some("debian13".into()),
+            generation: Some(2),
+            expires: Some(1_794_300_000),
+        };
+        let xml = domain_xml(&DomainSpec {
+            uuid: Some("8a3f0c55-1d2e-4c6b-9f00-5b6d1e2f3a4b"),
+            mac: Some("52:54:00:12:34:56"),
+            owner: owner.clone(),
+            ..spec(vec![
+                Disk::Qcow2("/pool/t-g2.qcow2"),
+                Disk::ReadOnlyRaw("/pool/t-g2-seed.img"),
+            ])
+        });
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let disks = parse_disks(&xml).unwrap();
+        assert_eq!(disks.len(), 2);
+        assert_eq!(
+            (disks[1].target.as_str(), disks[1].file.as_deref()),
+            ("vdb", Some("/pool/t-g2-seed.img"))
+        );
+        let seed = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("disk"))
+            .nth(1)
+            .unwrap();
+        assert!(child(seed, "readonly").is_some());
+        assert_eq!(
+            child(seed, "driver").unwrap().attribute("type"),
+            Some("raw")
+        );
+        assert!(child(seed, "boot").is_none());
+        assert_eq!(
+            child(doc.root_element(), "uuid").unwrap().text(),
+            Some("8a3f0c55-1d2e-4c6b-9f00-5b6d1e2f3a4b")
+        );
+        assert_eq!(parse_nics(&xml).unwrap()[0].mac, "52:54:00:12:34:56");
+        assert!(
+            child(doc.root_element(), "os")
+                .unwrap()
+                .attribute("firmware")
+                .is_none()
+        );
+        assert_eq!(owner_in_domain_xml(&xml).unwrap(), Some(owner));
+    }
+
+    #[test]
+    fn owner_element_round_trips() {
+        let owner = Owner {
+            template: Some("a'b".into()),
+            generation: Some(7),
+            expires: Some(42),
+        };
+        assert_eq!(Owner::from_element(&owner.element()).unwrap(), owner);
+        assert_eq!(
+            Owner::from_element(&Owner::default().element()).unwrap(),
+            Owner::default()
+        );
+        let garbled = format!("<o xmlns='{OWNER_NS}' generation='x' expires='-1'/>");
+        assert_eq!(Owner::from_element(&garbled).unwrap(), Owner::default());
+    }
+
+    #[test]
+    fn domains_without_our_owner_element_are_not_owned() {
+        let plain = "<domain><name>x</name></domain>";
+        assert_eq!(owner_in_domain_xml(plain).unwrap(), None);
+        let other = "<domain><name>x</name><metadata>\
+                     <o:owner xmlns:o='http://example.com/owner/1' template='debian13'/>\
+                     </metadata></domain>";
+        assert_eq!(owner_in_domain_xml(other).unwrap(), None);
+        let renamed =
+            format!("<domain><metadata><v:creator xmlns:v='{OWNER_NS}'/></metadata></domain>");
+        assert_eq!(owner_in_domain_xml(&renamed).unwrap(), None);
+    }
+
+    #[test]
+    fn overlay_xml_names_backing_file() {
+        let xml = overlay_xml("t-g1.qcow2", 10 << 30, "/pool/tpl&.qcow2");
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let backing = doc
+            .descendants()
+            .find(|n| n.has_tag_name("backingStore"))
+            .unwrap();
+        assert_eq!(
+            child(backing, "path").unwrap().text(),
+            Some("/pool/tpl&.qcow2")
+        );
+        assert_eq!(
+            child(doc.root_element(), "capacity").unwrap().text(),
+            Some("10737418240")
+        );
+    }
+
+    #[test]
+    fn new_uuids_differ() {
+        let (a, b) = (new_uuid(), new_uuid());
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
     }
 }

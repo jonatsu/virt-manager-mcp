@@ -12,7 +12,7 @@
   {
     "tool": "create_vm",
     "args": {
-      "name": "trial-new",
+      "name": "t-new",
       "os": "linux",
       "vcpus": 4,
       "memory_mib": 512,
@@ -32,7 +32,7 @@
   {
     "tool": "create_vm",
     "args": {
-      "name": "trial-new",
+      "name": "t-new",
       "os": "linux",
       "vcpus": 1,
       "memory_mib": 512,
@@ -43,7 +43,7 @@
   {
     "tool": "create_vm",
     "args": {
-      "name": "trial-new2",
+      "name": "t-new2",
       "os": "linux",
       "vcpus": 1,
       "memory_mib": 512,
@@ -53,7 +53,7 @@
   {
     "tool": "create_vm",
     "args": {
-      "name": "trial-new3",
+      "name": "t-new3",
       "os": "linux",
       "vcpus": 1,
       "memory_mib": 512,
@@ -67,27 +67,27 @@
   {
     "tool": "describe_vm",
     "args": {
-      "vm": "trial-new"
+      "vm": "t-new"
     }
   },
   {
     "tool": "start_vm",
     "args": {
-      "vm": "trial-new",
+      "vm": "t-new",
       "wait_for_agent_secs": 0
     }
   },
   {
     "tool": "stop_vm",
     "args": {
-      "vm": "trial-new",
+      "vm": "t-new",
       "force": true
     }
   },
   {
     "tool": "delete_vm",
     "args": {
-      "vm": "trial-new"
+      "vm": "t-new"
     }
   }
 ]
