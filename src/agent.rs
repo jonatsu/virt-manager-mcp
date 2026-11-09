@@ -21,6 +21,20 @@ const WRITE_CHUNK: usize = 64 * 1024;
 /// Mode for files that `write_from` creates when the caller gives none: what a umask of 022 gives.
 pub const DEFAULT_FILE_MODE: u32 = 0o644;
 
+/// Calls `ready` every `every` until it returns true or `wait` has passed. Checks at least once.
+pub fn wait_for(wait: Duration, every: Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    loop {
+        if ready() {
+            return true;
+        }
+        if start.elapsed() >= wait {
+            return false;
+        }
+        std::thread::sleep(every.min(wait.saturating_sub(start.elapsed())));
+    }
+}
+
 /// Timeout for the small helper commands (`test`, `chmod`) that file writes run.
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -444,5 +458,46 @@ mod mode_tests {
     fn explicit_mode_applies_to_new_and_existing_files() {
         assert_eq!(mode_to_set(false, Some(0o600)), Some(0o600));
         assert_eq!(mode_to_set(true, Some(0o640)), Some(0o640));
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn wait_for_returns_once_ready() {
+        let mut calls = 0;
+        let ready = wait_for(Duration::from_secs(5), Duration::ZERO, || {
+            calls += 1;
+            calls == 3
+        });
+        assert!(ready);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn wait_for_checks_once_with_zero_wait() {
+        let mut calls = 0;
+        assert!(!wait_for(Duration::ZERO, Duration::from_secs(1), || {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn wait_for_gives_up_after_the_wait() {
+        let start = Instant::now();
+        assert!(!wait_for(
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+            || false
+        ));
+        let took = start.elapsed();
+        assert!(
+            took >= Duration::from_millis(50) && took < Duration::from_secs(1),
+            "{took:?}"
+        );
     }
 }

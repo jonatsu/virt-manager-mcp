@@ -1,0 +1,34 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "systemd-run --on-active=20 --timer-property=AccuracySec=1s systemctl start qemu-guest-agent && nohup sh -c 'sleep 1; systemctl stop qemu-guest-agent' >/dev/null 2>&1 &"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 4
+    }
+  },
+  {
+    "tool": "list_vms"
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_for_agent_secs": 60
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "list_vms"
+  }
+]

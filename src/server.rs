@@ -627,16 +627,7 @@ impl VirtServer {
             if !wait.is_zero() {
                 let dom = s.hv.domain(&p.vm)?;
                 let agent = Agent::new(&dom, 2);
-                let start = std::time::Instant::now();
-                let ready = loop {
-                    if agent.ping() {
-                        break true;
-                    }
-                    if start.elapsed() >= wait {
-                        break false;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                };
+                let ready = agent::wait_for(wait, Duration::from_secs(1), || agent.ping());
                 msg.push_str(if ready {
                     "; guest agent is responding"
                 } else {

@@ -77,8 +77,11 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    file keeps its mode unless `mode` is given. `copy_to_vm` shares the path, so its new files get 644 too.
    `tests/testbed/cases/write-file-mode.json` shows 644, 600, a kept 640 after append and overwrite, and a refused
    `4755`.
-4. **`start_vm` on a running VM ignores `wait_for_agent_secs`.** It returns "already running" at once, even when the
-   guest agent is not yet up. Evidence: `start_vm` on a running VM whose agent is down waits up to the given time.
+4. **Dropped: `start_vm` on a running VM does wait for the guest agent.** The trial's guest had no agent installed,
+   and the call was never timed (agent-setup correction `d346adb4`). In
+   `tests/testbed/cases/start-vm-waits-for-agent.json`, the agent is stopped and restarts 20 s later; `start_vm` with
+   `wait_for_agent_secs: 60` returns about 17 s after the call, reporting the agent responding. The wait loop is now
+   `agent::wait_for`, with unit tests.
 
 ## Features
 

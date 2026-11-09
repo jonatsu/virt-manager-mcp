@@ -22,6 +22,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `console-stall.json` | Logs in as root on the serial console, rereading from offset 0 with `wait_ms`. |
 | `console-after-start.json` | Opens the console during boot and reads one byte at a time. |
 | `write-file-mode.json` | `write_file` modes: 644 by default, an explicit `600`, a kept `640` on append and overwrite, a refused `4755`. |
+| `start-vm-waits-for-agent.json` | Stops the guest agent, which restarts 20 s later; `start_vm` waits and reports it responding. |
 | `console-closed-on-power-off.json` | Powers the guest off from inside under an open console; the read reports the console closed. The case starts the VM again. |
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
@@ -39,8 +40,9 @@ python3 -I "$REPO/tests/testbed/mcp_call.py" "$REPO/tests/testbed/cases/smoke.js
   "$REPO/target/release/virtmanager-mcp" --config "$REPO/tests/testbed/config.toml"
 ```
 
-Set `REPO` to the repository root first. A call list may use the special tool `__list__`, which prints every
-advertised tool with its input properties.
+Set `REPO` to the repository root first. A call list may use three special tools: `__list__` prints every advertised
+tool with its input properties, `__sleep__` pauses for `args.secs` seconds, and `__time__` prints a timestamp, so the
+time between two of them measures the calls in between.
 
 ## Recreate the guest
 

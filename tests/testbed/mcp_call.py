@@ -1,8 +1,9 @@
 """Drive an MCP stdio server through a scripted list of tool calls.
 
 Usage: python3 -I mcp_call.py <calls.json> -- <server command...>
-calls.json is a list of {"tool": name, "args": {...}}; the special tool
-"__list__" prints every advertised tool with its input properties.
+calls.json is a list of {"tool": name, "args": {...}}. Special tools: "__list__" prints every
+advertised tool with its input properties, "__sleep__" pauses for args.secs seconds, and
+"__time__" prints a monotonic timestamp, to time the calls between two of them.
 """
 
 import base64
@@ -10,6 +11,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 
 MAX_TEXT = 500000
 
@@ -54,6 +56,12 @@ def main() -> int:
     receive(proc, 0)
     send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
     for n, call in enumerate(calls, start=1):
+        if call["tool"] == "__sleep__":
+            time.sleep(call["args"]["secs"])
+            continue
+        if call["tool"] == "__time__":
+            print(f"@ {time.monotonic():.1f}s")
+            continue
         if call["tool"] == "__list__":
             send(proc, {"jsonrpc": "2.0", "id": n, "method": "tools/list"})
             for tool in receive(proc, n)["result"]["tools"]:
