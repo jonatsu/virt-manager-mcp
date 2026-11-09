@@ -16,7 +16,7 @@ flowchart LR
   B[Baseline: build gate, agent docs, README fixes] --> D1[Console stall]
   B --> D3[write_file mode]
   B --> D4[start_vm wait]
-  D1 --> D2[Console closed state]
+  B --> D2[Test console closed state]
   D1 --> W[Wait tool]
   B --> A[Tool annotations]
   B --> IT[Integration tests]
@@ -42,9 +42,10 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
 4. **Done: README drift fixed.** The README now names the real template files, `example-global-CLAUDE.md` and
    `example-global-AGENTS.md`, builds with `--locked`, and says that this fork publishes no release binaries.
    Upstream's own release is `v1.0`, while `Cargo.toml` says `0.1.0`. Judgement call: upstream's joke first line
-   gave way to a header that names the fork, its upstream and this roadmap. To undo it, restore line 1 from
-   upstream commit `f47d3c3`.
-5. **Done: hygiene files.** `.editorconfig`, `.gitattributes` and a pre-commit configuration come from the
+   gave way to a paragraph under the title that names the fork, its upstream and this roadmap. To undo it, remove
+   that paragraph and restore upstream's first line from commit `f47d3c3`.
+5. **Done: hygiene files.** `.editorconfig`, `.gitattributes`, `.pre-commit-config.yaml` and the hook configs
+   (`.markdownlint-cli2.jsonc`, `.mdformat.toml`, `.secretlintrc.json`, `.yamlfmt.yaml`, `.yamllint.yaml`) come from the
    `repo-management` baseline, adapted to Rust with report-only `cargo fmt --check` and `cargo clippy` hooks. Node
    hooks use the host's Node.js, because nodeenv in pre-commit 4.7.0 crashed while choosing a download. Betterleaks
    stays on its latest stable release, `v1.10.0`, rather than the `v2.0.0-rc.7` that `pre-commit autoupdate` picked.
@@ -63,9 +64,10 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    earlier read returned, then until the output pauses for 500 ms, whatever `since` is. `console-stall.json`, run
    unchanged against `trial-deb13`, now shows the `Password:` prompt, the motd and a root shell prompt. The evidence
    is in [`docs/research/2026-11-09-console-read-wait.md`](../research/2026-11-09-console-read-wait.md).
-2. **`console_read` keeps reporting `closed: null` after the VM powers off.** It shares the reader thread in
-   `src/console.rs` with the first defect. Evidence: after a forced `stop_vm`, `console_read` reports the console
-   closed.
+2. **Untested: does `console_read` report a console closed by a power-off?** The trial reported `closed: null`
+   after a power-off, but its reads all finished before the power-off happened, so the claim is withdrawn (see the
+   correction in agent-setup `f2e697c0`). Test it first: open a console, force `stop_vm`, then read. Evidence: the
+   read reports the console closed, or this item is dropped.
 3. **`write_file` creates new files with mode 666.** Tighten the default, set the mode after writing, and consider a
    `mode` parameter. Evidence: a new file has the chosen mode, and an appended existing file keeps its own.
 4. **`start_vm` on a running VM ignores `wait_for_agent_secs`.** It returns "already running" at once, even when the

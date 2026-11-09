@@ -24,14 +24,15 @@ pre-commit run --all-files
 ```
 
 Formatting uses default rustfmt settings. The unit tests never touch libvirt. Run `pre-commit install` once per
-clone. Leave `docs/research/` and `example-global-*.md` out of the Markdown formatters: they are verbatim copies
-and prompt templates.
+clone. Leave `docs/research/` and `example-global-*.md` out of the Markdown formatters: they hold dated records, some
+copied verbatim, and prompt templates.
 
 ## Guardrails
 
 The server's safety comes from operator config that defaults to deny. Do not weaken it as a side effect.
 
-- `Config::is_allowed` in `src/config.rs` hides every VM that `allowed_vms` does not list.
+- `Config::is_allowed` in `src/config.rs` hides every VM that `allowed_vms` does not list, unless the list holds
+  `"*"`. While VM management is on, VMs the server created stay visible too.
 - `is_owned` in `src/manage.rs` reads the owner element in the `OWNER_NS` metadata namespace. Only `create_vm` sets
   it, inside the new domain's XML. No tool may write it later, because an agent could then claim another VM.
 - `Hypervisor::can_manage` in `src/hypervisor.rs` limits management tools to owned VMs and to `manage_vms`.
