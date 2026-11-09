@@ -39,10 +39,11 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    change must not weaken, and the rule that testing never touches VMs outside the test bed. It also marks the two
    `example-global-*.md` files as templates for the server's users, not instructions for contributors. The
    `agents-context-docs` checker passes.
-4. **Fix README drift.** The README names `global-CLAUDE.md` and `global-AGENTS.md`, but the files are
-   `example-global-CLAUDE.md` and `example-global-AGENTS.md`. Its build step omits `--locked`. It points users at the
-   upstream `v1.0` release binary, while `Cargo.toml` says `0.1.0`. Its first line is upstream's joke, which this
-   fork should either keep with attribution or replace with a line that names the fork and its upstream.
+4. **Done: README drift fixed.** The README now names the real template files, `example-global-CLAUDE.md` and
+   `example-global-AGENTS.md`, builds with `--locked`, and says that this fork publishes no release binaries.
+   Upstream's own release is `v1.0`, while `Cargo.toml` says `0.1.0`. Judgement call: upstream's joke first line
+   gave way to a header that names the fork, its upstream and this roadmap. To undo it, restore line 1 from
+   upstream commit `f47d3c3`.
 5. **Add hygiene files.** `.gitignore` holds only `/target`. Add `.editorconfig`, `.gitattributes` and a pre-commit
    configuration from the `repo-management` baseline, adapted to Rust. Evidence: a second pre-commit pass changes
    nothing.

@@ -1,6 +1,8 @@
-The commits are the only non-vibecoded part of this project, and also this line. Rust is hard man. And I'm too lazy to learn.
-
 # virtmanager-mcp
+
+This is a fork of [KubeRl/MCP-Server-For-VirtManager-AI](https://github.com/KubeRl/MCP-Server-For-VirtManager-AI),
+adapted for agents that create and destroy throwaway test VMs. Planned work is in
+[docs/plans/fork-roadmap.md](docs/plans/fork-roadmap.md).
 
 An MCP server that gives an AI access to libvirt / virt-manager VMs:
 command execution, file access, copying host files into guests, the serial console, screenshots
@@ -54,10 +56,11 @@ Requires the libvirt development files (`libvirt` on Arch, `libvirt-dev` on Debi
 `libvirt-devel` on Fedora).
 
 ```sh
-cargo build --release
+cargo build --release --locked
 # binary: target/release/virtmanager-mcp
 ```
-Obviously, you don't have to build it if you download the release file.
+
+This fork publishes no release binaries; build it from source.
 
 ## Host setup
 
@@ -208,8 +211,8 @@ Two templates tell an agent to install and test software in a development VM thr
 instead of on the host, keep an inventory of what the VM contains, and use snapshots and
 disposable VMs when the management tools are enabled:
 
-- `global-CLAUDE.md` for Claude Code: copy it into `~/.claude/CLAUDE.md`.
-- `global-AGENTS.md` for agents that read `AGENTS.md` (e.g. Codex: `~/.codex/AGENTS.md`).
+- `example-global-CLAUDE.md` for Claude Code: copy it into `~/.claude/CLAUDE.md`.
+- `example-global-AGENTS.md` for agents that read `AGENTS.md` (e.g. Codex: `~/.codex/AGENTS.md`).
 
 Adjust the VM name in them to yours. Both use the same inventory directory, so agents share it.
 
