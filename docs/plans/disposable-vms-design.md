@@ -1,7 +1,8 @@
 # Disposable VMs from templates: design
 
 Status: accepted by the user on 2026-11-09, with the recommended lifetime policy and Debian 13 as the first
-template. Once built, the code wins and this design follows it.
+template, then revised for the plan-critic review of the same day. Once built, the code wins and this design follows
+it.
 Basis: roadmap outcome 1 in [`fork-roadmap.md`](fork-roadmap.md), shaped by the confirmed draft
 [`disposable-vms-draft.md`](disposable-vms-draft.md), with evidence in
 [`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md).
@@ -27,9 +28,14 @@ configurable. The rest are recommendations:
   as a disk, removes it with the overlay.
 - **New tools rather than new `create_vm` parameters,** because the ISO, TPM and firmware parameters do not apply to a
   template.
-- **Reset replaces the disks and keeps the domain,** so the VM's name, UUID and MAC address survive.
+- **Reset replaces the disks and keeps the domain,** so the VM's name, UUID and MAC address survive. Volumes carry
+  the generation in their names (`<name>-g<N>.qcow2`, `<name>-g<N>-seed.img`), so a reset builds the new disks before
+  it removes the old ones.
+- **Names of VMs from templates are hostnames:** lowercase letters, digits and hyphens, starting with a letter, at most
+  63 characters. The name becomes the guest's hostname unchanged.
 - **Expiry by a sweep in every server process,** at start and once a minute, plus a `virtmanager-mcp sweep` command for
-  an optional systemd timer. No new daemon.
+  an optional systemd timer. No new daemon. `expires` holds UTC epoch seconds, and `manage.max_lifetime_minutes`
+  (default 1440) caps what an agent may ask for.
 - **User data comes from the operator only.** Agents already have root in the guest through `exec`.
 
 ## Behaviour
@@ -54,7 +60,8 @@ from it fails with the reason. `list_templates` also reports how many owned VMs 
 The operator must never boot, change or delete a template while VMs use it. A new version gets a new volume name. A
 tracked script, `scripts/make-template.sh`, with a short how-to, builds a template: it downloads and verifies an
 official cloud image, clones it into the pool, boots it once with a seed that installs the guest agent, runs
-`cloud-init clean --logs --machine-id`, powers it off and removes the temporary domain.
+`cloud-init clean --logs --machine-id`, powers it off and removes the temporary domain. Its check is the Debian 13
+template that the first build slice boots.
 
 ### Creating a VM
 
@@ -64,8 +71,8 @@ template.
 
 ```mermaid
 flowchart LR
-  A[Check name, limits,<br/>max_vms, template] --> B[Create overlay<br/>name.qcow2]
-  B --> C[Build and upload seed<br/>name-seed.img]
+  A[Check name, limits,<br/>max_vms, template] --> B[Create overlay<br/>name-g1.qcow2]
+  B --> C[Build and upload seed<br/>name-g1-seed.img]
   C --> D[Define domain with<br/>owner metadata]
   D --> E[Start and wait<br/>for guest agent]
   B -. failure .-> X[Delete volumes<br/>created so far]
@@ -79,23 +86,40 @@ flowchart LR
   `local-hostname: <name>`. Its `user-data` is the template's file, or a bare `#cloud-config`.
 - The owner element gains `template`, `generation` and, with a lifetime, `expires` attributes. Only the server writes
   them, at create and reset.
-- A new volume name may not match a template volume.
+- If starting or the agent wait fails after the domain is defined, the VM is kept and the result says so, as
+  `start_vm` does today.
 - The result names the VM, its template, its expiry, and whether the guest agent responds.
 
 ### Resetting a VM
 
 `reset_vm` returns a VM made from a template to the template's state. It needs `manage.create` and `manage.delete`,
-because it destroys the VM's disk state, and it refuses VMs made by `create_vm`. It forces the VM off, deletes its
-snapshots' metadata (their data lives in the overlay), replaces the overlay and seed, increments the generation, and
-starts the VM again. The expiry does not change. If the template has gone, the reset stops with the old disks deleted,
-and only `delete_vm` remains useful.
+because it destroys the VM's disk state, and it refuses VMs made by `create_vm`. In order:
+
+1. Check the template and read the old overlay's capacity. A failed check stops the reset with nothing changed.
+2. Force the VM off, and delete its snapshots' metadata. Snapshots are internal, so their data lives in the overlay.
+3. Create the next generation's overlay, with the old capacity, and its seed.
+4. Redefine the domain with the new disks, the same UUID and MAC address, and the new owner attributes. If this fails,
+   delete the new volumes; the old ones are still in place.
+5. Delete the old overlay, the old seed, and every other pool disk an agent attached with `attach_disk`, so nothing of
+   the old state is left. A volume that cannot be deleted is named in the result.
+6. Start the VM and wait for the agent, as at creation. The expiry does not change.
 
 ### Expiry
 
-Each server process sweeps at start and every 60 s: it forces off and deletes every owned VM whose `expires` has
-passed. Two processes may sweep the same VM; the one that finds it gone treats that as done. Expiry runs whether or not
-`manage.delete` is on, because the lifetime is the operator's policy, but it touches only owned VMs that have
-`expires`. Each deletion is logged on stderr.
+The sweep runs when `manage.create` is on, at least one template is configured, and `read_only` is off; the `sweep`
+command uses the same config and the same gate. It does not need `manage.delete`, because the lifetime is the
+operator's policy, but it touches only owned VMs that have `expires`.
+
+The server starts one sweep thread in `main`, at start and then every 60 s, not one per HTTP session. For each owned VM
+whose `expires` has passed, the sweep:
+
+1. Notes the VM's UUID, then looks the domain up again by that UUID and re-reads `expires` just before acting. A VM
+   deleted and recreated under the same name in the meantime is therefore left alone.
+2. Forces the VM off through its own path, because `delete_vm` refuses running VMs.
+3. Undefines it and deletes its volumes in `manage.disk_pool`, then logs the deletion on stderr. A volume outside the
+   pool, or one whose deletion fails, is logged by name, because no later sweep can find it again.
+
+Two processes may sweep the same VM; the one that finds it gone treats that as done.
 
 ## Invariants
 
@@ -103,6 +127,20 @@ passed. Two processes may sweep the same VM; the one that finds it gone treats t
 - Every multi-step operation deletes the volumes it created when a later step fails.
 - Deleting, resetting or expiring a VM leaves no volume of its old state in the pool.
 - Configs without `[manage.templates]` behave as today, and the new tools stay hidden.
+- A reset never leaves the VM without disks: the new disks exist before the old ones are removed.
+
+## Code changes
+
+These follow from the design and the code as it stands:
+
+- `domain_xml` in `src/manage.rs` takes a list of disks, the firmware and the owner attributes instead of one disk and
+  an empty CD-ROM.
+- Volume creation gains a raw volume sized in bytes, for the seed, and a qcow2 volume with a `<backingStore>`, for the
+  overlay. The seed upload aborts its libvirt stream on every error path, because `virt`'s `Stream` panics on drop
+  when freeing fails.
+- Tool gating in `src/server.rs` gains combined conditions: all three tools need a configured template, and `reset_vm`
+  needs both `create` and `delete`. The server's instructions text names the new tools.
+- The command line gains subcommands: serving stays the default, and `sweep` runs one sweep and exits.
 
 ## Risks
 
@@ -123,8 +161,15 @@ passed. Two processes may sweep the same VM; the one that finds it gone treats t
 
 ## Checks
 
+- The first build slice boots a VM from a `fatfs` seed and the Debian 13 template, and cloud-init applies its
+  hostname, before anything else builds on the seed.
 - With a Debian 13 template, `create_vm_from_template` reports the guest agent responding within about 10 s.
-- After `delete_vm`, `reset_vm` and an expiry, `virsh vol-list` shows no volume of the VM's old state.
+- After `delete_vm`, `reset_vm` and an expiry, `virsh vol-list` shows no volume of the VM's old state, including disks
+  added with `attach_disk`.
 - The template volume's checksum is unchanged after a create, a reset and a delete.
-- Unit tests cover the config parsing, the seed contents and the expiry selection; failure paths cover a failed
-  upload, a failed define, a missing template, a template in use as a disk, and two processes sweeping one VM.
+- Without `[manage.templates]`, the new tools are not advertised; `reset_vm` refuses a VM made by `create_vm`; the
+  sweep skips owned VMs without `expires`; a template that fails its checks is hidden; `virtmanager-mcp sweep` deletes
+  an expired VM and exits.
+- Unit tests cover the config parsing, the hostname rule, the seed contents and the expiry selection. Failure paths
+  cover a failed upload, a failed define, a missing template at create and at reset, a template in use as a disk, a
+  start failure after define, and two processes sweeping one VM.
