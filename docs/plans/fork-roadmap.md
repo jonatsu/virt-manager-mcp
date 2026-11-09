@@ -30,8 +30,8 @@ flowchart LR
 
 The fork audit on 2026-11-09 found the items below. None of them changes the server's behavior.
 
-1. **Build and test gate: passing.** `cargo build --locked`, `cargo test --locked` (10 unit tests, none touching
-   libvirt) and `cargo clippy --locked --all-targets` pass with no warnings on rustc 1.99.1.
+1. **Build and test gate: passing.** `cargo build --locked`, `cargo test --locked` (10 unit tests at the audit, none
+   touching libvirt) and `cargo clippy --locked --all-targets` pass with no warnings on rustc 1.99.1.
 2. **Done: reformatted once with default rustfmt.** Upstream did not run rustfmt with default settings. The fork
    diverges from upstream rather than tracking it, so it reformatted in a commit of its own and keeps default
    settings. `cargo fmt --check` passes.
@@ -61,7 +61,8 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    showed the whole trial sequence finishing in about 70 ms. With real pauses, a full login over the console worked
    unchanged, and the stream-event hypothesis was refuted. The fix makes a waiting read wait for output that no
    earlier read returned, then until the output pauses for 500 ms, whatever `since` is. `console-stall.json`, run
-   unchanged against `trial-deb13`, now shows the `Password:` prompt, the motd and a root shell prompt.
+   unchanged against `trial-deb13`, now shows the `Password:` prompt, the motd and a root shell prompt. The evidence
+   is in [`docs/research/2026-11-09-console-read-wait.md`](../research/2026-11-09-console-read-wait.md).
 2. **`console_read` keeps reporting `closed: null` after the VM powers off.** It shares the reader thread in
    `src/console.rs` with the first defect. Evidence: after a forced `stop_vm`, `console_read` reports the console
    closed.

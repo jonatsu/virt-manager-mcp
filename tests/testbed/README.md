@@ -19,7 +19,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `smoke.json` | Tool listing, `guest_info`, `exec` with a timeout, file round-trip, and refusal of a VM outside `allowed_vms`. |
 | `guest-agent-and-snapshots.json` | `exec` exit codes, stderr, stdin and timeout; literal argument passing; files; snapshot create, revert and delete. |
 | `lifecycle-guardrails.json` | `create_vm` refusals (bad name, vCPU cap, existing name, `max_vms`, ISO outside `iso_dirs`), then start, stop and delete. |
-| `console-stall.json` | Reproduces the serial console stall: the echo of `root` arrives, the password prompt never does. |
+| `console-stall.json` | Logs in as root on the serial console, rereading from offset 0 with `wait_ms`. |
 | `console-after-start.json` | Opens the console during boot and reads one byte at a time. |
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
