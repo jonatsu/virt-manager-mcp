@@ -5,6 +5,7 @@ mod display;
 mod fsops;
 mod hypervisor;
 mod manage;
+mod seed;
 mod server;
 
 use std::path::PathBuf;
