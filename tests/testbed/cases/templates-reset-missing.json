@@ -1,0 +1,46 @@
+[
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-s"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-s"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-s",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-s"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-r",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-r"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-plain"
+    }
+  }
+]

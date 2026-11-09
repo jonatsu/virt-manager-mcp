@@ -451,6 +451,167 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
     })
 }
 
+/// Returns a VM made from a template to the template's state, keeping its name, UUID, MAC address, hardware and
+/// expiry. The new disks exist before the old ones are deleted, so a failure leaves the VM with one complete set.
+/// The VM is left shut off; `start_after_reset` starts it.
+pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
+    let m = &hv.config.manage;
+    let dom = hv.manage_domain(name)?;
+    let _guard = LOCK.lock().unwrap();
+    // can_manage also passes VMs listed in manage_vms, so ownership and the template come from the owner element.
+    let owner =
+        owner_of(&dom).ok_or_else(|| anyhow!("VM '{name}' was not created by this server"))?;
+    let (Some(template_name), Some(generation)) = (owner.template.clone(), owner.generation) else {
+        bail!(
+            "VM '{name}' was not made from a template; only VMs from create_vm_from_template can be reset"
+        );
+    };
+    hv.with_conn(|conn| {
+        // 1. Everything that can fail without changing anything.
+        let template = check_template(conn, m, &template_name)?;
+        let pool = disk_pool(conn, m)?;
+        let (old_overlay_name, _) = generation_volumes(name, generation);
+        let old_overlay = StorageVol::lookup_by_name(&pool, &old_overlay_name).map_err(|e| {
+            anyhow!(
+                "cannot find the VM's disk '{old_overlay_name}': {}; delete_vm it instead",
+                e.message()
+            )
+        })?;
+        let capacity = old_overlay.get_info()?.capacity.max(template.capacity);
+        let next = generation.checked_add(1).ok_or_else(|| {
+            anyhow!("VM '{name}' has run out of generations; delete_vm it instead")
+        })?;
+        let uuid = dom.get_uuid_string()?;
+        let (overlay_name, seed_name) = generation_volumes(name, next);
+        let seed_image = seed::build(&format!("{uuid}-{next}"), name, &template.user_data)?;
+
+        // 2. Power off and drop snapshot metadata; the snapshots' data lives in the old overlay.
+        if dom.is_active()? {
+            dom.destroy()
+                .map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;
+        }
+        for snap in dom.list_all_snapshots(0)? {
+            snap.delete(sys::VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY)
+                .map_err(|e| anyhow!("cannot remove a snapshot of '{name}': {}", e.message()))?;
+        }
+
+        // 3. The next generation's disks.
+        let overlay = create_overlay(&pool, &overlay_name, capacity, &template.path)?;
+        let seed_vol = match create_raw_volume(conn, &pool, &seed_name, &seed_image) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = overlay.delete(0);
+                return Err(e);
+            }
+        };
+
+        // 4. The same domain with the new disks and owner attributes.
+        let old_xml = inactive_xml(&dom)?;
+        let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
+        let new_owner = Owner {
+            generation: Some(next),
+            ..owner.clone()
+        };
+        let edited = replace_disks(
+            &old_xml,
+            &[Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
+        )
+        .and_then(|(xml, old)| Ok((replace_owner(&xml, &new_owner)?, old)));
+        let old_disks = match edited.and_then(|(xml, old)| {
+            Domain::define_xml(conn, &xml)
+                .map_err(|e| anyhow!("cannot redefine '{name}': {}", e.message()))?;
+            Ok(old)
+        }) {
+            Ok(old) => old,
+            Err(e) => {
+                let _ = seed_vol.delete(0);
+                let _ = overlay.delete(0);
+                return Err(e.context("the reset changed nothing; the VM keeps its old disks"));
+            }
+        };
+
+        // 5. Remove every pool disk of the old state.
+        let mut msg =
+            format!("reset VM '{name}' to template '{template_name}' (generation {next})");
+        let mut left = Vec::new();
+        for d in &old_disks {
+            match pool_volume(conn, &pool, &m.disk_pool, d) {
+                Some(vol) => {
+                    if let Err(e) = vol.delete(0) {
+                        left.push(format!("{} ({})", d.source(), e.message()));
+                    }
+                }
+                None => left.push(format!("{} (outside manage.disk_pool)", d.source())),
+            }
+        }
+        if !left.is_empty() {
+            msg.push_str(&format!(
+                "; could not delete old disks: {}",
+                left.join(", ")
+            ));
+        }
+        Ok(msg)
+    })
+}
+
+/// Starts a VM after a reset. A UEFI VM's firmware variables return to the template's defaults.
+pub fn start_after_reset(hv: &Hypervisor, name: &str) -> Result<()> {
+    let dom = hv.manage_domain(name)?;
+    let uefi = roxmltree::Document::parse(&inactive_xml(&dom)?)?
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("os"))
+        .is_some_and(|os| os.attribute("firmware") == Some("efi"));
+    let flags = if uefi {
+        sys::VIR_DOMAIN_START_RESET_NVRAM
+    } else {
+        0
+    };
+    dom.create_with_flags(flags)
+        .map_err(|e| anyhow!("cannot start '{name}': {}", e.message()))?;
+    Ok(())
+}
+
+/// Replaces every `device='disk'` disk in a domain's XML with `disks`, keeping CD-ROMs and everything else.
+/// Returns the new XML and the disks it removed.
+fn replace_disks(xml: &str, disks: &[Disk<'_>]) -> Result<(String, Vec<DiskInfo>)> {
+    let removed: Vec<DiskInfo> = parse_disks(xml)?
+        .into_iter()
+        .filter(|d| d.device == "disk")
+        .collect();
+    let Some(first) = removed.first() else {
+        bail!("the VM has no disk to replace");
+    };
+    let insert_at = first.range.start;
+    let mut out = String::with_capacity(xml.len());
+    let mut pos = 0;
+    for d in &removed {
+        out.push_str(&xml[pos..d.range.start]);
+        if d.range.start == insert_at {
+            out.push_str(&disk_xml(disks).concat());
+        }
+        pos = d.range.end;
+    }
+    out.push_str(&xml[pos..]);
+    Ok((out, removed))
+}
+
+/// Replaces the owner element in a domain's XML. Refuses XML without one: the owner element is never added to a
+/// VM that lacks it.
+fn replace_owner(xml: &str, owner: &Owner) -> Result<String> {
+    let doc = roxmltree::Document::parse(xml)?;
+    let node = child(doc.root_element(), "metadata")
+        .and_then(|md| md.children().find(|n| n.has_tag_name((OWNER_NS, "owner"))))
+        .ok_or_else(|| anyhow!("the VM has no owner element"))?;
+    let range = node.range();
+    Ok(format!(
+        "{}{}{}",
+        &xml[..range.start],
+        owner.element(),
+        &xml[range.end..]
+    ))
+}
+
 /// Undefines a shut-off VM and deletes its disk volumes that are in the disk pool.
 pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
     let dom = hv.manage_domain(name)?;
@@ -1597,6 +1758,89 @@ mod tests {
             volume_format("<volume><name>v</name></volume>").unwrap(),
             "unknown"
         );
+    }
+
+    /// A domain as libvirt returns it for a VM made from a template, after an agent attached a disk.
+    fn template_vm_xml() -> String {
+        let mut xml = domain_xml(&DomainSpec {
+            uuid: Some("8a3f0c55-1d2e-4c6b-9f00-5b6d1e2f3a4b"),
+            mac: Some("52:54:00:12:34:56"),
+            owner: Owner {
+                template: Some("debian13".into()),
+                generation: Some(1),
+                expires: Some(99),
+            },
+            ..spec(vec![
+                Disk::Qcow2("/pool/t-g1.qcow2"),
+                Disk::ReadOnlyRaw("/pool/t-g1-seed.img"),
+                Disk::Cdrom(None),
+            ])
+        });
+        let extra = "<disk type='file' device='disk'><source file='/pool/t-vdc.qcow2'/>\
+                     <target dev='vdc' bus='virtio'/></disk>";
+        xml = xml.replacen(
+            "<controller type='usb'",
+            &format!("{extra}<controller type='usb'"),
+            1,
+        );
+        xml
+    }
+
+    #[test]
+    fn reset_replaces_every_disk_and_keeps_the_rest() {
+        let old = template_vm_xml();
+        let (new, removed) = replace_disks(
+            &old,
+            &[
+                Disk::Qcow2("/pool/t-g2.qcow2"),
+                Disk::ReadOnlyRaw("/pool/t-g2-seed.img"),
+            ],
+        )
+        .unwrap();
+        let removed: Vec<_> = removed.iter().map(|d| d.source()).collect();
+        assert_eq!(
+            removed,
+            [
+                "/pool/t-g1.qcow2",
+                "/pool/t-g1-seed.img",
+                "/pool/t-vdc.qcow2"
+            ]
+        );
+        let disks = parse_disks(&new).unwrap();
+        let now: Vec<_> = disks
+            .iter()
+            .map(|d| (d.device.as_str(), d.source()))
+            .collect();
+        assert_eq!(
+            now,
+            [
+                ("disk", "/pool/t-g2.qcow2".to_string()),
+                ("disk", "/pool/t-g2-seed.img".to_string()),
+                ("cdrom", "(empty)".to_string()),
+            ]
+        );
+        assert_eq!(parse_nics(&new).unwrap()[0].mac, "52:54:00:12:34:56");
+        let doc = roxmltree::Document::parse(&new).unwrap();
+        assert_eq!(
+            child(doc.root_element(), "uuid").unwrap().text(),
+            Some("8a3f0c55-1d2e-4c6b-9f00-5b6d1e2f3a4b")
+        );
+        assert_eq!(kib_text(&new, "memory"), Some(2048 * 1024));
+    }
+
+    #[test]
+    fn reset_rewrites_owner_attributes_only_where_present() {
+        let next = Owner {
+            template: Some("debian13".into()),
+            generation: Some(2),
+            expires: Some(99),
+        };
+        let new = replace_owner(&template_vm_xml(), &next).unwrap();
+        assert_eq!(owner_in_domain_xml(&new).unwrap(), Some(next.clone()));
+        // A VM without our owner element never gains one.
+        let plain = "<domain><name>x</name><metadata><o:owner xmlns:o='http://example.com/o'/></metadata></domain>";
+        assert!(replace_owner(plain, &next).is_err());
+        assert!(replace_owner("<domain><name>x</name></domain>", &next).is_err());
     }
 
     #[test]

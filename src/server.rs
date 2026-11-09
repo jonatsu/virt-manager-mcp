@@ -37,6 +37,8 @@ const MUTATING_TOOLS: &[&str] = &[
 const CREATE_TOOLS: &[&str] = &["create_vm"];
 /// Tools behind [manage] create with at least one template.
 const TEMPLATE_TOOLS: &[&str] = &["list_templates", "create_vm_from_template"];
+/// Behind [manage] create and delete with at least one template, because a reset destroys disk state.
+const RESET_TOOLS: &[&str] = &["reset_vm"];
 const DELETE_TOOLS: &[&str] = &["delete_vm"];
 const RECONFIGURE_TOOLS: &[&str] = &[
     "configure_vm",
@@ -321,6 +323,13 @@ pub struct CreateFromTemplateParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ResetVmParams {
+    pub vm: String,
+    /// After starting, wait up to this many seconds for the guest agent to respond (default 60, max 300).
+    pub wait_for_agent_secs: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ConfigureVmParams {
     pub vm: String,
     /// New number of vCPUs (takes effect at next boot).
@@ -412,6 +421,7 @@ impl VirtServer {
         for name in [
             off(m.create, CREATE_TOOLS),
             off(m.create && !m.templates.is_empty(), TEMPLATE_TOOLS),
+            off(m.create && m.delete && !m.templates.is_empty(), RESET_TOOLS),
             off(m.delete, DELETE_TOOLS),
             off(m.reconfigure, RECONFIGURE_TOOLS),
             off(m.snapshots, SNAPSHOT_TOOLS),
@@ -971,6 +981,42 @@ impl VirtServer {
     }
 
     #[tool(
+        description = "Return a VM made by create_vm_from_template to its template's state: it is powered off, its \
+        disks, snapshots and attached disks are replaced by fresh ones from the template, and it starts again with \
+        the same name, MAC address, hardware and expiry. Everything written to its disks is lost. VMs made by \
+        create_vm cannot be reset."
+    )]
+    async fn reset_vm(
+        &self,
+        Parameters(p): Parameters<ResetVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            s.consoles.close(&p.vm);
+            let mut msg = manage::reset(&s.hv, &p.vm)?;
+            if let Err(e) = manage::start_after_reset(&s.hv, &p.vm) {
+                msg.push_str(&format!(
+                    "; it could not be started ({e:#}); use start_vm or delete_vm"
+                ));
+                return Ok(vec![ContentBlock::text(msg)]);
+            }
+            msg.push_str("; started");
+            let wait = Duration::from_secs(p.wait_for_agent_secs.unwrap_or(60).min(300));
+            if !wait.is_zero() {
+                let dom = s.hv.domain(&p.vm)?;
+                let agent = Agent::new(&dom, 2);
+                let ready = agent::wait_for(wait, Duration::from_secs(1), || agent.ping());
+                msg.push_str(if ready {
+                    "; guest agent is responding"
+                } else {
+                    "; guest agent not responding yet (the guest may still be booting)"
+                });
+            }
+            Ok(vec![ContentBlock::text(msg)])
+        })
+        .await
+    }
+
+    #[tool(
         description = "Delete a shut-off VM with managed: true in list_vms, including its snapshots, NVRAM and TPM \
         state. Its disks in the server's disk pool are deleted; other disks and ISOs are left in place. Cannot be undone."
     )]
@@ -1248,6 +1294,9 @@ fn manage_instructions(m: &crate::config::Manage) -> String {
              VM may be given a lifetime of at most {} minutes, after which the server deletes it.",
             m.max_lifetime_minutes
         ));
+        if m.delete {
+            out.push_str(" reset_vm returns such a VM to its template's state.");
+        }
     }
     out
 }

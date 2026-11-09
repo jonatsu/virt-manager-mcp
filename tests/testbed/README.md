@@ -33,6 +33,11 @@ The template cases below run with `config-templates.toml`. They need the templat
 | Case | What it exercises |
 | -- | -- |
 | `templates-create.json` | `list_templates` hiding a missing volume; three VMs from templates, one UEFI, timed to a responding agent; hostname, size and lifetime refusals and `max_vms`; deletion of overlays, seeds and attached disks. |
+| `templates-reset.json` | Resets a VM with a marker file, a snapshot and an attached disk; refuses the unowned `t-listed`, a `create_vm` VM and `trial-deb13`; leaves `t-s` running on the `scratch` template. |
+| `templates-reset-missing.json` | Run after `virsh vol-delete --pool agent-vms tpl-scratch.qcow2`: the reset of `t-s` fails with its disks in place, then the case deletes its VMs. |
+
+`templates-reset.json` needs `t-listed`, a VM defined with `virsh` and never started, and `tpl-scratch.qcow2`, made with
+`virsh vol-clone --pool agent-vms tpl-debian13.qcow2 tpl-scratch.qcow2`.
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
 `Password:` prompt and a root shell prompt. It leaves root logged in on `ttyS0`; send `exit` to log out.

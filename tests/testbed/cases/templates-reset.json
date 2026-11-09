@@ -1,0 +1,106 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-r",
+      "template": "debian13",
+      "lifetime_minutes": 60
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-r",
+      "command": "cat /sys/class/dmi/id/product_uuid; ip -o link | grep -o 'ether [0-9a-f:]*'; hostname"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "t-r",
+      "path": "/root/marker",
+      "content": "old state\n"
+    }
+  },
+  {
+    "tool": "snapshot_create",
+    "args": {
+      "vm": "t-r",
+      "snapshot": "s1"
+    }
+  },
+  {
+    "tool": "attach_disk",
+    "args": {
+      "vm": "t-r",
+      "size_gib": 1
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-r"
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-r",
+      "command": "test -e /root/marker && echo marker-present || echo marker-gone; cat /sys/class/dmi/id/product_uuid; ip -o link | grep -o 'ether [0-9a-f:]*'; hostname; cloud-init status"
+    }
+  },
+  {
+    "tool": "snapshot_list",
+    "args": {
+      "vm": "t-r"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-r"
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-listed"
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-plain",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-plain"
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "trial-deb13"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-s",
+      "template": "scratch",
+      "wait_for_agent_secs": 0
+    }
+  }
+]
