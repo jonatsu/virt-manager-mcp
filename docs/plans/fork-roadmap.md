@@ -147,7 +147,8 @@ Open questions for the designs:
 
 ## Current goal
 
-The user armed an autopilot run on 2026-11-10 over outcome 1. The earlier runs, over the baseline and the defects,
+The user armed an autopilot run on 2026-11-10 over outcome 1. It landed outcome 1 in `aacafce` to `b738fee`, with
+the evidence for each criterion in the plan's execution record. The earlier runs, over the baseline and the defects,
 are done.
 
 - **Objective:** disposable VMs from operator templates work as
