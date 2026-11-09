@@ -19,6 +19,11 @@ use crate::hypervisor::Hypervisor;
 
 const POLL: Duration = Duration::from_millis(30);
 
+/// How long output must pause before a waiting read returns. A guest answers
+/// in bursts (echo, then a prompt), so returning on the first byte would split
+/// one answer across reads.
+const SETTLE: Duration = Duration::from_millis(500);
+
 #[derive(Default)]
 struct Buffer {
     data: VecDeque<u8>,
@@ -26,6 +31,62 @@ struct Buffer {
     start: u64,
     /// Set once the stream ended; holds the reason.
     closed: Option<String>,
+    /// Highest offset any read has returned. A waiting read waits for output
+    /// beyond it, so rereading from an old offset still waits for the guest.
+    delivered: u64,
+}
+
+impl Buffer {
+    fn end(&self) -> u64 {
+        self.start + self.data.len() as u64
+    }
+
+    /// Output from absolute offset `since` (None = only the latest `max_bytes`).
+    fn slice(&self, since: Option<u64>, max_bytes: usize) -> ReadResult {
+        let end = self.end();
+        let from = match since {
+            Some(s) => s.min(end),
+            None => end.saturating_sub(max_bytes as u64).max(self.start),
+        };
+        let dropped = self.start.saturating_sub(from);
+        let from = from.max(self.start);
+        let skip = (from - self.start) as usize;
+        let data: Vec<u8> = self
+            .data
+            .iter()
+            .skip(skip)
+            .take(max_bytes)
+            .copied()
+            .collect();
+        ReadResult {
+            next: from + data.len() as u64,
+            data,
+            dropped,
+            closed: self.closed.clone(),
+        }
+    }
+}
+
+/// Tracks when the buffer end last moved, to tell when a waiting read may return.
+#[derive(Default)]
+struct Settle {
+    last: Option<(u64, Instant)>,
+}
+
+impl Settle {
+    /// True once output beyond `delivered` exists and `end` has not moved for `SETTLE`.
+    fn ready(&mut self, end: u64, delivered: u64, now: Instant) -> bool {
+        if end <= delivered {
+            return false;
+        }
+        match self.last {
+            Some((seen, at)) if seen == end => now.duration_since(at) >= SETTLE,
+            _ => {
+                self.last = Some((end, now));
+                false
+            }
+        }
+    }
 }
 
 struct Session {
@@ -119,7 +180,9 @@ impl Consoles {
     }
 
     /// Returns buffered output from absolute offset `since` (None = only the
-    /// latest `tail` bytes). Waits up to `wait` for new data if none is available.
+    /// latest `max_bytes` bytes). A non-zero `wait` first waits up to that long
+    /// for output that no earlier read returned, then until it pauses for
+    /// `SETTLE`; a zero `wait` returns at once.
     pub fn read(
         &self,
         vm: &str,
@@ -129,26 +192,19 @@ impl Consoles {
     ) -> Result<ReadResult> {
         let buffer = self.buffer(vm)?;
         let deadline = Instant::now() + wait;
+        let mut settle = Settle::default();
         loop {
             {
-                let b = buffer.lock().unwrap();
-                let end = b.start + b.data.len() as u64;
-                let from = match since {
-                    Some(s) => s.min(end),
-                    None => end.saturating_sub(max_bytes as u64).max(b.start),
-                };
-                let has_data = from < end;
-                if has_data || b.closed.is_some() || Instant::now() >= deadline {
-                    let dropped = b.start.saturating_sub(from);
-                    let from = from.max(b.start);
-                    let skip = (from - b.start) as usize;
-                    let data: Vec<u8> = b.data.iter().skip(skip).take(max_bytes).copied().collect();
-                    return Ok(ReadResult {
-                        next: from + data.len() as u64,
-                        data,
-                        dropped,
-                        closed: b.closed.clone(),
-                    });
+                let mut b = buffer.lock().unwrap();
+                let now = Instant::now();
+                if wait.is_zero()
+                    || b.closed.is_some()
+                    || now >= deadline
+                    || settle.ready(b.end(), b.delivered, now)
+                {
+                    let r = b.slice(since, max_bytes);
+                    b.delivered = b.delivered.max(r.next);
+                    return Ok(r);
                 }
             }
             std::thread::sleep(POLL);
@@ -238,4 +294,61 @@ fn read_loop(stream: &Stream, buffer: &Mutex<Buffer>, stop: &AtomicBool, cap: us
         }
     };
     buffer.lock().unwrap().closed = Some(reason);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer(text: &[u8], start: u64) -> Buffer {
+        Buffer {
+            data: text.iter().copied().collect(),
+            start,
+            ..Buffer::default()
+        }
+    }
+
+    #[test]
+    fn settle_waits_for_output_beyond_delivered() {
+        let t0 = Instant::now();
+        let mut s = Settle::default();
+        // Everything was already returned: keep waiting, however long it is quiet.
+        assert!(!s.ready(22, 22, t0));
+        assert!(!s.ready(22, 22, t0 + SETTLE * 4));
+    }
+
+    #[test]
+    fn settle_returns_once_new_output_pauses() {
+        let t0 = Instant::now();
+        let mut s = Settle::default();
+        assert!(!s.ready(30, 22, t0));
+        // More output arrives, which restarts the pause.
+        assert!(!s.ready(40, 22, t0 + SETTLE / 2));
+        assert!(!s.ready(40, 22, t0 + SETTLE));
+        assert!(s.ready(40, 22, t0 + SETTLE / 2 + SETTLE));
+    }
+
+    #[test]
+    fn slice_rereads_from_an_old_offset() {
+        let b = buffer(b"login: root\r\nPassword: ", 0);
+        let r = b.slice(Some(0), 1024);
+        assert_eq!(r.data, b"login: root\r\nPassword: ");
+        assert_eq!((r.next, r.dropped), (23, 0));
+    }
+
+    #[test]
+    fn slice_reports_bytes_dropped_from_scrollback() {
+        let b = buffer(b"Password: ", 13);
+        let r = b.slice(Some(5), 4);
+        assert_eq!(r.data, b"Pass");
+        assert_eq!((r.next, r.dropped), (17, 8));
+    }
+
+    #[test]
+    fn slice_without_since_returns_the_tail() {
+        let b = buffer(b"login: root\r\nPassword: ", 0);
+        let r = b.slice(None, 10);
+        assert_eq!(r.data, b"Password: ");
+        assert_eq!(r.next, 23);
+    }
 }

@@ -55,15 +55,16 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
 
 ## Defects
 
-1. **Serial console reads stall after the first burst.** `console_write("root")` reaches the guest and its echo comes
-   back, then no further bytes arrive, not even the password prompt. `virsh console` on the same guest works.
-   `read_loop` in `src/console.rs` polls `virStreamRecv` on a `VIR_STREAM_NONBLOCK` stream every 30 ms. The default
-   event loop is registered before connecting, in `src/main.rs`. `virsh` drives its stream from
-   `virStreamEventAddCallback` instead, but that this difference causes the stall is a hypothesis. Find the root cause
-   before choosing a fix. Evidence: `tests/testbed/cases/console-stall.json` shows the password prompt and a
-   completed login.
-2. **`console_read` keeps reporting `closed: null` after the VM powers off.** Depends on the first defect, because
-   both live in the same reader. Evidence: after a forced `stop_vm`, `console_read` reports the console closed.
+1. **Done: serial console reads appeared to stall.** The stream never stalled. `console_read` honoured `wait_ms`
+   only when no bytes existed after `since`, so a reread from `since: 0` returned at once. The trial's reads
+   therefore came back within milliseconds of each write, before the guest answered; a libvirt client debug log
+   showed the whole trial sequence finishing in about 70 ms. With real pauses, a full login over the console worked
+   unchanged, and the stream-event hypothesis was refuted. The fix makes a waiting read wait for output that no
+   earlier read returned, then until the output pauses for 500 ms, whatever `since` is. `console-stall.json`, run
+   unchanged against `trial-deb13`, now shows the `Password:` prompt, the motd and a root shell prompt.
+2. **`console_read` keeps reporting `closed: null` after the VM powers off.** It shares the reader thread in
+   `src/console.rs` with the first defect. Evidence: after a forced `stop_vm`, `console_read` reports the console
+   closed.
 3. **`write_file` creates new files with mode 666.** Tighten the default, set the mode after writing, and consider a
    `mode` parameter. Evidence: a new file has the chosen mode, and an appended existing file keeps its own.
 4. **`start_vm` on a running VM ignores `wait_for_agent_secs`.** It returns "already running" at once, even when the

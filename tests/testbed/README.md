@@ -22,7 +22,8 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `console-stall.json` | Reproduces the serial console stall: the echo of `root` arrives, the password prompt never does. |
 | `console-after-start.json` | Opens the console during boot and reads one byte at a time. |
 
-`console-stall.json` also repeats the file and snapshot checks after the console part.
+`console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
+`Password:` prompt and a root shell prompt. It leaves root logged in on `ttyS0`; send `exit` to log out.
 
 ## Run a case
 

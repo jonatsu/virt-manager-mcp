@@ -203,7 +203,8 @@ pub struct ConsoleReadParams {
     pub since: Option<u64>,
     /// Max bytes to return (default 65536).
     pub max_bytes: Option<usize>,
-    /// Wait up to this many milliseconds for new output if none is available (max 30000).
+    /// Wait up to this many milliseconds (max 30000) for output that no earlier read returned, then until the
+    /// output pauses for half a second. 0 returns at once. Waiting works with any `since`, including 0.
     #[serde(default)]
     pub wait_ms: u64,
     /// Remove ANSI escape sequences (colors, cursor movement). Default true.
