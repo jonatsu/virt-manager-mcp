@@ -211,7 +211,7 @@ against the design and this plan. Both close before the outcome counts as done.
 | -- | -- | -- | -- |
 | 1 Seed image | `aacafce`, `6a92967`, review fixes in the next `fix(seed)` commit | `fatfs` seed applied: [`2026-11-10-fatfs-seed-boot.md`](../research/2026-11-10-fatfs-seed-boot.md) | `code-reviewer`: approved; its three optional findings applied (flush errors, plain meta-data tokens, exact header line) |
 | 2 Template script | the `feat(scripts)` commit | built `tpl-debian13.qcow2` (3 GiB) in 57 s; no `t-tpl-build` domain or seed left; a second run refused; bad names and missing pools refused; SHA-256 `c280796e3989db6bb1331cd76344730afd889fd6302a750e424449ce08d101c9`. The README link to `docs/templates.md` lands with unit 8's README section, because the tools it describes do not exist before then | self-review |
-| 3 Template config |  |  |  |
+| 3 Template config | the `feat(config)` commit | unit tests: defaults, parsing, refusals (firmware, os, unknown key, template names, volume paths, zero lifetime), hostname rule; the example config parses | with unit 4 |
 | 4 Volumes and domain XML |  |  |  |
 | 5 Create from template |  |  |  |
 | 6 Reset |  |  |  |

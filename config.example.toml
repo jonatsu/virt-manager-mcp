@@ -45,6 +45,16 @@ max_vms = 2           # VMs created by this server that may exist at once
 max_vcpus = 2         # per VM
 max_memory_mib = 4096 # per VM
 max_disk_gib = 32     # per disk
+max_lifetime_minutes = 1440 # longest lifetime an agent may give a VM made from a template
+
+# Templates disposable VMs are made from, one table each (see docs/templates.md). Each VM gets a
+# thin overlay on the template volume and a seed disk with its hostname. Needs create = true.
+# [manage.templates.debian13]
+# volume = "tpl-debian13.qcow2"                    # qcow2 volume in disk_pool; never change it while VMs use it
+# os = "linux"                                     # or "windows"
+# firmware = "bios"                                # or "uefi"
+# description = "Debian 13 with qemu-guest-agent"
+# user_data = "/etc/virtmanager-mcp/debian13.yaml" # optional; must start with a #cloud-config line
 
 [limits]
 exec_timeout_secs = 60              # default per-call exec timeout

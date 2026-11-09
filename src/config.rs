@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -57,6 +58,46 @@ pub struct Manage {
     pub max_memory_mib: u64,
     /// Max size of a single disk.
     pub max_disk_gib: u64,
+    /// Longest lifetime an agent may give a VM made from a template.
+    pub max_lifetime_minutes: u32,
+    /// Templates VMs can be made from, by name. Empty hides the template tools.
+    pub templates: BTreeMap<String, Template>,
+}
+
+/// A template volume that disposable VMs get a thin overlay on.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    dead_code,
+    reason = "list_templates and create_vm_from_template, a later change, read these fields"
+)]
+pub struct Template {
+    /// qcow2 volume in `manage.disk_pool`. VMs made from it use it as their backing file.
+    pub volume: String,
+    #[serde(default)]
+    pub os: GuestOs,
+    #[serde(default)]
+    pub firmware: Firmware,
+    #[serde(default)]
+    pub description: String,
+    /// cloud-config file put into each new VM's seed. It must start with a `#cloud-config` line.
+    pub user_data: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestOs {
+    #[default]
+    Linux,
+    Windows,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Firmware {
+    #[default]
+    Bios,
+    Uefi,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +156,8 @@ impl Default for Manage {
             max_vcpus: 2,
             max_memory_mib: 4096,
             max_disk_gib: 32,
+            max_lifetime_minutes: 1440,
+            templates: BTreeMap::new(),
         }
     }
 }
@@ -186,6 +229,22 @@ impl Config {
         if m.max_vcpus == 0 || m.max_memory_mib == 0 || m.max_disk_gib == 0 {
             bail!("manage.max_vcpus, max_memory_mib and max_disk_gib must be positive");
         }
+        if m.max_lifetime_minutes == 0 {
+            bail!("manage.max_lifetime_minutes must be positive");
+        }
+        for (name, t) in &m.templates {
+            if !is_hostname(name) {
+                bail!(
+                    "manage.templates.{name}: a template name uses lowercase letters, digits and \
+                     hyphens, starts with a letter and has at most 63 characters"
+                );
+            }
+            if t.volume.is_empty() || t.volume.contains('/') || t.volume.starts_with('.') {
+                bail!(
+                    "manage.templates.{name}.volume must name a volume in manage.disk_pool, not a path"
+                );
+            }
+        }
         if self.share_project_dir {
             let cwd = std::env::current_dir()?.canonicalize()?;
             let home = std::env::var_os("HOME").and_then(|h| PathBuf::from(h).canonicalize().ok());
@@ -221,6 +280,18 @@ impl Config {
     pub fn iso_file(&self, path: &str) -> Result<PathBuf> {
         file_in(&self.manage.iso_dirs, path, "manage.iso_dirs")
     }
+}
+
+/// Whether `name` is a hostname label: lowercase letters, digits and hyphens, starting with a letter, not ending
+/// with a hyphen, at most 63 characters. Names of VMs made from templates follow this rule, because the name
+/// becomes the guest's hostname.
+pub fn is_hostname(name: &str) -> bool {
+    name.len() <= 63
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && !name.ends_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn canonicalize_dirs(dirs: &mut [PathBuf], key: &str) -> Result<()> {
@@ -296,6 +367,112 @@ mod tests {
         assert!(config.share_file("sub/ok.txt").is_err());
         assert!(config.iso_file(&s(&share.join("sub/ok.txt"))).is_err());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn parse(text: &str) -> Result<Config> {
+        let mut config: Config = toml::from_str(text)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[test]
+    fn templates_parse_with_defaults() {
+        let config = parse(
+            r#"
+            [manage]
+            create = true
+            disk_pool = "agent-vms"
+            [manage.templates.debian13]
+            volume = "tpl-debian13.qcow2"
+            [manage.templates.debian13-uefi]
+            volume = "tpl-debian13.qcow2"
+            os = "linux"
+            firmware = "uefi"
+            description = "Debian 13"
+            user_data = "/etc/virtmanager-mcp/debian13.yaml"
+            "#,
+        )
+        .unwrap();
+        let m = &config.manage;
+        assert_eq!(m.max_lifetime_minutes, 1440);
+        let plain = &m.templates["debian13"];
+        assert_eq!(
+            (plain.os, plain.firmware, plain.user_data.as_ref()),
+            (GuestOs::Linux, Firmware::Bios, None)
+        );
+        let uefi = &m.templates["debian13-uefi"];
+        assert_eq!(uefi.firmware, Firmware::Uefi);
+        assert_eq!(
+            uefi.user_data.as_deref(),
+            Some(Path::new("/etc/virtmanager-mcp/debian13.yaml"))
+        );
+    }
+
+    #[test]
+    fn config_without_templates_has_none() {
+        let config = parse("[manage]\ncreate = false\n").unwrap();
+        assert!(config.manage.templates.is_empty());
+    }
+
+    #[test]
+    fn bad_template_config_is_refused() {
+        let table = |extra: &str| {
+            format!(
+                "[manage]\ndisk_pool = \"p\"\n[manage.templates.debian13]\nvolume = \"t.qcow2\"\n{extra}"
+            )
+        };
+        for (text, why) in [
+            (table("firmware = \"coreboot\""), "unknown firmware"),
+            (table("os = \"bsd\""), "unknown os"),
+            (table("colour = \"blue\""), "unknown key"),
+            (
+                "[manage.templates.Debian]\nvolume = \"t.qcow2\"".into(),
+                "uppercase name",
+            ),
+            (
+                "[manage.templates.debian_13]\nvolume = \"t.qcow2\"".into(),
+                "underscore",
+            ),
+            (
+                "[manage.templates.13debian]\nvolume = \"t.qcow2\"".into(),
+                "leading digit",
+            ),
+            (
+                "[manage.templates.debian13]\nvolume = \"../t.qcow2\"".into(),
+                "path volume",
+            ),
+            (
+                "[manage.templates.debian13]\nvolume = \"\"".into(),
+                "empty volume",
+            ),
+            (
+                "[manage.templates.debian13]\nos = \"linux\"".into(),
+                "missing volume",
+            ),
+            ("[manage]\nmax_lifetime_minutes = 0".into(), "zero lifetime"),
+        ] {
+            assert!(parse(&text).is_err(), "{why} was accepted");
+        }
+    }
+
+    #[test]
+    fn hostname_rule() {
+        for ok in ["t-vm1", "a", "debian13", &"a".repeat(63)] {
+            assert!(is_hostname(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "T-vm",
+            "1vm",
+            "-vm",
+            "vm-",
+            "vm_1",
+            "vm.1",
+            "vm 1",
+            &"a".repeat(64),
+        ] {
+            assert!(!is_hostname(bad), "{bad}");
+        }
     }
 
     #[test]
