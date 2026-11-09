@@ -716,7 +716,8 @@ impl VirtServer {
 
     #[tool(
         description = "Read buffered output from an open serial console. Returns `next`, the offset to pass as \
-        `since` on the following call to get only new output."
+        `since` on the following call to get only new output. With `wait_ms`, waits for output no earlier read \
+        returned, then until it pauses for half a second; a closed console returns at once."
     )]
     async fn console_read(
         &self,
