@@ -1,0 +1,62 @@
+[
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "trial-deb13",
+      "force": true
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "trial-deb13",
+      "text": ""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_ms": 3000
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "nohup sh -c 'sleep 2; systemctl poweroff' >/dev/null 2>&1 &"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_ms": 30000,
+      "max_bytes": 200
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_ms": 30000,
+      "max_bytes": 200
+    }
+  },
+  {
+    "tool": "list_vms"
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_for_agent_secs": 180
+    }
+  },
+  {
+    "tool": "console_close",
+    "args": {
+      "vm": "trial-deb13"
+    }
+  }
+]

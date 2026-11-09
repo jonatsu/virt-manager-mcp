@@ -66,10 +66,11 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    earlier read returned, then until the output pauses for 500 ms, whatever `since` is. `console-stall.json`, run
    unchanged against `trial-deb13`, now shows the `Password:` prompt, the motd and a root shell prompt. The evidence
    is in [`docs/research/2026-11-09-console-read-wait.md`](../research/2026-11-09-console-read-wait.md).
-2. **Untested: does `console_read` report a console closed by a power-off?** The trial reported `closed: null`
-   after a power-off, but its reads all finished before the power-off happened, so the claim is withdrawn (see the
-   correction in agent-setup `f2e697c0`). Test it first: open a console, force `stop_vm`, then read. Evidence: the
-   read reports the console closed, or this item is dropped.
+2. **Dropped: `console_read` does report a console closed by a power-off.** The trial's `closed: null` came from
+   reads that finished before the power-off (agent-setup correction `f2e697c0`). In
+   `tests/testbed/cases/console-closed-on-power-off.json`, the guest powers itself off under an open console, and the
+   next read returns `closed: "console stream ended ..."` with the kernel's last line. A forced `stop_vm` closes the
+   session itself, so a later read reports that no console is open.
 3. **`write_file` creates new files with mode 666.** Tighten the default, set the mode after writing, and consider a
    `mode` parameter. Evidence: a new file has the chosen mode, and an appended existing file keeps its own.
 4. **`start_vm` on a running VM ignores `wait_for_agent_secs`.** It returns "already running" at once, even when the
