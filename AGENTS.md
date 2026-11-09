@@ -23,9 +23,10 @@ cargo clippy --locked --all-targets -- -D warnings
 pre-commit run --all-files
 ```
 
-Formatting uses default rustfmt settings. The unit tests never touch libvirt. Run `pre-commit install` once per
-clone. Leave `docs/research/` and `example-global-*.md` out of the Markdown formatters: they hold dated records, some
-copied verbatim, and prompt templates.
+CI (`.github/workflows/ci.yml`) runs this gate, and the tests again on the `rust-version` toolchain; raise the two
+together. Formatting uses default rustfmt settings. The unit tests never touch libvirt. Run `pre-commit install` once
+per clone. Leave `docs/research/` and `example-global-*.md` out of the Markdown formatters: they hold dated records,
+some copied verbatim, and prompt templates.
 
 ## Guardrails
 

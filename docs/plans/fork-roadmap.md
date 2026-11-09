@@ -51,8 +51,10 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    stays on its latest stable release, `v1.10.0`, rather than the `v2.0.0-rc.7` that `pre-commit autoupdate` picked.
    The research copies and the `example-global-*.md` templates are excluded from the Markdown formatters. A second
    `pre-commit run --all-files` pass changes nothing.
-6. **Follow-ups outside the repository**, each a separate decision: enable Issues on the fork (currently disabled),
-   set the GitHub description, and add CI.
+6. **Done: GitHub settings and CI.** Issues are enabled as the inbox for outside reports; accepted work moves into
+   this roadmap. The description and topics name the fork's purpose and its upstream. CI runs the build gate on
+   stable, the tests on the minimum supported Rust version (1.89, the highest among the locked dependencies), and
+   the pre-commit hooks.
 
 ## Defects
 
