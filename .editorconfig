@@ -1,0 +1,91 @@
+# EditorConfig: https://editorconfig.org
+# EditorConfig specification: https://spec.editorconfig.org/index.html
+# Check glob syntax docs before customizing patterns.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_size = 2
+indent_style = space
+insert_final_newline = true
+spelling_language = en-US
+tab_width = 4
+trim_trailing_whitespace = true
+
+[{.gitconfig,.gitattributes,.gitignore}]
+indent_size = 4
+
+[*.{bash,sh,zsh}]
+indent_size = 2
+indent_style = space
+
+[*.{md,mkd,mkdn,markdown,mdx,adoc,rst}]
+max_line_length = unset
+# List continuation lines align to the item's content column, three spaces under
+# `1. `, so a fixed indentation width does not apply.
+indent_size = unset
+# Preserve hard line breaks in Markdown and prose files.
+# CommonMark hard line breaks: https://spec.commonmark.org/0.31.2/#hard-line-breaks
+trim_trailing_whitespace = false
+
+[*.{json,json5,jsonc}]
+indent_size = 2
+indent_style = space
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[.*.{yml,yaml}]
+indent_size = 2
+
+[*.rs]
+# rustfmt owns Rust layout, including alignment inside multi-line string
+# literals, so editorconfig-checker does not police the indentation width.
+indent_size = unset
+indent_style = space
+
+[*.py]
+indent_size = 4
+indent_style = space
+
+[*.toml]
+indent_size = 2
+
+[*.env]
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[{Dockerfile,*.dockerfile,Dockerfile.*}]
+indent_size = 4
+indent_style = space
+
+[{Makefile,*.mk}]
+# Makefiles require tabs for indentation.
+indent_style = tab
+
+[*.{patch,diff}]
+# Preserve patches and diffs as-is; formatters/hooks should not rewrite them.
+end_of_line = unset
+indent_size = unset
+indent_style = unset
+insert_final_newline = false
+trim_trailing_whitespace = false
+
+[LICENSE]
+# Do not force style for licenses.
+end_of_line = unset
+indent_size = unset
+indent_style = unset
+insert_final_newline = unset
+trim_trailing_whitespace = false
+
+# Non-standard EditorConfig properties supported by shfmt for scripts with a
+# shebang but no extension:
+# https://github.com/mvdan/sh/blob/master/cmd/shfmt/shfmt.1.scd#examples
+[[shell]]
+indent_style       = space
+indent_size        = 2
+space_redirects    = true
+binary_next_line   = true
+switch_case_indent = true

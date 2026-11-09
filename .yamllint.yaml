@@ -1,0 +1,17 @@
+# yamllint - linter for YAML files
+# https://yamllint.readthedocs.io/en/stable/index.html
+#
+# For all rules, see:
+# https://yamllint.readthedocs.io/en/stable/rules.html
+extends: relaxed
+rules:
+  new-lines:
+    type: unix
+  # Don't enforce line length; many repos wrap by sentence or context.
+  line-length: false
+  truthy:
+    allowed-values: ["true", "false", "on", "off"]
+    check-keys: false # Don't check keys for truthiness
+  comments:
+    ignore-shebangs: true
+    min-spaces-from-content: 1

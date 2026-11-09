@@ -1,0 +1,15 @@
+# .mdformat.toml
+#
+# Preferred Markdown formatting profile. `wrap = "keep"` matches mdformat's
+# default; consecutive numbering does not. LF agrees with `.editorconfig`.
+
+end_of_line = "lf"
+number      = true
+wrap        = "keep"
+
+# mdformat-gfm pads every table cell to its column's widest row. In a long
+# prose cell that padding runs the row past line-length limits, so editing one
+# row repads the whole table and turns a one-row change into a whole-table
+# diff. Compact tables drop that padding without changing rendered output.
+[plugin.tables]
+compact_tables = true

@@ -20,9 +20,12 @@ cargo fmt --check
 cargo build --locked
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
+pre-commit run --all-files
 ```
 
-Formatting uses default rustfmt settings. The unit tests never touch libvirt.
+Formatting uses default rustfmt settings. The unit tests never touch libvirt. Run `pre-commit install` once per
+clone. Leave `docs/research/` and `example-global-*.md` out of the Markdown formatters: they are verbatim copies
+and prompt templates.
 
 ## Guardrails
 

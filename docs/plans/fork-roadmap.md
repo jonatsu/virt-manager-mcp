@@ -44,9 +44,12 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    Upstream's own release is `v1.0`, while `Cargo.toml` says `0.1.0`. Judgement call: upstream's joke first line
    gave way to a header that names the fork, its upstream and this roadmap. To undo it, restore line 1 from
    upstream commit `f47d3c3`.
-5. **Add hygiene files.** `.gitignore` holds only `/target`. Add `.editorconfig`, `.gitattributes` and a pre-commit
-   configuration from the `repo-management` baseline, adapted to Rust. Evidence: a second pre-commit pass changes
-   nothing.
+5. **Done: hygiene files.** `.editorconfig`, `.gitattributes` and a pre-commit configuration come from the
+   `repo-management` baseline, adapted to Rust with report-only `cargo fmt --check` and `cargo clippy` hooks. Node
+   hooks use the host's Node.js, because nodeenv in pre-commit 4.7.0 crashed while choosing a download. Betterleaks
+   stays on its latest stable release, `v1.10.0`, rather than the `v2.0.0-rc.7` that `pre-commit autoupdate` picked.
+   The research copies and the `example-global-*.md` templates are excluded from the Markdown formatters. A second
+   `pre-commit run --all-files` pass changes nothing.
 6. **Follow-ups outside the repository**, each a separate decision: enable Issues on the fork (currently disabled),
    set the GitHub description, and add CI.
 

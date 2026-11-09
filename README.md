@@ -15,7 +15,7 @@ Host: Linux. Guests: Linux and Windows.
 ## How it talks to the guest
 
 | Capability | Mechanism | Guest requirement |
-|---|---|---|
+| -- | -- | -- |
 | `exec`, `read_file`, `write_file`, `copy_to_vm`, `list_dir`, `stat_path`, `guest_info` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
@@ -29,7 +29,7 @@ The path is passed as data, never spliced into shell code.
 ## Tools
 
 | Tool | Read-only mode |
-|---|---|
+| -- | -- |
 | `list_vms`: allowed VMs, power state, agent status, OS family | ✅ |
 | `read_file`, `list_dir`, `stat_path` | ✅ |
 | `console_open`, `console_read`, `console_close` | ✅ |
@@ -91,8 +91,8 @@ create = true
 delete = true
 reconfigure = true
 snapshots = true
-manage_vms = []                  # existing VMs (also in allowed_vms) the tools may act on
-disk_pool = "default"            # libvirt pool for new disks, required for create
+manage_vms = []                     # existing VMs (also in allowed_vms) the tools may act on
+disk_pool = "default"               # libvirt pool for new disks, required for create
 iso_dirs = ["/var/lib/libvirt/iso"]
 networks = ["default"]
 max_vms = 2
@@ -190,7 +190,10 @@ Generic JSON config (Claude Desktop and others):
 ```json
 {
   "mcpServers": {
-    "virtmanager": { "command": "/path/to/virtmanager-mcp", "args": [] }
+    "virtmanager": {
+      "command": "/path/to/virtmanager-mcp",
+      "args": []
+    }
   }
 }
 ```

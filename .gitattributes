@@ -1,0 +1,57 @@
+# Common settings to combine with language-specific attributes.
+# See https://git-scm.com/docs/gitattributes for more information.
+
+# Auto-detect text files and perform line-ending normalization.
+*          text=auto
+
+# Documents
+*.md       text diff=markdown
+*.mdx      text diff=markdown
+*.txt      text
+
+# Rust
+*.rs       text diff=rust
+Cargo.lock text linguist-generated=true
+
+# Scripts
+*.bash     text eol=lf
+*.sh       text eol=lf
+*.zsh      text eol=lf
+
+# Windows scripts use CRLF.
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+
+# Serialization
+*.env      text eol=lf
+*.json     text
+*.jsonc    text
+*.toml     text
+*.yaml     text
+*.yml      text
+
+# Graphics
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.svg      text
+
+# Archives
+*.7z       binary
+*.gz       binary
+*.tar      binary
+*.tgz      binary
+*.zip      binary
+
+# Preserve patches and diffs as-is; formatters/hooks should not rewrite them.
+*.patch    -text
+*.diff     -text
+
+# Optional for source-distribution archives only:
+# .github/ export-ignore
+# .gitignore export-ignore
+# .gitattributes export-ignore
+# .editorconfig export-ignore
+# .pre-commit-config.yaml export-ignore

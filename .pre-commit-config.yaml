@@ -1,0 +1,238 @@
+# Opinionated pre-commit baseline based on the author's preferred repository profile.
+# See https://pre-commit.com for more information.
+# See https://pre-commit.com/hooks.html for more hooks.
+# ALWAYS check for hook version updates, and update hook versions before use,
+# unless a reason to pin the hook versions is specified or user explicitly
+# requests to pin the hook versions.
+#
+# Preserve established repository conventions when adapting this profile.
+# files/exclude use Python regex; prefer `types` `types_or` for file selection first,
+# extension/regex matching last.
+
+default_install_hook_types:
+  - pre-commit
+
+default_stages:
+  - pre-commit
+
+# Node hooks (Secretlint, markdownlint-cli2) use the host's Node.js. With
+# `default`, nodeenv downloads a release whose version string it cannot parse
+# (seen with pre-commit 4.7.0). Secretlint needs Node.js 22 or later.
+default_language_version:
+  node: system
+
+repos:
+  # Some out-of-the-box hooks for pre-commit:
+  # https://github.com/pre-commit/pre-commit-hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: "v6.0.0"
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-illegal-windows-names
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: detect-private-key
+      - id: destroyed-symlinks
+        stages: [pre-commit]
+      - id: end-of-file-fixer
+        stages: [pre-commit]
+        exclude_types: [svg]
+        exclude: |
+          (?ix)^(
+            .*\.patch|
+            .*\.diff
+          )$
+      - id: fix-byte-order-marker
+        stages: [pre-commit]
+      - id: mixed-line-ending
+        args: ["--fix=no"]
+      - id: pretty-format-json
+        args: ["--autofix", "--no-sort-keys"]
+        stages: [pre-commit]
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md,mkd,mkdn,markdown,mdx"]
+        stages: [pre-commit]
+        exclude: |
+          (?ix)^(
+            .*\.patch|
+            .*\.diff
+          )$
+
+  # Detect secrets like passwords, API keys, and tokens with Betterleaks:
+  # https://github.com/betterleaks/betterleaks
+  # The `betterleaks` id builds the Go binary via pre-commit's golang language.
+  # Use `betterleaks-docker` where no Go toolchain is available, or
+  # `betterleaks-system` when the binary is already installed.
+  # The hook scans the staged diff only — it does NOT scan history.
+  - repo: https://github.com/betterleaks/betterleaks
+    rev: "v1.10.0"
+    hooks:
+      - id: betterleaks
+
+  # ALTERNATIVE secrets scanner — Gitleaks. Betterleaks is the successor, from
+  # the same maintainers, so prefer the block above. Swap this in when the repo
+  # already standardises on Gitleaks (shared .gitleaks.toml, CI job, baseline
+  # file) or when its rule set is a requirement. Uncomment this block and delete
+  # the Betterleaks one — running both scans the same diff twice for one result.
+  # https://github.com/gitleaks/gitleaks
+  # - repo: https://github.com/gitleaks/gitleaks
+  #   rev: "v8.30.1"
+  #   hooks:
+  #     - id: gitleaks
+
+  # Secretlint, beside Betterleaks, for leaks a credential scanner does not look
+  # for: the committing user's home directory path and `.env` files. Its
+  # recommended credential preset stays off, because it would scan the same diff
+  # as Betterleaks. Rules live in .secretlintrc.json; add the pattern rule there
+  # for project-specific data, as references/config-adaptation-notes.md shows.
+  # Needs Node.js 22+. Keep every package on one version: `pre-commit
+  # autoupdate` does not bump `additional_dependencies`.
+  # https://github.com/secretlint/secretlint
+  - repo: local
+    hooks:
+      - id: secretlint
+        name: secretlint
+        language: node
+        entry: secretlint --no-glob
+        additional_dependencies:
+          - secretlint@13.0.7
+          - "@secretlint/secretlint-rule-no-homedir@13.0.7"
+          - "@secretlint/secretlint-rule-no-dotenv@13.0.7"
+
+  # Check files for EditorConfig compliance:
+  # https://github.com/editorconfig-checker/editorconfig-checker.python
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
+    rev: 3.11.1
+    hooks:
+      - id: editorconfig-checker
+
+  # Check and lint YAML files:
+  # https://yamllint.readthedocs.io/en/stable/
+  - repo: https://github.com/adrienverge/yamllint
+    rev: "v1.38.0"
+    hooks:
+      - id: yamllint
+        args: ["-c", ".yamllint.yaml"]
+
+  # Format YAML files with yamlfmt:
+  # https://github.com/google/yamlfmt
+  - repo: https://github.com/google/yamlfmt
+    rev: "v0.21.0"
+    hooks:
+      - id: yamlfmt
+        args: ["-conf", ".yamlfmt.yaml"]
+        stages: [pre-commit]
+
+  # CommonMark compliant Markdown formatter:
+  # https://mdformat.readthedocs.io/en/stable/
+  - repo: https://github.com/hukkin/mdformat
+    rev: "1.0.0"
+    hooks:
+      - id: mdformat
+        additional_dependencies:
+          - mdformat-footnote==0.1.3
+          - mdformat-frontmatter==2.1.2
+          - mdformat-gfm==1.0.0
+          - mdformat-gfm-alerts==2.1.0
+          - mdformat-simple-breaks==0.1.0
+          - mdformat-toc==0.5.0
+          - mdformat-config==0.2.1
+        stages: [pre-commit]
+        # Keep verbatim copies and model-facing prompt templates unformatted.
+        # Mirror this list in .markdownlint-cli2.jsonc `ignores`.
+        exclude: |
+          (?x)^(
+            docs/research/.*|
+            example-global-.*\.md
+          )$
+
+  # Check Markdown documents with Markdownlint:
+  # https://github.com/DavidAnson/markdownlint-cli2
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: "v0.24.0"
+    hooks:
+      # Report only. mdformat is the sole Markdown writer.
+      - id: markdownlint-cli2
+        # Keep verbatim copies and model-facing prompt templates unformatted.
+        # Mirror this list in .markdownlint-cli2.jsonc `ignores`.
+        exclude: |
+          (?x)^(
+            docs/research/.*|
+            example-global-.*\.md
+          )$
+
+  # Catch what the two Markdown hooks above both let through. A non-breaking
+  # space is not whitespace to a parser, so it never counts as indentation: a
+  # nested item or fence indented with one leaves its parent block, and the
+  # linter then reports a broken list or a missing blank line somewhere that
+  # reads as correct in every editor. Measured on mdformat 1.0.0 and
+  # markdownlint-cli2 0.23.2 — a hard tab in that position fails MD010, while
+  # both hooks pass a U+00A0 file and leave the character intact.
+  #
+  # `language: pygrep` is built into pre-commit, so this adds no dependency.
+  # Report only, matching markdownlint above: mdformat is the sole Markdown
+  # writer, and it does not normalise U+00A0, so the two cannot disagree.
+  #
+  # Scoped to the leading whitespace run rather than banning the character. A
+  # mid-line U+00A0 is legitimate typography (`5000<U+00A0>ms`) and harms no
+  # block structure, so a blanket pattern fails honest prose.
+  #
+  # The entry is compiled as a BYTES regex, so the two-byte UTF-8 sequence is
+  # written out, and alternation replaces a character class — `[\xc2\xa0]` in
+  # bytes mode matches each byte alone and would fire on the tail of unrelated
+  # characters such as `à` (\xc3\xa0). Single-quoted so YAML keeps the
+  # backslashes; double quotes would consume them.
+  #
+  # `types_or`, because identify tags .mdx as `mdx` and not as `markdown`.
+  - repo: local
+    hooks:
+      - id: markdown-nbsp-indent
+        name: no non-breaking space in Markdown indentation
+        language: pygrep
+        entry: '^(?:[ \t]|\xc2\xa0)*\xc2\xa0'
+        types_or: [markdown, mdx]
+
+  # Rust gate, using the toolchain on PATH. Both hooks are report-only, so
+  # `cargo fmt` stays the only Rust writer, run by hand. Clippy denies warnings
+  # to match the build gate in AGENTS.md.
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        language: system
+        entry: cargo fmt --check
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        entry: cargo clippy --locked --all-targets -- -D warnings
+        types_or: [rust, toml]
+        pass_filenames: false
+
+  # Check shell scripts with ShellCheck (Python wrapper for cross-platform support):
+  # https://www.shellcheck.net/
+  # https://github.com/shellcheck-py/shellcheck-py
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: "v0.11.0.1-1"
+    hooks:
+      - id: shellcheck
+        args: ["--severity=style"]
+
+  # Format shell scripts with shfmt (pairs with ShellCheck above):
+  # https://github.com/scop/pre-commit-shfmt
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: "v3.14.1-1"
+    hooks:
+      - id: shfmt
+        # shfmt reads .editorconfig for indent/style when no -i flag is passed;
+        # add -i/-ci/-sr to match the repo's shell conventions if it sets them.
+        args: ["-w"]
+        stages: [pre-commit]

@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/google/yamlfmt/main/schema.json
+#
+# yamlfmt - formatter for YAML files
+# https://github.com/google/yamlfmt
+# https://github.com/google/yamlfmt/blob/main/docs/config-file.md
+formatter:
+  type: basic
+  disable_alias_key_correction: true
+  drop_merge_tag: true
+  eof_newline: true
+  line_ending: lf
+  retain_line_breaks: true
+  scan_folded_as_literal: true
