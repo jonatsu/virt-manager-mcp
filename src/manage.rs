@@ -19,8 +19,9 @@ use virt::storage_vol::StorageVol;
 use virt::stream::Stream;
 use virt::sys;
 
-use crate::config::Manage;
+use crate::config::{Firmware, GuestOs, Manage, is_hostname};
 use crate::hypervisor::{self, Hypervisor};
+use crate::seed;
 
 /// XML namespace of the metadata element that marks VMs created by this server.
 const OWNER_NS: &str = "http://virtmanager-mcp/owner/1";
@@ -78,7 +79,6 @@ impl Owner {
 }
 
 /// The owner attributes of `dom`, or `None` when this server did not create it.
-#[expect(dead_code, reason = "reset and expiry, later changes, read owners")]
 pub fn owner_of(dom: &Domain) -> Option<Owner> {
     let xml = dom
         .get_metadata(sys::VIR_DOMAIN_METADATA_ELEMENT as i32, Some(OWNER_NS), 0)
@@ -189,6 +189,265 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             msg.push_str(&format!("; network '{n}'"));
         }
         Ok(msg)
+    })
+}
+
+/// Parameters of a new VM made from a template; `None` takes the default.
+pub struct NewTemplateVm {
+    pub name: String,
+    pub template: String,
+    pub vcpus: Option<u32>,
+    pub memory_mib: Option<u64>,
+    pub disk_gib: Option<u64>,
+    pub network: Option<String>,
+    pub lifetime_minutes: Option<u32>,
+}
+
+/// A template that passed its checks.
+struct UsableTemplate {
+    path: String,
+    capacity: u64,
+    user_data: String,
+}
+
+/// Default vCPUs and memory of a VM made from a template, within the configured limits.
+const TEMPLATE_VCPUS: u32 = 2;
+const TEMPLATE_MEMORY_MIB: u64 = 1024;
+
+/// Lists the templates that pass their checks, with how many VMs this server made from each. A template that
+/// fails is left out, and its reason is logged.
+pub fn list_templates(hv: &Hypervisor) -> Result<Vec<Value>> {
+    let m = &hv.config.manage;
+    hv.with_conn(|conn| {
+        let owners: Vec<Owner> = conn
+            .list_all_domains(0)?
+            .iter()
+            .filter_map(owner_of)
+            .collect();
+        let mut out = Vec::new();
+        for (name, t) in &m.templates {
+            if let Err(e) = check_template(conn, m, name) {
+                tracing::warn!("template '{name}' is hidden: {e:#}");
+                continue;
+            }
+            let used_by = owners
+                .iter()
+                .filter(|o| o.template.as_deref() == Some(name.as_str()))
+                .count();
+            out.push(json!({
+                "name": name,
+                "description": t.description,
+                "os": match t.os { GuestOs::Linux => "linux", GuestOs::Windows => "windows" },
+                "firmware": match t.firmware { Firmware::Bios => "bios", Firmware::Uefi => "uefi" },
+                "vms_using_it": used_by,
+            }));
+        }
+        Ok(out)
+    })
+}
+
+/// Logs every configured template that fails its checks, so the operator sees it at startup.
+pub fn log_template_problems(hv: &Hypervisor) {
+    let m = &hv.config.manage;
+    if !m.create || m.templates.is_empty() {
+        return;
+    }
+    let _ = hv.with_conn(|conn| {
+        for name in m.templates.keys() {
+            if let Err(e) = check_template(conn, m, name) {
+                tracing::warn!("template '{name}' is unusable and hidden: {e:#}");
+            }
+        }
+        Ok(())
+    });
+}
+
+/// Checks a template as the design requires on every use: its volume is a qcow2 in the disk pool that no domain
+/// uses as a disk, and its user data, if any, is readable cloud-config that fits the seed.
+fn check_template(conn: &Connect, m: &Manage, name: &str) -> Result<UsableTemplate> {
+    let t = m
+        .templates
+        .get(name)
+        .ok_or_else(|| anyhow!("no template named '{name}'; list_templates shows them"))?;
+    let pool = disk_pool(conn, m)?;
+    let vol = StorageVol::lookup_by_name(&pool, &t.volume).map_err(|e| {
+        anyhow!(
+            "template volume '{}' is not in pool '{}': {}",
+            t.volume,
+            m.disk_pool,
+            e.message()
+        )
+    })?;
+    let format = volume_format(&vol.get_xml_desc(0)?)?;
+    if format != "qcow2" {
+        bail!("template volume '{}' is {format}, not qcow2", t.volume);
+    }
+    let path = vol.get_path()?;
+    for dom in conn.list_all_domains(0)? {
+        let disks = parse_disks(&inactive_xml(&dom)?)?;
+        if disks
+            .iter()
+            .any(|d| d.file.as_deref() == Some(path.as_str()))
+        {
+            bail!(
+                "template volume '{}' is a disk of VM '{}'; a template must never be attached",
+                t.volume,
+                dom.get_name().unwrap_or_default()
+            );
+        }
+    }
+    let user_data = match &t.user_data {
+        Some(file) => std::fs::read_to_string(file)
+            .with_context(|| format!("cannot read user data {}", file.display()))?,
+        None => format!("{}\n", seed::CLOUD_CONFIG_HEADER),
+    };
+    seed::check_user_data(&user_data).with_context(|| format!("user data of template '{name}'"))?;
+    Ok(UsableTemplate {
+        path,
+        capacity: vol.get_info()?.capacity,
+        user_data,
+    })
+}
+
+/// The `<target><format type=…>` of a volume's XML.
+fn volume_format(xml: &str) -> Result<String> {
+    let doc = roxmltree::Document::parse(xml)?;
+    Ok(child(doc.root_element(), "target")
+        .and_then(|t| child(t, "format"))
+        .and_then(|f| f.attribute("type"))
+        .unwrap_or("unknown")
+        .to_string())
+}
+
+/// Names of the volumes of disk generation `generation` of VM `name`.
+fn generation_volumes(name: &str, generation: u32) -> (String, String) {
+    (
+        format!("{name}-g{generation}.qcow2"),
+        format!("{name}-g{generation}-seed.img"),
+    )
+}
+
+/// The expiry time for a lifetime starting now, refused above `manage.max_lifetime_minutes`.
+fn expiry(m: &Manage, lifetime_minutes: Option<u32>, now: u64) -> Result<Option<u64>> {
+    let Some(minutes) = lifetime_minutes else {
+        return Ok(None);
+    };
+    if minutes == 0 || minutes > m.max_lifetime_minutes {
+        bail!(
+            "lifetime_minutes must be between 1 and {} (manage.max_lifetime_minutes)",
+            m.max_lifetime_minutes
+        );
+    }
+    Ok(Some(now + u64::from(minutes) * 60))
+}
+
+/// Seconds since the epoch, UTC.
+pub fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Defines a VM made from a template: an overlay on the template volume, a seed disk with the VM's identity, and
+/// the owner element. Volumes created before a failing step are deleted. The VM is left shut off.
+pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String> {
+    let m = &hv.config.manage;
+    if !is_hostname(&vm.name) {
+        bail!(
+            "a VM made from a template is named like a hostname: lowercase letters, digits and hyphens, starting \
+             with a letter, not ending with a hyphen, at most 63 characters"
+        );
+    }
+    let t = m.templates.get(&vm.template).ok_or_else(|| {
+        anyhow!(
+            "no template named '{}'; list_templates shows them",
+            vm.template
+        )
+    })?;
+    let vcpus = vm.vcpus.unwrap_or(TEMPLATE_VCPUS.min(m.max_vcpus));
+    let memory_mib = vm
+        .memory_mib
+        .unwrap_or(TEMPLATE_MEMORY_MIB.min(m.max_memory_mib));
+    check_vcpus(m, vcpus)?;
+    check_memory(m, memory_mib)?;
+    if let Some(gib) = vm.disk_gib {
+        check_disk(m, gib)?;
+    }
+    let expires = expiry(m, vm.lifetime_minutes, now_epoch())?;
+    let network = vm.network.clone().or_else(|| m.networks.first().cloned());
+
+    let _guard = LOCK.lock().unwrap();
+    hv.with_conn(|conn| {
+        if let Some(n) = &network {
+            check_network(conn, m, n)?;
+        }
+        if Domain::lookup_by_name(conn, &vm.name).is_ok() {
+            bail!("a VM named '{}' already exists", vm.name);
+        }
+        let owned = conn.list_all_domains(0)?.iter().filter(|d| is_owned(d)).count();
+        if owned >= m.max_vms as usize {
+            bail!("this server already has {owned} VMs (manage.max_vms = {}); delete one first", m.max_vms);
+        }
+        let template = check_template(conn, m, &vm.template)?;
+        let capacity = vm
+            .disk_gib
+            .map_or(0, |gib| gib << 30)
+            .max(template.capacity);
+        let pool = disk_pool(conn, m)?;
+        let uuid = new_uuid();
+        let generation = 1;
+        let (overlay_name, seed_name) = generation_volumes(&vm.name, generation);
+        let seed_image = seed::build(&format!("{uuid}-{generation}"), &vm.name, &template.user_data)?;
+
+        let overlay = create_overlay(&pool, &overlay_name, capacity, &template.path)?;
+        let seed_vol = match create_raw_volume(conn, &pool, &seed_name, &seed_image) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = overlay.delete(0);
+                return Err(e);
+            }
+        };
+        let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
+        let xml = domain_xml(&DomainSpec {
+            name: &vm.name,
+            windows: t.os == GuestOs::Windows,
+            vcpus,
+            memory_mib,
+            uefi: t.firmware == Firmware::Uefi,
+            tpm: false,
+            disks: vec![Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
+            network: network.as_deref(),
+            uuid: Some(&uuid),
+            mac: None,
+            owner: Owner {
+                template: Some(vm.template.clone()),
+                generation: Some(generation),
+                expires,
+            },
+        });
+        if let Err(e) = Domain::define_xml(conn, &xml) {
+            let _ = seed_vol.delete(0);
+            let _ = overlay.delete(0);
+            bail!("cannot define VM '{}': {}", vm.name, e.message());
+        }
+        let mut message = format!(
+            "created VM '{}' from template '{}' ({vcpus} vCPUs, {memory_mib} MiB, {} GiB disk {}/{overlay_name})",
+            vm.name,
+            vm.template,
+            capacity >> 30,
+            m.disk_pool,
+        );
+        if let Some(n) = &network {
+            message.push_str(&format!("; network '{n}'"));
+        }
+        match expires {
+            Some(at) => message.push_str(&format!(
+                "; it expires at {at} (Unix time, in {} minutes) and is then deleted",
+                vm.lifetime_minutes.unwrap_or_default()
+            )),
+            None => message.push_str("; it does not expire"),
+        }
+        Ok(message)
     })
 }
 
@@ -744,10 +1003,6 @@ fn create_volume(pool: &StoragePool, name: &str, gib: u64) -> Result<StorageVol>
 }
 
 /// Creates a qcow2 overlay of `capacity` bytes whose backing file is the qcow2 at `backing`.
-#[expect(
-    dead_code,
-    reason = "create_vm_from_template, a later change, calls this"
-)]
 fn create_overlay(
     pool: &StoragePool,
     name: &str,
@@ -772,10 +1027,6 @@ fn overlay_xml(name: &str, capacity: u64, backing: &str) -> String {
 }
 
 /// Creates a raw volume holding exactly `data`, uploaded through a libvirt stream.
-#[expect(
-    dead_code,
-    reason = "create_vm_from_template, a later change, calls this"
-)]
 fn create_raw_volume(
     conn: &Connect,
     pool: &StoragePool,
@@ -802,10 +1053,6 @@ fn create_raw_volume(
 
 /// Writes `data` to the start of `vol`. Every error path aborts the stream: the `virt` crate's `Stream` panics on
 /// drop when freeing an unfinished stream fails.
-#[expect(
-    dead_code,
-    reason = "create_vm_from_template, a later change, calls this"
-)]
 fn upload(conn: &Connect, vol: &StorageVol, data: &[u8]) -> Result<()> {
     let stream = Stream::new(conn, 0).map_err(|e| anyhow!("{}", e.message()))?;
     if let Err(e) = vol.upload(&stream, 0, data.len() as u64, 0) {
@@ -830,13 +1077,6 @@ fn upload(conn: &Connect, vol: &StorageVol, data: &[u8]) -> Result<()> {
 }
 
 /// A new random UUID for a domain, chosen before the domain exists because its seed's instance ID contains it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "create_vm_from_template, a later change, calls this"
-    )
-)]
 fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -1013,13 +1253,6 @@ enum Disk<'a> {
     /// A writable qcow2 disk on the virtio bus.
     Qcow2(&'a str),
     /// A read-only raw disk on the virtio bus, such as a NoCloud seed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "create_vm_from_template, a later change, uses this"
-        )
-    )]
     ReadOnlyRaw(&'a str),
     /// A SATA CD-ROM, empty when `None`.
     Cdrom(Option<&'a Path>),
@@ -1319,6 +1552,50 @@ mod tests {
         assert_eq!(
             child(doc.root_element(), "capacity").unwrap().text(),
             Some("10737418240")
+        );
+    }
+
+    #[test]
+    fn nested_backing_store_is_not_a_disk_source() {
+        // A running overlay VM's live XML names its template inside <backingStore>; only the direct source counts.
+        let xml = "<domain><devices><disk type='file' device='disk'>\
+                   <source file='/pool/t-g1.qcow2'/>\
+                   <backingStore type='file'><format type='qcow2'/><source file='/pool/tpl.qcow2'/></backingStore>\
+                   <target dev='vda' bus='virtio'/></disk></devices></domain>";
+        let disks = parse_disks(xml).unwrap();
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].file.as_deref(), Some("/pool/t-g1.qcow2"));
+    }
+
+    #[test]
+    fn lifetime_is_capped() {
+        let m = Manage {
+            max_lifetime_minutes: 60,
+            ..Manage::default()
+        };
+        assert_eq!(expiry(&m, None, 1000).unwrap(), None);
+        assert_eq!(expiry(&m, Some(1), 1000).unwrap(), Some(1060));
+        assert_eq!(expiry(&m, Some(60), 1000).unwrap(), Some(4600));
+        for bad in [0, 61, u32::MAX] {
+            assert!(expiry(&m, Some(bad), 1000).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn generation_volume_names() {
+        assert_eq!(
+            generation_volumes("t-vm1", 3),
+            ("t-vm1-g3.qcow2".into(), "t-vm1-g3-seed.img".into())
+        );
+    }
+
+    #[test]
+    fn volume_format_reads_target() {
+        let xml = "<volume><name>v</name><target><path>/p/v</path><format type='qcow2'/></target></volume>";
+        assert_eq!(volume_format(xml).unwrap(), "qcow2");
+        assert_eq!(
+            volume_format("<volume><name>v</name></volume>").unwrap(),
+            "unknown"
         );
     }
 

@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
         shares = ?config.host_share_dirs,
         "connected to libvirt"
     );
+    manage::log_template_problems(&hv);
     let state = Arc::new(State {
         hv,
         consoles: Consoles::default(),

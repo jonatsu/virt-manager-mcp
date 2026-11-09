@@ -9,6 +9,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | -- | -- |
 | `mcp_call.py` | Standard-library MCP stdio client. It runs a JSON list of tool calls and prints each reply. |
 | `config.toml` | Server config that allows only `trial-deb13`, caps created VMs at one, and uses `agent-vms`. |
+| `config-templates.toml` | Server config for VMs made from templates: no `trial-deb13`, at most three 1 GiB VMs, four templates. |
 | `preseed.cfg` | Unattended Debian 13 install with `qemu-guest-agent` and a serial getty on `ttyS0`. |
 | `cases/*.json` | Call lists from the trial, one per area. |
 
@@ -25,6 +26,13 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `start-vm-waits-for-agent.json` | Stops the guest agent, which restarts 20 s later; `start_vm` waits and reports it responding. |
 | `console-reopen.json` | A second `console_open` reports the session open; with `force: true` it replaces the session, which then works. |
 | `console-closed-on-power-off.json` | Powers the VM off under an open console, once from inside the guest and once with a forced `stop_vm`; each next read reports the console closed. The case starts the VM again. |
+
+The template cases below run with `config-templates.toml`. They need the template volume `tpl-debian13.qcow2`, which
+`scripts/make-template.sh` builds ([`docs/templates.md`](../../docs/templates.md)).
+
+| Case | What it exercises |
+| -- | -- |
+| `templates-create.json` | `list_templates` hiding a missing volume; three VMs from templates, one UEFI, timed to a responding agent; hostname, size and lifetime refusals and `max_vms`; deletion of overlays, seeds and attached disks. |
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
 `Password:` prompt and a root shell prompt. It leaves root logged in on `ttyS0`; send `exit` to log out.

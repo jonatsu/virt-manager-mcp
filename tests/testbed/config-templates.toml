@@ -1,0 +1,41 @@
+# Test-bed config for VMs made from templates. trial-deb13 is deliberately absent, so the template cases cannot
+# touch it. t-listed is an unowned throwaway VM, defined with virsh, for refusal checks.
+uri = "qemu:///system"
+allowed_vms = ["t-listed"]
+power_vms = ["t-listed"]
+share_project_dir = false
+read_only = false
+
+[manage]
+create = true
+delete = true
+reconfigure = true
+snapshots = true
+manage_vms = ["t-listed"]
+disk_pool = "agent-vms"
+iso_dirs = []
+networks = ["default"]
+# The host shares its memory with the user's work: at most three 1 GiB test VMs.
+max_vms = 3
+max_vcpus = 2
+max_memory_mib = 1024
+max_disk_gib = 10
+max_lifetime_minutes = 60
+
+[manage.templates.debian13]
+volume = "tpl-debian13.qcow2"
+description = "Debian 13 with qemu-guest-agent"
+
+[manage.templates.debian13-uefi]
+volume = "tpl-debian13.qcow2"
+firmware = "uefi"
+description = "Debian 13, UEFI boot"
+
+# A virsh vol-clone of tpl-debian13.qcow2 that failure cases may delete.
+[manage.templates.scratch]
+volume = "tpl-scratch.qcow2"
+description = "Scratch copy for failure cases"
+
+[manage.templates.missing]
+volume = "tpl-missing.qcow2"
+description = "A volume that does not exist"

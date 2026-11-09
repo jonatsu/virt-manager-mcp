@@ -35,6 +35,8 @@ const MUTATING_TOOLS: &[&str] = &[
 
 /// Tools behind [manage] create / delete / reconfigure / snapshots.
 const CREATE_TOOLS: &[&str] = &["create_vm"];
+/// Tools behind [manage] create with at least one template.
+const TEMPLATE_TOOLS: &[&str] = &["list_templates", "create_vm_from_template"];
 const DELETE_TOOLS: &[&str] = &["delete_vm"];
 const RECONFIGURE_TOOLS: &[&str] = &[
     "configure_vm",
@@ -296,6 +298,29 @@ pub struct CreateVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct CreateFromTemplateParams {
+    /// Name of the new VM, also its hostname: lowercase letters, digits and hyphens, starting with a letter, not
+    /// ending with a hyphen, at most 63 characters.
+    pub name: String,
+    /// Template name, from list_templates.
+    pub template: String,
+    /// Default 2, or the limit if lower.
+    pub vcpus: Option<u32>,
+    /// Default 1024, or the limit if lower.
+    pub memory_mib: Option<u64>,
+    /// Size of the system disk; never smaller than the template's. Default: the template's size.
+    pub disk_gib: Option<u64>,
+    /// libvirt network to connect to (default: the first allowed network).
+    pub network: Option<String>,
+    /// Delete the VM this many minutes after creation. Omit for no expiry. The limit is in the server instructions.
+    pub lifetime_minutes: Option<u32>,
+    /// Start the VM after creating it (default true).
+    pub start: Option<bool>,
+    /// After starting, wait up to this many seconds for the guest agent to respond (default 60, max 300).
+    pub wait_for_agent_secs: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ConfigureVmParams {
     pub vm: String,
     /// New number of vCPUs (takes effect at next boot).
@@ -386,6 +411,7 @@ impl VirtServer {
         };
         for name in [
             off(m.create, CREATE_TOOLS),
+            off(m.create && !m.templates.is_empty(), TEMPLATE_TOOLS),
             off(m.delete, DELETE_TOOLS),
             off(m.reconfigure, RECONFIGURE_TOOLS),
             off(m.snapshots, SNAPSHOT_TOOLS),
@@ -881,6 +907,70 @@ impl VirtServer {
     }
 
     #[tool(
+        description = "List the templates create_vm_from_template can make VMs from, with how many VMs this server \
+        made from each."
+    )]
+    async fn list_templates(&self) -> Result<CallToolResult, ErrorData> {
+        self.blocking(|s| Ok(vec![json_block(&manage::list_templates(&s.hv)?)?]))
+            .await
+    }
+
+    #[tool(
+        description = "Create a disposable VM from a template in seconds: a thin copy-on-write disk on the template, \
+        the guest agent already installed, and the VM's name as its hostname. By default it starts the VM and waits \
+        for the guest agent. With lifetime_minutes the server deletes the VM, disks included, when it expires. \
+        delete_vm removes it earlier."
+    )]
+    async fn create_vm_from_template(
+        &self,
+        Parameters(p): Parameters<CreateFromTemplateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let name = p.name.clone();
+            let mut msg = manage::create_from_template(
+                &s.hv,
+                manage::NewTemplateVm {
+                    name: p.name,
+                    template: p.template,
+                    vcpus: p.vcpus,
+                    memory_mib: p.memory_mib,
+                    disk_gib: p.disk_gib,
+                    network: p.network,
+                    lifetime_minutes: p.lifetime_minutes,
+                },
+            )?;
+            if !p.start.unwrap_or(true) {
+                msg.push_str("; it is shut off, start it with start_vm");
+                return Ok(vec![ContentBlock::text(msg)]);
+            }
+            // The VM exists from here on: a failure to start or to reach the agent is reported, not undone.
+            match s.hv.start(&name) {
+                Ok(_) => msg.push_str("; started"),
+                Err(e) => {
+                    msg.push_str(&format!(
+                        "; the VM was created but could not be started ({e:#}); fix the cause and use start_vm, \
+                         or delete_vm"
+                    ));
+                    return Ok(vec![ContentBlock::text(msg)]);
+                }
+            }
+            let wait = Duration::from_secs(p.wait_for_agent_secs.unwrap_or(60).min(300));
+            if !wait.is_zero() {
+                let dom = s.hv.domain(&name)?;
+                let agent = Agent::new(&dom, 2);
+                let ready = agent::wait_for(wait, Duration::from_secs(1), || agent.ping());
+                msg.push_str(if ready {
+                    "; guest agent is responding"
+                } else {
+                    "; guest agent not responding yet (the guest may still be booting)"
+                });
+            }
+            Ok(vec![ContentBlock::text(msg)])
+        })
+        .await
+    }
+
+    #[tool(
         description = "Delete a shut-off VM with managed: true in list_vms, including its snapshots, NVRAM and TPM \
         state. Its disks in the server's disk pool are deleted; other disks and ISOs are left in place. Cannot be undone."
     )]
@@ -1151,6 +1241,13 @@ fn manage_instructions(m: &crate::config::Manage) -> String {
         } else {
             out.push_str(" Use list_isos to find install/driver ISOs.");
         }
+    }
+    if m.create && !m.templates.is_empty() {
+        out.push_str(&format!(
+            " For a fresh VM in seconds, use list_templates and create_vm_from_template instead of create_vm; such a \
+             VM may be given a lifetime of at most {} minutes, after which the server deletes it.",
+            m.max_lifetime_minutes
+        ));
     }
     out
 }

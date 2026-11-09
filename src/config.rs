@@ -67,10 +67,6 @@ pub struct Manage {
 /// A template volume that disposable VMs get a thin overlay on.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[expect(
-    dead_code,
-    reason = "list_templates and create_vm_from_template, a later change, read these fields"
-)]
 pub struct Template {
     /// qcow2 volume in `manage.disk_pool`. VMs made from it use it as their backing file.
     pub volume: String,
@@ -406,6 +402,12 @@ mod tests {
             uefi.user_data.as_deref(),
             Some(Path::new("/etc/virtmanager-mcp/debian13.yaml"))
         );
+    }
+
+    #[test]
+    fn example_config_parses() {
+        let config: Config = toml::from_str(include_str!("../config.example.toml")).unwrap();
+        assert!(config.manage.templates.is_empty());
     }
 
     #[test]

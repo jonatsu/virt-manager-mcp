@@ -2,13 +2,6 @@
 //!
 //! cloud-init's NoCloud data source reads a `vfat` filesystem labelled `CIDATA` that holds `meta-data` and
 //! `user-data`. The image is built in memory, so the host needs no `mkfs` or ISO tool.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "create_vm_from_template, a later change, calls this module"
-    )
-)]
 
 use std::io::{Cursor, Write};
 

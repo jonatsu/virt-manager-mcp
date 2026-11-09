@@ -1,0 +1,138 @@
+[
+  {
+    "tool": "__list__"
+  },
+  {
+    "tool": "list_templates",
+    "args": {}
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-vm0",
+      "template": "missing"
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-vm1",
+      "template": "debian13",
+      "vcpus": 2
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-vm1",
+      "command": "hostname; cloud-init status; nproc; findmnt -no SIZE /"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-vm2",
+      "template": "debian13"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-uefi",
+      "template": "debian13-uefi"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-uefi",
+      "command": "hostname; test -d /sys/firmware/efi && echo uefi"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "Bad_Name",
+      "template": "debian13"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-vm4",
+      "template": "debian13",
+      "memory_mib": 2048
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-vm4",
+      "template": "debian13",
+      "lifetime_minutes": 61
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-vm4",
+      "template": "debian13"
+    }
+  },
+  {
+    "tool": "attach_disk",
+    "args": {
+      "vm": "t-vm1",
+      "size_gib": 1
+    }
+  },
+  {
+    "tool": "list_templates",
+    "args": {}
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-vm1",
+      "force": true
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-vm2",
+      "force": true
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-uefi",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-vm1"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-vm2"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-uefi"
+    }
+  }
+]
