@@ -11,7 +11,7 @@ axum = "0.8.9"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "pnm"] }
-rmcp = { version = "3.5.1", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 roxmltree = "0.21.1"
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
