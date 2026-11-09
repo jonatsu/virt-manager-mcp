@@ -291,7 +291,19 @@ fn check_template(conn: &Connect, m: &Manage, name: &str) -> Result<UsableTempla
     }
     let path = vol.get_path()?;
     for dom in conn.list_all_domains(0)? {
-        let disks = parse_disks(&inactive_xml(&dom)?)?;
+        // The live XML too, for a disk hot-plugged into a running VM only. A domain that went away after the
+        // listing has no disks left; its error would name it to the agent, so it is logged and skipped.
+        let mut disks = Vec::new();
+        let mut views = vec![sys::VIR_DOMAIN_XML_INACTIVE];
+        if dom.is_active().unwrap_or(false) {
+            views.push(0);
+        }
+        for flags in views {
+            match dom.get_xml_desc(flags) {
+                Ok(xml) => disks.extend(parse_disks(&xml)?),
+                Err(e) => tracing::warn!("template check skipped a VM: {}", e.message()),
+            }
+        }
         if uses_volume(&disks, &path, &m.disk_pool, &t.volume) {
             // The VM may be one the agent cannot see, so its name goes to the log only.
             tracing::warn!(
@@ -509,25 +521,41 @@ pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
         })?;
         let uuid = dom.get_uuid_string()?;
         let (overlay_name, seed_name) = generation_volumes(name, next);
+        for vol in [&overlay_name, &seed_name] {
+            if StorageVol::lookup_by_name(&pool, vol).is_ok() {
+                bail!(
+                    "volume '{vol}' already exists in the disk pool, where the reset would put the VM's new disk; \
+                     nothing was changed"
+                );
+            }
+        }
         let seed_image = seed::build(&format!("{uuid}-{next}"), name, &template.user_data)?;
 
-        // 2. Power off and drop snapshot metadata; the snapshots' data lives in the old overlay.
+        // 2. Power off and drop saved memory and snapshot metadata; the snapshots' data lives in the old overlay.
         if dom.is_active()? {
             dom.destroy()
                 .map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;
+        }
+        // A managed save would restore memory that refers to the old disks.
+        if dom.has_managed_save(0)? {
+            dom.managed_save_remove(0).map_err(|e| {
+                anyhow!("cannot remove the saved state of '{name}': {}", e.message())
+            })?;
         }
         for snap in dom.list_all_snapshots(0)? {
             snap.delete(sys::VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY)
                 .map_err(|e| anyhow!("cannot remove a snapshot of '{name}': {}", e.message()))?;
         }
+        let partial = "the VM was powered off and its snapshots were removed; its disks are unchanged";
 
         // 3. The next generation's disks.
-        let overlay = create_overlay(&pool, &overlay_name, capacity, &template.path)?;
+        let overlay = create_overlay(&pool, &overlay_name, capacity, &template.path)
+            .map_err(|e| e.context(partial))?;
         let seed_vol = match create_raw_volume(conn, &pool, &seed_name, &seed_image) {
             Ok(v) => v,
             Err(e) => {
                 let _ = overlay.delete(0);
-                return Err(e);
+                return Err(e.context(partial));
             }
         };
 
@@ -553,7 +581,7 @@ pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
             Err(e) => {
                 let _ = seed_vol.delete(0);
                 let _ = overlay.delete(0);
-                return Err(e.context("the reset changed nothing; the VM keeps its old disks"));
+                return Err(e.context(partial));
             }
         };
 

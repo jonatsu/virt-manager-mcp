@@ -995,7 +995,8 @@ impl VirtServer {
             let mut msg = manage::reset(&s.hv, &p.vm)?;
             if let Err(e) = manage::start_after_reset(&s.hv, &p.vm) {
                 msg.push_str(&format!(
-                    "; it could not be started ({e:#}); use start_vm or delete_vm"
+                    "; it could not be started ({e:#}); fix the cause, then use reset_vm again, which also \
+                     resets a UEFI VM's firmware variables, or delete_vm"
                 ));
                 return Ok(vec![ContentBlock::text(msg)]);
             }

@@ -1,0 +1,60 @@
+[
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-u"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-u",
+      "command": "test -d /sys/firmware/efi && echo uefi; hostname"
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-u-g4",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 256,
+      "disk_gib": 1
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-u"
+    }
+  },
+  {
+    "tool": "list_vms",
+    "args": {}
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-u"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-u-g4"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-u",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-u"
+    }
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-u",
+      "template": "debian13-uefi"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "t-u",
+      "path": "/root/marker",
+      "content": "old state\n"
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-u"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-u",
+      "command": "test -d /sys/firmware/efi && echo uefi; test -e /root/marker && echo marker-present || echo marker-gone"
+    }
+  }
+]

@@ -95,8 +95,10 @@ flowchart LR
 `reset_vm` returns a VM made from a template to the template's state. It needs `manage.create` and `manage.delete`,
 because it destroys the VM's disk state, and it refuses VMs made by `create_vm`. In order:
 
-1. Check the template and read the old overlay's capacity. A failed check stops the reset with nothing changed.
-2. Force the VM off, and delete its snapshots' metadata. Snapshots are internal, so their data lives in the overlay.
+1. Check the template, check that the next generation's volume names are free, and read the old overlay's capacity.
+   A failed check stops the reset with nothing changed.
+2. Force the VM off, discard any saved memory state, and delete its snapshots' metadata. Snapshots are internal, so
+   their data lives in the overlay. A failure from here on reports that the VM is off and its snapshots are gone.
 3. Create the next generation's overlay, with the old capacity, and its seed.
 4. Redefine the domain from its own inactive XML, with the new disks and owner attributes. The name, UUID, MAC
    address, vCPUs, memory and network interfaces stay as they are. If this fails, delete the new volumes; the old ones
