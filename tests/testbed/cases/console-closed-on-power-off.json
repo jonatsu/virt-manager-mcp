@@ -54,6 +54,48 @@
     }
   },
   {
+    "tool": "console_open",
+    "args": {
+      "vm": "trial-deb13",
+      "force": true
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "trial-deb13",
+      "text": ""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_ms": 3000
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "force": true
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_ms": 5000
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_for_agent_secs": 180
+    }
+  },
+  {
     "tool": "console_close",
     "args": {
       "vm": "trial-deb13"

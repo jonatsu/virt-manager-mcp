@@ -652,7 +652,8 @@ impl VirtServer {
             let wait = Duration::from_secs(p.wait_secs.unwrap_or(60).min(300));
             let off = s.hv.stop(&p.vm, p.force, wait)?;
             let msg = if off {
-                s.consoles.close(&p.vm);
+                // Keep any console session: its reader sees the stream end and records why, so a
+                // later console_read reports the console closed instead of "no console open".
                 format!("VM '{}' is shut off", p.vm)
             } else {
                 format!(

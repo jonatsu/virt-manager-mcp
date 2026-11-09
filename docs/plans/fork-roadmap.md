@@ -66,11 +66,11 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    earlier read returned, then until the output pauses for 500 ms, whatever `since` is. `console-stall.json`, run
    unchanged against `trial-deb13`, now shows the `Password:` prompt, the motd and a root shell prompt. The evidence
    is in [`docs/research/2026-11-09-console-read-wait.md`](../research/2026-11-09-console-read-wait.md).
-2. **Dropped: `console_read` does report a console closed by a power-off.** The trial's `closed: null` came from
-   reads that finished before the power-off (agent-setup correction `f2e697c0`). In
-   `tests/testbed/cases/console-closed-on-power-off.json`, the guest powers itself off under an open console, and the
-   next read returns `closed: "console stream ended ..."` with the kernel's last line. A forced `stop_vm` closes the
-   session itself, so a later read reports that no console is open.
+2. **Done: `console_read` reports a console closed by a power-off.** The trial's `closed: null` came from reads that
+   finished before the power-off (agent-setup correction `f2e697c0`). A power-off from inside the guest already
+   worked. A forced `stop_vm` deleted the session, so the next read said "no console open"; `stop_vm` now keeps the
+   session, and its reader records the stream's end. In `tests/testbed/cases/console-closed-on-power-off.json`, both
+   a guest power-off and a forced `stop_vm` make the next read return `closed: "console stream ended ..."`.
 3. **Done: `write_file` no longer creates world-writable files.** The guest agent creates files with mode 666.
    On Linux guests, `write_from` in `src/agent.rs` now sets the mode right after opening a new file, before any data
    is written: 644 by default, or the new optional octal `mode` parameter, which refuses bits above 777. An existing
@@ -112,9 +112,8 @@ baseline items 2 to 5 and defect 1, landed in `21c547d` to `bd175b1`.
 - **Objective:** `AGENTS.md` lists `cargo deny check advisories` in its build gate, and defects 2, 3 and 4 are each
   settled on local `main` in their own commit, with a test, and marked done here.
 - **Success criteria:**
-  - Defect 2 is settled. A test-bed run opens a console on `trial-deb13`, powers the VM off, then reads. The read
-    reports the console closed, and the item is dropped; or the reader is fixed until it does. The power-off comes
-    from inside the guest, because a forced `stop_vm` closes the session itself.
+  - Defect 2 is settled. A test-bed run opens a console on `trial-deb13`, forces `stop_vm`, then reads. The read
+    reports the console closed, and the item is dropped; or the reader is fixed until it does.
   - Defect 3: a new file written by `write_file` gets mode 644 by default, or the mode given in a new optional
     `mode` parameter. Appending keeps the existing file's mode. A test-bed case in `tests/testbed/cases/` shows all
     three.
