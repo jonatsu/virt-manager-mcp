@@ -1,0 +1,19 @@
+uri = "qemu:///system"
+allowed_vms = ["trial-deb13"]
+power_vms = ["trial-deb13"]
+share_project_dir = false
+read_only = false
+
+[manage]
+create = true
+delete = true
+reconfigure = false
+snapshots = true
+manage_vms = ["trial-deb13"]
+disk_pool = "agent-vms"
+iso_dirs = []
+networks = ["default"]
+max_vms = 1
+max_vcpus = 2
+max_memory_mib = 2048
+max_disk_gib = 10

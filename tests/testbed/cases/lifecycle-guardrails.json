@@ -1,0 +1,11 @@
+[{"tool":"create_vm","args":{"name":"bad name;x","os":"linux","vcpus":1,"memory_mib":512,"disk_gib":1}},
+ {"tool":"create_vm","args":{"name":"trial-new","os":"linux","vcpus":4,"memory_mib":512,"disk_gib":1}},
+ {"tool":"create_vm","args":{"name":"trial-deb13","os":"linux","vcpus":1,"memory_mib":512,"disk_gib":1}},
+ {"tool":"create_vm","args":{"name":"trial-new","os":"linux","vcpus":1,"memory_mib":512,"disk_gib":1,"network":"default"}},
+ {"tool":"create_vm","args":{"name":"trial-new2","os":"linux","vcpus":1,"memory_mib":512,"disk_gib":1}},
+ {"tool":"create_vm","args":{"name":"trial-new3","os":"linux","vcpus":1,"memory_mib":512,"disk_gib":1,"iso":"/etc/shadow"}},
+ {"tool":"list_vms"},
+ {"tool":"describe_vm","args":{"vm":"trial-new"}},
+ {"tool":"start_vm","args":{"vm":"trial-new","wait_for_agent_secs":0}},
+ {"tool":"stop_vm","args":{"vm":"trial-new","force":true}},
+ {"tool":"delete_vm","args":{"vm":"trial-new"}}]

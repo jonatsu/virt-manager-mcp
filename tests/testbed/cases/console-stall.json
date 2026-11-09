@@ -1,0 +1,9 @@
+[{"tool":"console_open","args":{"vm":"trial-deb13","force":true}},
+ {"tool":"console_write","args":{"vm":"trial-deb13","text":"root"}},
+ {"tool":"console_read","args":{"vm":"trial-deb13","since":0,"wait_ms":5000}},
+ {"tool":"list_vms"},{"tool":"list_vms"},{"tool":"list_vms"},
+ {"tool":"console_read","args":{"vm":"trial-deb13","since":0,"wait_ms":3000}},
+ {"tool":"console_write","args":{"vm":"trial-deb13","text":"trial"}},
+ {"tool":"list_vms"},{"tool":"list_vms"},
+ {"tool":"console_read","args":{"vm":"trial-deb13","since":0,"wait_ms":3000}},
+ {"tool":"console_close","args":{"vm":"trial-deb13"}}]

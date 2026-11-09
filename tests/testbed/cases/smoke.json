@@ -1,0 +1,64 @@
+[
+  {
+    "tool": "__list__"
+  },
+  {
+    "tool": "list_vms"
+  },
+  {
+    "tool": "guest_info",
+    "args": {
+      "vm": "trial-deb13"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "cloud-init status; uname -r; id"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp/hello.txt",
+      "content": "hello from mcp\n"
+    }
+  },
+  {
+    "tool": "read_file",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp/hello.txt"
+    }
+  },
+  {
+    "tool": "list_dir",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "sleep 5",
+      "timeout_secs": 2
+    }
+  },
+  {
+    "tool": "list_vms",
+    "args": {
+      "vm": "nonexistent"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "not-allowed-vm",
+      "command": "id"
+    }
+  }
+]
