@@ -2,6 +2,8 @@
 name = "virtmanager-mcp"
 version = "0.1.0"
 edition = "2024"
+# Highest rust-version among the locked dependencies (uuid); CI builds with it.
+rust-version = "1.89"
 
 [dependencies]
 anyhow = "1.0.104"
