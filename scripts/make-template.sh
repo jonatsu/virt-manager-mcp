@@ -131,15 +131,21 @@ guest_sh() {
 }
 
 mkdir -p -- "${cache}" || die "cannot create ${cache}"
-log "downloading ${IMAGE_NAME} and SHA512SUMS"
 curl -fsSL -o "${workdir}/SHA512SUMS" "${IMAGE_BASE}/SHA512SUMS" || die "download of SHA512SUMS failed"
-since=()
-[[ -f ${cache}/${IMAGE_NAME} ]] && since=(-z "${cache}/${IMAGE_NAME}")
-curl -fsSL "${since[@]}" -o "${cache}/${IMAGE_NAME}" "${IMAGE_BASE}/${IMAGE_NAME}" || die "download of the image failed"
 expected=$(awk -v name="${IMAGE_NAME}" '$2 == name { print $1 }' "${workdir}/SHA512SUMS")
 [[ -n ${expected} ]] || die "SHA512SUMS has no entry for ${IMAGE_NAME}"
-actual=$(sha512sum -- "${cache}/${IMAGE_NAME}" | awk '{ print $1 }')
-[[ ${actual} == "${expected}" ]] || die "checksum mismatch for ${cache}/${IMAGE_NAME}"
+sha512_of() { sha512sum -- "$1" | awk '{ print $1 }'; }
+
+# Reuse the cached image only when it matches the current SHA512SUMS; a partial or outdated copy is replaced.
+if [[ -f ${cache}/${IMAGE_NAME} && $(sha512_of "${cache}/${IMAGE_NAME}") == "${expected}" ]]; then
+  log "using the cached ${IMAGE_NAME}"
+else
+  log "downloading ${IMAGE_NAME}"
+  curl -fsSL -o "${workdir}/${IMAGE_NAME}" "${IMAGE_BASE}/${IMAGE_NAME}" || die "download of the image failed"
+  [[ $(sha512_of "${workdir}/${IMAGE_NAME}") == "${expected}" ]] \
+    || die "the downloaded ${IMAGE_NAME} does not match SHA512SUMS"
+  mv -f -- "${workdir}/${IMAGE_NAME}" "${cache}/${IMAGE_NAME}" || die "cannot store the image in ${cache}"
+fi
 
 log "uploading the image as ${volume}"
 size=$(stat -c %s -- "${cache}/${IMAGE_NAME}") || die "cannot stat the image"
