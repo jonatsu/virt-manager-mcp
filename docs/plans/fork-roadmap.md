@@ -13,7 +13,7 @@ trust, then the defects, then the outcomes in their listed order. Each item is d
 
 ```mermaid
 flowchart LR
-  B[Baseline and defects: done] --> O1[1. Clean VM in seconds]
+  B[Baseline and defects: done] --> O1[1. Clean VM in seconds: done]
   O1 --> O2[2. Reliable interaction]
   O2 --> O3[3. Code and results in and out]
   O3 --> O4[4. Seeing what happened]
@@ -108,14 +108,15 @@ A brainstorm on 2026-11-09 grouped the planned features by what they let an agen
 Each outcome needs a design agreed with the user before it is built, and each feature from the earlier list now sits
 under one of them.
 
-1. **A clean VM in seconds, not minutes.** An agent gets a fresh, disposable VM per task instead of waiting for an ISO
-   or preseed install. This covers disposable VMs cloned or overlaid from an operator-listed base image or template
-   VM, a reset-to-snapshot loop, and automatic expiry of abandoned VMs. Its first question is answered: cloud-init
-   applies a NoCloud seed disk on this host, and an overlay on a base that already has the guest agent answers about
-   8 s after power-on, against 44 s when cloud-init installs the agent
-   ([`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md)). Its direction
-   is drafted in [`disposable-vms-draft.md`](disposable-vms-draft.md) and designed in
-   [`disposable-vms-design.md`](disposable-vms-design.md).
+1. **Done: a clean VM in seconds, not minutes.** `create_vm_from_template` gives an agent a disposable VM from an
+   operator-prepared template, as a qcow2 overlay with a NoCloud seed, and its guest agent answered 11.9 s after the
+   call on the test bed. `reset_vm` returns it to the template's state, and VMs with a lifetime expire through a
+   sweep in every server process or the `virtmanager-mcp sweep` command. `scripts/make-template.sh` builds a Debian 13
+   template. The VMs live on `qemu:///system`, by the user's decision. Evidence:
+   [`disposable-vms-implementation-plan.md`](disposable-vms-implementation-plan.md), whose execution record holds
+   each unit's commits, test-bed results and reviews, built from
+   [`disposable-vms-design.md`](disposable-vms-design.md) and
+   [`2026-11-10-fatfs-seed-boot.md`](../research/2026-11-10-fatfs-seed-boot.md).
 2. **Reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input. This
    covers the wait tool (console text, screen text or the guest agent), long-running processes whose output streams
    back, and expect-style console sessions. `type_text` returns at once, and the trial lost input that way.
@@ -142,8 +143,6 @@ Two items stand outside the outcomes, because their result is already clear. Eit
 
 Open questions for the designs:
 
-- Outcome 1: should disposable VMs live on `qemu:///system`, as today, or on `qemu:///session`, which outcome 6 would
-  otherwise test?
 - Outcome 5: should it bring its own network policy, or wait for outcome 6?
 
 ## Current goal

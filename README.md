@@ -42,6 +42,7 @@ The path is passed as data, never spliced into shell code.
 | `screenshot` (PNG, downscaled to 1280 px wide by default) | ❌ |
 | `send_keys` (`ctrl+alt+delete`, `win+r`, …), `type_text` (US layout) | ❌ |
 | `create_vm`, `delete_vm` (only with `manage.create` / `manage.delete`) | ❌ |
+| `list_templates`, `create_vm_from_template` (with `manage.create` and a template), `reset_vm` (also `manage.delete`) | ❌ |
 | `configure_vm`, `attach_disk`, `detach_disk`, `set_cdrom`, `attach_nic`, `detach_nic` (only with `manage.reconfigure`) | ❌ |
 | `snapshot_create`, `snapshot_list`, `snapshot_revert`, `snapshot_delete` (only with `manage.snapshots`) | ❌ |
 | `describe_vm` (with any `manage` operation), `list_isos` (with create/reconfigure and `iso_dirs`) | ❌ |
@@ -106,6 +107,7 @@ max_disk_gib = 32
   `manage` operation is enabled, such VMs are also treated as if they were in `allowed_vms` and
   `power_vms`, so the AI can start them, use `exec` and so on. Other VMs stay off limits.
   `list_vms` shows `managed: true` for VMs the tools may act on.
+
 - **Creating:** `create_vm` takes a name, `os` (`linux`/`windows`), vCPUs, memory, disk size,
   `firmware` (`uefi`, the default, or `bios`), an optional TPM 2.0, an install ISO, a second
   "driver" ISO (e.g. `virtio-win.iso` for Windows) and a network. The VM gets a q35 machine,
@@ -113,19 +115,51 @@ max_disk_gib = 32
   after the disk, a virtio NIC, the guest agent channel, a serial console, SPICE and spare PCIe
   ports for hot-plugging. Windows guests also get Hyper-V enlightenments and a local-time clock.
   The VM is created shut off.
+
+- **Disposable VMs from templates:** `create_vm_from_template` makes a VM in seconds from a template
+  volume the operator prepared, such as a Debian 13 cloud image with the guest agent installed
+  ([docs/templates.md](docs/templates.md) builds one with `scripts/make-template.sh`). The VM gets a
+  thin qcow2 overlay on the template (`<name>-g1.qcow2`) and a small read-only seed disk
+  (`<name>-g1-seed.img`) that cloud-init reads for the VM's identity; its name is also its hostname.
+  It starts and waits for the guest agent by default. With `lifetime_minutes` (at most
+  `max_lifetime_minutes`), the server deletes the VM and its disks once the time has passed: every
+  running server checks once a minute, and `virtmanager-mcp sweep` does one check, for a systemd timer
+  when no server runs. `reset_vm` returns such a VM to the template's state: new disks, no snapshots,
+  same name, MAC address, hardware and expiry. `list_templates` shows the usable templates; one whose
+  volume is missing, not qcow2, attached to any VM, or whose user data is unreadable, is hidden, and
+  the server log says why. Never change or delete a template volume while VMs use it.
+
+  ```toml
+  [manage]
+  create = true
+  delete = true               # also needed for reset_vm
+  disk_pool = "agent-vms"
+  max_lifetime_minutes = 1440
+
+  [manage.templates.debian13]
+  volume = "tpl-debian13.qcow2"                   # qcow2 volume in disk_pool
+  firmware = "bios"                               # or "uefi"; os = "linux" (default) or "windows"
+  description = "Debian 13 with qemu-guest-agent"
+  # user_data = "/etc/virtmanager-mcp/debian13.yaml"   # optional cloud-config for every new VM
+  ```
+
 - **Deleting:** `delete_vm` needs the VM to be shut off. It removes the VM with its snapshots,
   NVRAM and TPM state, and deletes the VM's disks that are volumes in `disk_pool`. Disks
   elsewhere and ISOs are never deleted. The same applies to VMs in `manage_vms`.
+
 - **Reconfiguring:** `configure_vm` changes vCPUs and memory in the persistent configuration
   (takes effect at the next boot). `attach_disk` creates a new volume in `disk_pool` and attaches
   it, also while the VM is running. `detach_disk` needs the VM shut off and **deletes** the volume
   if it is in `disk_pool`. `set_cdrom` inserts or ejects ISOs, `attach_nic`/`detach_nic` add and
   remove interfaces on allowed networks. `describe_vm` shows targets and MAC addresses.
+
 - **Limits:** `max_vcpus`, `max_memory_mib` and `max_disk_gib` apply to create and reconfigure.
   `max_vms` caps how many VMs created by the server exist at once.
+
 - **Paths:** ISOs must be inside `iso_dirs` (resolved like `host_share_dirs`, symlinks
   included), and QEMU (user `libvirt-qemu`/`qemu`) must be able to read them. `list_isos` lists the
   `.iso` files found there.
+
 - **Snapshots** are libvirt's internal qcow2 snapshots. A running VM's snapshot includes its
   memory. A *running* UEFI VM cannot be snapshotted on hosts whose OVMF firmware has no qcow2
   NVRAM variant (Arch, Ubuntu): libvirt refuses, so shut it down first. BIOS VMs work either way.
