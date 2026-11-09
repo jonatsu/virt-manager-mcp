@@ -1,8 +1,8 @@
 # Disposable VMs from templates: design
 
 Status: accepted by the user on 2026-11-09, with the recommended lifetime policy and Debian 13 as the first
-template, then revised for the plan-critic review of the same day. Once built, the code wins and this design follows
-it.
+template. Revised for two plan-critic reviews; the user accepted the reset, expiry-order and lifetime-cap choices on
+2026-11-10. Once built, the code wins and this design follows it.
 Basis: roadmap outcome 1 in [`fork-roadmap.md`](fork-roadmap.md), shaped by the confirmed draft
 [`disposable-vms-draft.md`](disposable-vms-draft.md), with evidence in
 [`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md).
@@ -35,7 +35,7 @@ configurable. The rest are recommendations:
   63 characters. The name becomes the guest's hostname unchanged.
 - **Expiry by a sweep in every server process,** at start and once a minute, plus a `virtmanager-mcp sweep` command for
   an optional systemd timer. No new daemon. `expires` holds UTC epoch seconds, and `manage.max_lifetime_minutes`
-  (default 1440) caps what an agent may ask for.
+  (default 1440) caps what an agent may ask for; a longer lifetime is refused.
 - **User data comes from the operator only.** Agents already have root in the guest through `exec`.
 
 ## Behaviour
@@ -98,11 +98,13 @@ because it destroys the VM's disk state, and it refuses VMs made by `create_vm`.
 1. Check the template and read the old overlay's capacity. A failed check stops the reset with nothing changed.
 2. Force the VM off, and delete its snapshots' metadata. Snapshots are internal, so their data lives in the overlay.
 3. Create the next generation's overlay, with the old capacity, and its seed.
-4. Redefine the domain with the new disks, the same UUID and MAC address, and the new owner attributes. If this fails,
-   delete the new volumes; the old ones are still in place.
+4. Redefine the domain from its own inactive XML, with the new disks and owner attributes. The name, UUID, MAC
+   address, vCPUs, memory and network interfaces stay as they are. If this fails, delete the new volumes; the old ones
+   are still in place.
 5. Delete the old overlay, the old seed, and every other pool disk an agent attached with `attach_disk`, so nothing of
    the old state is left. A volume that cannot be deleted is named in the result.
-6. Start the VM and wait for the agent, as at creation. The expiry does not change.
+6. Start the VM and wait for the agent, as at creation. A UEFI VM starts with its firmware variables reset to the
+   template's. The expiry does not change.
 
 ### Expiry
 
@@ -116,8 +118,9 @@ whose `expires` has passed, the sweep:
 1. Notes the VM's UUID, then looks the domain up again by that UUID and re-reads `expires` just before acting. A VM
    deleted and recreated under the same name in the meantime is therefore left alone.
 2. Forces the VM off through its own path, because `delete_vm` refuses running VMs.
-3. Undefines it and deletes its volumes in `manage.disk_pool`, then logs the deletion on stderr. A volume outside the
-   pool, or one whose deletion fails, is logged by name, because no later sweep can find it again.
+3. Deletes its volumes in `manage.disk_pool`, then undefines it and logs the deletion on stderr. Deleting first means
+   a crash in between leaves a domain the next sweep finds again. A volume outside the pool, or one whose deletion
+   fails, is logged by name.
 
 Two processes may sweep the same VM; the one that finds it gone treats that as done.
 
