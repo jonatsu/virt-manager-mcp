@@ -22,8 +22,8 @@ configurable. The rest are recommendations:
 - **Overlays, not clones.** An overlay costs no copy, and the probe booted one to a responding guest agent in 7.6 s.
 - **A FAT seed built in memory with the `fatfs` crate** (0.3.6, MIT). NoCloud reads a `vfat` or `iso9660` filesystem
   labelled `CIDATA` (cloud-init 25.1 docs). An ISO would need `xorriso` on the host. The SMBIOS form needs a
-  `seedfrom` URL and discourages its hostname and instance-ID keys. This choice stays provisional until the first
-  build slice boots a VM with it; the fallback is an ISO writer in Rust.
+  `seedfrom` URL and discourages its hostname and instance-ID keys. cloud-init applied such a seed in the first build
+  slice ([`2026-11-10-fatfs-seed-boot.md`](../research/2026-11-10-fatfs-seed-boot.md)).
 - **The seed is a read-only disk, not a CD-ROM,** so the existing `delete_vm`, which deletes every pool volume attached
   as a disk, removes it with the overlay.
 - **New tools rather than new `create_vm` parameters,** because the ISO, TPM and firmware parameters do not apply to a
@@ -53,9 +53,11 @@ description = "Debian 13 with qemu-guest-agent"
 user_data = "/etc/virtmanager-mcp/debian13.yaml" # optional, must start with #cloud-config
 ```
 
-A template is usable when its volume exists in `manage.disk_pool`, is qcow2, and is no defined domain's disk. The
-server checks this at startup and on every use; a template that fails is hidden from `list_templates`, and creating
-from it fails with the reason. `list_templates` also reports how many owned VMs use each template.
+A template is usable when its volume exists in `manage.disk_pool`, is qcow2, and is no domain's disk, in the stored
+or the running configuration, given by path or as a pool volume. Its user data must be readable, start with a
+`#cloud-config` line and fit the seed. The server checks this at startup and on every use; a template that fails is
+hidden from `list_templates`, and creating from it fails with the reason. Details that would show the agent other VMs'
+names or host paths go to the server log only. `list_templates` also reports how many owned VMs use each template.
 
 The operator must never boot, change or delete a template while VMs use it. A new version gets a new volume name. A
 tracked script, `scripts/make-template.sh`, with a short how-to, builds a template: it downloads and verifies an
@@ -66,8 +68,8 @@ template that the first build slice boots.
 ### Creating a VM
 
 `create_vm_from_template` takes a name, a template, and optional vCPUs, memory, disk size, network, lifetime in
-minutes, `start` (default true) and `wait_for_agent_secs` (default 60). It needs `manage.create` and at least one
-template.
+minutes, `start` (default true) and `wait_for_agent_secs` (default 60). vCPUs default to 2 and memory to 1024 MiB,
+each capped by its limit. It needs `manage.create` and at least one template.
 
 ```mermaid
 flowchart LR
@@ -96,9 +98,11 @@ flowchart LR
 because it destroys the VM's disk state, and it refuses VMs made by `create_vm`. In order:
 
 1. Check the template, check that the next generation's volume names are free, and read the old overlay's capacity.
-   A failed check stops the reset with nothing changed.
+   A VM whose expiry has passed is refused, because a sweep may be deleting it. A failed check stops the reset with
+   nothing changed.
 2. Force the VM off, discard any saved memory state, and delete its snapshots' metadata. Snapshots are internal, so
-   their data lives in the overlay. A failure from here on reports that the VM is off and its snapshots are gone.
+   their data lives in the overlay. A failure from here on reports that the VM is off and that its snapshots may be
+   gone. The VM's console session is closed.
 3. Create the next generation's overlay, with the old capacity, and its seed.
 4. Redefine the domain from its own inactive XML, with the new disks and owner attributes. The name, UUID, MAC
    address, vCPUs, memory and network interfaces stay as they are. If this fails, delete the new volumes; the old ones
@@ -139,7 +143,8 @@ Two processes may sweep the same VM; the one that finds it gone treats that as d
 These follow from the design and the code as it stands:
 
 - `domain_xml` in `src/manage.rs` takes a list of disks, the firmware and the owner attributes instead of one disk and
-  an empty CD-ROM.
+  an empty CD-ROM. Every disk refers to its volume by file path: a seed given as a pool-volume reference failed to
+  open on a later start.
 - Volume creation gains a raw volume sized in bytes, for the seed, and a qcow2 volume with a `<backingStore>`, for the
   overlay. The seed upload aborts its libvirt stream on every error path, because `virt`'s `Stream` panics on drop
   when freeing fails.
@@ -151,9 +156,8 @@ These follow from the design and the code as it stands:
 
 1. A template changed by hand under its VMs corrupts all of them. The server's checks and the versioned names reduce
    this, but cannot prevent it.
-2. cloud-init may reject the `fatfs` image; the first slice tests that before anything builds on it.
-3. `max_vms` holds only within one process, so several agent sessions can exceed it, until outcome 6.
-4. An expired VM lingers while no server process and no timer runs.
+2. `max_vms` holds only within one process, so several agent sessions can exceed it, until outcome 6.
+3. An expired VM lingers while no server process and no timer runs.
 
 ## Open questions
 
@@ -162,13 +166,13 @@ These follow from the design and the code as it stands:
 | Default and maximum lifetime | Decided by the user | No default; a maximum of 1440 minutes when an agent sets one. |
 | Which templates first | Decided by the user | Debian 13 only. |
 | Can agents extend a lifetime? | Deferred | Not in this version; revisit if agents lose work to expiry. |
-| Does cloud-init accept the `fatfs` seed? | Assumption | The first build slice boots one on the test bed. |
 
 ## Checks
 
 - The first build slice boots a VM from a `fatfs` seed and the Debian 13 template, and cloud-init applies its
   hostname, before anything else builds on the seed.
-- With a Debian 13 template, `create_vm_from_template` reports the guest agent responding within about 10 s.
+- With a Debian 13 template, `create_vm_from_template` reports the guest agent responding within about 10 s; the
+  test bed measured 11.9 s from the call, with 2 vCPUs and 1 GiB.
 - After `delete_vm`, `reset_vm` and an expiry, `virsh vol-list` shows no volume of the VM's old state, including disks
   added with `attach_disk`.
 - The template volume's checksum is unchanged after a create, a reset and a delete.
@@ -176,5 +180,6 @@ These follow from the design and the code as it stands:
   sweep skips owned VMs without `expires`; a template that fails its checks is hidden; `virtmanager-mcp sweep` deletes
   an expired VM and exits.
 - Unit tests cover the config parsing, the hostname rule, the seed contents and the expiry selection. Failure paths
-  cover a failed upload, a failed define, a missing template at create and at reset, a template in use as a disk, a
-  start failure after define, and two processes sweeping one VM.
+  cover a missing template at create and at reset, and a template in use as a disk. A failed upload, a failed define,
+  a start failure after define and two processes sweeping one VM rest on code review: the test bed cannot inject
+  those faults, or would need a memory overcommit the host cannot afford.
