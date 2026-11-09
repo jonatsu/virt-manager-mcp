@@ -86,6 +86,20 @@ These are in priority order. Each one needs a design agreed with the user before
 7. **`max_vms` across processes.** The cap is enforced under an in-process lock only, so several stdio instances,
    one per agent session, can race past it.
 
-## Open questions
+## Current goal
 
-- Should `main` replace upstream's `master` as the fork's default branch?
+The user armed an autopilot run on 2026-11-09 over baseline items 2 to 5 and the first defect.
+
+- **Objective:** baseline items 2 to 5 and the serial console stall are fixed on local `main`, one commit per item,
+  and this roadmap marks each one done.
+- **Success criteria:** `cargo fmt --check`, `cargo build --locked`, `cargo test --locked` and
+  `cargo clippy --locked --all-targets -- -D warnings` all exit 0. `AGENTS.md` exists and the `agents-context-docs`
+  checker passes on it. The README names only files that exist. `pre-commit run --all-files` passes on a second
+  run. The stall's root cause is recorded here, and `tests/testbed/cases/console-stall.json` run against
+  `trial-deb13` shows the password prompt and a shell prompt after login. A conformance review against this
+  roadmap finds no material mismatch.
+- **Verification:** run the commands above as the last step, after the last change, plus the test-bed case run.
+- **Boundaries:** touch only `trial-deb13` and the `agent-vms` pool on `qemu:///system`. Commit locally and do not
+  push. Leave baseline item 6 and the GitHub settings alone.
+- **Stop conditions:** stop and ask when a fix needs root, a host or libvirt configuration change, a VM other than
+  `trial-deb13`, a push, or a GitHub setting, or when systematic debugging of the stall finds no root cause.
