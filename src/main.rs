@@ -132,9 +132,7 @@ async fn main() -> Result<()> {
     });
 
     if let Some(Command::Sweep) = cli.command {
-        let deleted = sweep::sweep_once(&state)?;
-        tracing::info!("sweep done: {deleted} expired VMs deleted");
-        return Ok(());
+        return sweep::run_command(&state);
     }
     sweep::spawn(state.clone())?;
 

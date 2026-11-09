@@ -5,7 +5,7 @@
 //! being listed in the config file.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use virt::connect::Connect;
 use virt::domain::Domain;
 use virt::domain_snapshot::DomainSnapshot;
+use virt::error::ErrorNumber;
 use virt::network::Network;
 use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
@@ -688,20 +689,36 @@ pub fn owned_with_expiry(hv: &Hypervisor) -> Result<Vec<(String, Owner)>> {
 /// `None` when there was nothing to do.
 pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
     let m = &hv.config.manage;
-    let _guard = LOCK.lock().unwrap();
+    // The lock guards no data, so a panic elsewhere while holding it must not stop expiry for good.
+    let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     hv.with_conn(|conn| {
-        let Ok(dom) = Domain::lookup_by_uuid_string(conn, uuid) else {
-            return Ok(None);
+        // Another process may delete the VM at any step; finding it gone means the work is done.
+        let gone = |e: &virt::error::Error| e.code() == ErrorNumber::NoDomain;
+        let dom = match Domain::lookup_by_uuid_string(conn, uuid) {
+            Ok(dom) => dom,
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => bail!("cannot look up VM {uuid}: {}", e.message()),
         };
-        if !owner_of(&dom).is_some_and(|o| is_expired(&o, now)) {
+        if !should_expire(owner_of(&dom).as_ref(), now) {
             return Ok(None);
         }
         let name = dom.get_name()?;
-        if dom.is_active()? {
-            dom.destroy()
-                .map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;
+        match dom.is_active() {
+            Ok(true) => match dom.destroy() {
+                Ok(()) => {}
+                Err(e) if gone(&e) => return Ok(None),
+                Err(e) => bail!("cannot power off '{name}': {}", e.message()),
+            },
+            Ok(false) => {}
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => bail!("cannot read the state of '{name}': {}", e.message()),
         }
-        let disks: Vec<DiskInfo> = parse_disks(&inactive_xml(&dom)?)?
+        let xml = match dom.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE) {
+            Ok(xml) => xml,
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => bail!("cannot read '{name}': {}", e.message()),
+        };
+        let disks: Vec<DiskInfo> = parse_disks(&xml)?
             .into_iter()
             .filter(|d| d.device == "disk")
             .collect();
@@ -718,15 +735,23 @@ pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
                     )),
                 },
                 None => msg.push_str(&format!(
-                    "; left disk {} outside manage.disk_pool",
+                    "; disk {} is not a volume in manage.disk_pool (already deleted, or outside it)",
                     d.source()
                 )),
             }
         }
-        dom.undefine_flags(UNDEFINE_FLAGS)
-            .map_err(|e| anyhow!("cannot undefine '{name}': {}", e.message()))?;
-        Ok(Some(msg))
+        match dom.undefine_flags(UNDEFINE_FLAGS) {
+            Ok(_) => Ok(Some(msg)),
+            Err(e) if gone(&e) => Ok(None),
+            Err(e) => bail!("cannot undefine '{name}': {}", e.message()),
+        }
     })
+}
+
+/// Whether the sweep acts on a VM with this owner element: only a VM this server made, with an expiry that has
+/// passed at `now`.
+fn should_expire(owner: Option<&Owner>, now: u64) -> bool {
+    owner.is_some_and(|o| is_expired(o, now))
 }
 
 /// Whether an owner's expiry has passed at `now`. VMs without an expiry never expire.
@@ -1868,6 +1893,29 @@ mod tests {
                        <backingStore type='file'><source file='/pool/tpl.qcow2'/></backingStore>\
                        <target dev='vda'/></disk></devices></domain>";
         assert!(!uses(overlay));
+    }
+
+    #[test]
+    fn sweep_acts_only_on_owned_expired_vms() {
+        let owned = |expires| Owner {
+            template: Some("debian13".into()),
+            generation: Some(1),
+            expires,
+        };
+        // expire() re-reads the owner just before acting, so these are the states it can find.
+        assert!(should_expire(Some(&owned(Some(100))), 100));
+        assert!(
+            !should_expire(None, u64::MAX),
+            "a VM this server did not make"
+        );
+        assert!(
+            !should_expire(Some(&owned(None)), u64::MAX),
+            "a VM without an expiry"
+        );
+        assert!(
+            !should_expire(Some(&owned(Some(1000))), 100),
+            "a VM recreated with a later expiry"
+        );
     }
 
     #[test]

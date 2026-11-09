@@ -38,29 +38,54 @@ fn select(candidates: &[(String, Owner)], now: u64) -> Vec<&str> {
         .collect()
 }
 
-/// Deletes every expired VM once and returns how many it deleted. Each deletion and each failure is logged.
+/// What one sweep did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    pub deleted: usize,
+    pub failed: usize,
+}
+
+/// Deletes every expired VM once. Each deletion and each failure is logged.
 ///
 /// # Errors
 ///
 /// Fails when the configuration does not allow a sweep or the VMs cannot be listed.
-pub fn sweep_once(state: &State) -> Result<usize> {
+pub fn sweep_once(state: &State) -> Result<Outcome> {
     if let Some(why) = refusal(&state.hv.config) {
         bail!("not sweeping: {why}");
     }
     let candidates = manage::owned_with_expiry(&state.hv)?;
     let now = manage::now_epoch();
-    let mut deleted = 0;
+    let mut outcome = Outcome::default();
     for uuid in select(&candidates, now) {
         match manage::expire(&state.hv, uuid, now) {
             Ok(Some(msg)) => {
-                deleted += 1;
+                outcome.deleted += 1;
                 tracing::info!("{msg}");
             }
             Ok(None) => {}
-            Err(e) => tracing::error!("expiry of VM {uuid} failed: {e:#}"),
+            Err(e) => {
+                outcome.failed += 1;
+                tracing::error!("expiry of VM {uuid} failed: {e:#}");
+            }
         }
     }
-    Ok(deleted)
+    Ok(outcome)
+}
+
+/// Runs one sweep for the `sweep` command, failing when any expired VM could not be deleted, so a timer records
+/// the failure.
+///
+/// # Errors
+///
+/// Fails when the sweep cannot run or any deletion failed.
+pub fn run_command(state: &State) -> Result<()> {
+    let Outcome { deleted, failed } = sweep_once(state)?;
+    tracing::info!("sweep done: {deleted} expired VMs deleted, {failed} failed");
+    if failed > 0 {
+        bail!("{failed} expired VMs could not be deleted; the log above names them");
+    }
+    Ok(())
 }
 
 /// Starts the sweep thread of a serving process, when the configuration allows a sweep.
@@ -73,8 +98,14 @@ pub fn spawn(state: Arc<State>) -> Result<()> {
         .name("expiry-sweep".into())
         .spawn(move || {
             loop {
-                if let Err(e) = sweep_once(&state) {
-                    tracing::error!("expiry sweep: {e:#}");
+                // A panic in one sweep must not end expiry for the rest of the process.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep_once(&state)))
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::error!("expiry sweep: {e:#}"),
+                    Err(_) => {
+                        tracing::error!("expiry sweep panicked; retrying at the next interval")
+                    }
                 }
                 std::thread::sleep(INTERVAL);
             }
@@ -108,8 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_expiry_is_rechecked() {
-        // expire() re-reads the owner just before acting; a VM recreated with a later expiry is left alone.
+    fn expiry_compares_with_now() {
         assert!(manage::is_expired(&owner(Some(100)), 150));
         assert!(!manage::is_expired(&owner(Some(1000)), 150));
         assert!(!manage::is_expired(&owner(None), u64::MAX));
