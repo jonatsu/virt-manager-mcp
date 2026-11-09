@@ -98,18 +98,27 @@ These are in priority order. Each one needs a design agreed with the user before
 
 ## Current goal
 
-The user armed an autopilot run on 2026-11-09 over baseline items 2 to 5 and the first defect.
+The user armed a second autopilot run on 2026-11-09, over the advisory gate and defects 2 to 4. The first run, over
+baseline items 2 to 5 and defect 1, landed in `21c547d` to `bd175b1`.
 
-- **Objective:** baseline items 2 to 5 and the serial console stall are fixed on local `main`, one commit per item,
-  and this roadmap marks each one done.
-- **Success criteria:** `cargo fmt --check`, `cargo build --locked`, `cargo test --locked` and
-  `cargo clippy --locked --all-targets -- -D warnings` all exit 0. `AGENTS.md` exists and the `agents-context-docs`
-  checker passes on it. The README names only files that exist. `pre-commit run --all-files` passes on a second
-  run. The stall's root cause is recorded here, and `tests/testbed/cases/console-stall.json` run against
-  `trial-deb13` shows the password prompt and a shell prompt after login. A conformance review against this
-  roadmap finds no material mismatch.
-- **Verification:** run the commands above as the last step, after the last change, plus the test-bed case run.
-- **Boundaries:** touch only `trial-deb13` and the `agent-vms` pool on `qemu:///system`. Commit locally and do not
-  push. Leave baseline item 6 and the GitHub settings alone.
-- **Stop conditions:** stop and ask when a fix needs root, a host or libvirt configuration change, a VM other than
-  `trial-deb13`, a push, or a GitHub setting, or when systematic debugging of the stall finds no root cause.
+- **Objective:** `AGENTS.md` lists `cargo deny check advisories` in its build gate, and defects 2, 3 and 4 are each
+  settled on local `main` in their own commit, with a test, and marked done here.
+- **Success criteria:**
+  - Defect 2 is settled. A test-bed run opens a console on `trial-deb13`, forces `stop_vm`, then reads. The read
+    reports the console closed, and the item is dropped; or the reader is fixed until it does.
+  - Defect 3: a new file written by `write_file` gets mode 644 by default, or the mode given in a new optional
+    `mode` parameter. Appending keeps the existing file's mode. A test-bed case in `tests/testbed/cases/` shows all
+    three.
+  - Defect 4: `start_vm` on a running VM whose guest agent is down waits up to `wait_for_agent_secs` and reports
+    when the agent answers. A test-bed run shows it.
+  - Unit tests cover the logic of defects 3 and 4 wherever it does not need libvirt.
+  - The gate passes at the final commit: `cargo fmt --check`, `cargo build --locked`, `cargo test --locked`,
+    `cargo +1.89 test --locked`, `cargo clippy --locked --all-targets -- -D warnings` and
+    `cargo deny check advisories` all exit 0. A second `pre-commit run --all-files` pass and the
+    `agents-context-docs` checker both pass.
+  - A fresh conformance review against this roadmap, dispatched after the last commit, finds no material mismatch.
+- **Verification:** run the gate and the test-bed cases as the last step, after the last change.
+- **Boundaries:** touch only `trial-deb13` and the `agent-vms` pool on `qemu:///system`. Leave `trial-deb13`
+  running, with its guest agent up and no console session logged in. Commit locally; the user decides on the push.
+- **Stop conditions:** stop and ask when a fix needs root on the host, a host or libvirt configuration change, a VM
+  other than `trial-deb13`, a push, or a GitHub setting, or when a defect's root cause cannot be found.
