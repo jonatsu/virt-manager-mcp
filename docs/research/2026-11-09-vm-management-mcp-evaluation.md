@@ -3,7 +3,7 @@
 >
 > Correction: agent-setup commit `f2e697c0` withdrew the first two defects below. The console never stalled:
 > `console_read` ignored `wait_ms` on rereads, see [`2026-11-09-console-read-wait.md`](2026-11-09-console-read-wait.md).
-> Closed-console reporting is untested. A second correction, `d346adb4`, withdrew the fourth defect: the `start_vm`
+> Closed-console reporting works; see Defect 2 in the fork roadmap. A second correction, `d346adb4`, withdrew the fourth defect: the `start_vm`
 > guest had no guest agent, and the call was never timed. Of the four, only the `write_file` mode remains. This copy
 > keeps the original text.
 

@@ -112,8 +112,9 @@ baseline items 2 to 5 and defect 1, landed in `21c547d` to `bd175b1`.
 - **Objective:** `AGENTS.md` lists `cargo deny check advisories` in its build gate, and defects 2, 3 and 4 are each
   settled on local `main` in their own commit, with a test, and marked done here.
 - **Success criteria:**
-  - Defect 2 is settled. A test-bed run opens a console on `trial-deb13`, forces `stop_vm`, then reads. The read
-    reports the console closed, and the item is dropped; or the reader is fixed until it does.
+  - Defect 2 is settled. A test-bed run opens a console on `trial-deb13`, powers the VM off, then reads. The read
+    reports the console closed, and the item is dropped; or the reader is fixed until it does. The power-off comes
+    from inside the guest, because a forced `stop_vm` closes the session itself.
   - Defect 3: a new file written by `write_file` gets mode 644 by default, or the mode given in a new optional
     `mode` parameter. Appending keeps the existing file's mode. A test-bed case in `tests/testbed/cases/` shows all
     three.

@@ -295,16 +295,24 @@ impl<'a> Agent<'a> {
         if !linux && mode.is_some() {
             bail!("mode is only supported on Linux guests");
         }
+        let existed = linux && self.exists(path)?;
         let new_mode = if linux {
-            mode_to_set(self.exists(path)?, mode)
+            mode_to_set(existed, mode)
         } else {
             None
         };
         let handle = self.open(path, if append { "ab" } else { "wb" })?;
-        let result = (|| {
-            if let Some(m) = new_mode {
-                self.chmod(path, m)?;
+        if let Some(m) = new_mode
+            && let Err(e) = self.chmod(path, m)
+        {
+            self.close(handle);
+            if !existed {
+                // Do not leave an empty world-writable file behind.
+                let _ = self.exec(&ExecSpec::new("rm", ["-f", "--", path]), HELPER_TIMEOUT, 0);
             }
+            return Err(e);
+        }
+        let result = (|| {
             let mut written = 0u64;
             let mut buf = Vec::with_capacity(WRITE_CHUNK);
             loop {
