@@ -20,6 +20,7 @@ cargo fmt --check
 cargo build --locked
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
+cargo deny check advisories
 pre-commit run --all-files
 ```
 
