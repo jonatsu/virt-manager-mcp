@@ -5,7 +5,8 @@ This fork, `jonatsu/virt-manager-mcp`, adapts
 agents can create, snapshot and destroy throwaway test VMs on a libvirt host. It branched from upstream commit
 `f47d3c3`. The evidence for every item below is in
 [`docs/research/2026-11-09-vm-management-mcp-evaluation.md`](../research/2026-11-09-vm-management-mcp-evaluation.md),
-and the manual test bed is in [`tests/testbed/`](../../tests/testbed/README.md).
+and the manual test bed is in [`tests/testbed/`](../../tests/testbed/README.md). The fork goes its own way: it
+does not merge upstream regularly, and it takes upstream changes case by case.
 
 Work lands in the order below: the baseline first, because every later slice needs a build and test gate it can
 trust, then the four defects, then the features. Each item is done when its evidence line holds.
@@ -29,12 +30,11 @@ flowchart LR
 
 The fork audit on 2026-11-09 found the items below. None of them changes the server's behavior.
 
-1. **Establish the build and test gate.** `cargo build --locked`, `cargo test` and `cargo clippy --all-targets` have
-   not run in this checkout yet. Upstream has 10 unit tests, none of which touch libvirt. Evidence: all three commands
-   pass, or their failures are recorded here.
-2. **Settle formatting.** `cargo fmt --check` reports 118 differing hunks, so upstream does not run rustfmt with
-   default settings. Either reformat once in a commit of its own, or add a `rustfmt.toml` that matches upstream.
-   Reformatting makes later upstream merges noisier. Evidence: `cargo fmt --check` passes.
+1. **Build and test gate: passing.** `cargo build --locked`, `cargo test --locked` (10 unit tests, none touching
+   libvirt) and `cargo clippy --locked --all-targets` pass with no warnings on rustc 1.99.1.
+2. **Reformat once with default rustfmt.** `cargo fmt --check` reports 118 differing hunks, so upstream does not run
+   rustfmt with default settings. The fork diverges from upstream rather than tracking it, so it reformats in a
+   commit of its own and keeps default settings. Evidence: `cargo fmt --check` passes.
 3. **Add a project `AGENTS.md`.** The repository has no instruction file for agents working on this code. The two
    `example-global-*.md` files are templates for the server's users, not for contributors. The new file states the
    build gate, the libvirt test bed and its limits, and the rule that tests never touch VMs outside the test bed.
@@ -88,6 +88,4 @@ These are in priority order. Each one needs a design agreed with the user before
 
 ## Open questions
 
-- Should the fork track upstream closely, merging its changes regularly, or diverge freely? The answer decides the
-  formatting choice in baseline item 2 and whether fixes are offered upstream as pull requests.
 - Should `main` replace upstream's `master` as the fork's default branch?
