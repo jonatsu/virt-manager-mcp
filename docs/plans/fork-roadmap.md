@@ -35,10 +35,10 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
 2. **Done: reformatted once with default rustfmt.** Upstream did not run rustfmt with default settings. The fork
    diverges from upstream rather than tracking it, so it reformatted in a commit of its own and keeps default
    settings. `cargo fmt --check` passes.
-3. **Add a project `AGENTS.md`.** The repository has no instruction file for agents working on this code. The two
-   `example-global-*.md` files are templates for the server's users, not for contributors. The new file states the
-   build gate, the libvirt test bed and its limits, and the rule that tests never touch VMs outside the test bed.
-   Evidence: the `agents-context-docs` checker passes.
+3. **Done: project `AGENTS.md`, with `CLAUDE.md` as a symlink to it.** It states the build gate, the guardrails a
+   change must not weaken, and the rule that testing never touches VMs outside the test bed. It also marks the two
+   `example-global-*.md` files as templates for the server's users, not instructions for contributors. The
+   `agents-context-docs` checker passes.
 4. **Fix README drift.** The README names `global-CLAUDE.md` and `global-AGENTS.md`, but the files are
    `example-global-CLAUDE.md` and `example-global-AGENTS.md`. Its build step omits `--locked`. It points users at the
    upstream `v1.0` release binary, while `Cargo.toml` says `0.1.0`. Its first line is upstream's joke, which this
