@@ -9,21 +9,19 @@ and the manual test bed is in [`tests/testbed/`](../../tests/testbed/README.md).
 does not merge upstream regularly, and it takes upstream changes case by case.
 
 Work lands in the order below: the baseline first, because every later slice needs a build and test gate it can
-trust, then the four defects, then the features. Each item is done when its evidence line holds.
+trust, then the defects, then the outcomes in their listed order. Each item is done when its evidence line holds.
 
 ```mermaid
 flowchart LR
-  B[Baseline: build gate, agent docs, README fixes] --> D1[Console stall]
-  B --> D3[write_file mode]
-  B --> D4[start_vm wait]
-  B --> D2[Test console closed state]
-  D1 --> W[Wait tool]
+  B[Baseline and defects: done] --> O1[1. Clean VM in seconds]
+  O1 --> O2[2. Reliable interaction]
+  O2 --> O3[3. Code and results in and out]
+  O3 --> O4[4. Seeing what happened]
+  O4 --> O5[5. Several VMs together]
+  O5 --> O6[6. Operator trust and control]
+  O1 -. builds on .-> O5
   B --> A[Tool annotations]
   B --> IT[Integration tests]
-  IT --> S[qemu:///session]
-  S --> T[Disposable VMs from a template]
-  B --> L[Audit log]
-  B --> M[max_vms across processes]
 ```
 
 ## Baseline
@@ -101,26 +99,46 @@ The conformance reviews of the second autopilot run found these. None blocks the
 5. **`console_read` with `wait_ms: 0` right after `stop_vm`** can return `closed: null`, because the reader records
    the stream's end a moment later. A non-zero wait reports it.
 
-## Features
+## Outcomes
 
-These are in priority order. Each one needs a design agreed with the user before it is built.
+A brainstorm on 2026-11-09 grouped the planned features by what they let an agent do. The user set the order below.
+Each outcome needs a design agreed with the user before it is built, and each feature from the earlier list now sits
+under one of them.
 
-1. **MCP tool annotations.** Set `readOnlyHint`, `destructiveHint` and `idempotentHint` on every tool, so that
-   clients and permission layers can gate `delete_vm`, `snapshot_revert`, `detach_disk` and similar tools apart from
-   reads. `src/` sets none today.
-2. **A wait tool.** Wait until console output or screen text matches, or until the guest agent answers.
-   `type_text` returns at once, so input can land mid-boot or mid-login and be lost; the trial lost input that way.
-3. **Integration tests against real libvirt.** Turn the test-bed call lists into automated tests that run only when
-   the test bed is present, and skip otherwise.
-4. **Tested `qemu:///session` support.** The survey's strongest guardrail is structural: VMs in session scope cannot
-   reach the user's system VMs at all. `uri` is already a config key, but session mode is untested.
-5. **Disposable VMs from a template.** `create_vm` makes only a blank disk plus an ISO install, which is slow for
-   agents. Add a clone or qcow2 overlay of an operator-listed base image or template VM, optionally with a
-   cloud-init seed. The trial's cloud-init attempts never applied their user data, so that path needs its own
-   investigation; the test bed's preseed install works.
-6. **An audit log of mutating calls**, following `akarasulu/nested-mcp-server`.
-7. **`max_vms` across processes.** The cap is enforced under an in-process lock only, so several stdio instances,
-   one per agent session, can race past it.
+1. **A clean VM in seconds, not minutes.** An agent gets a fresh, disposable VM per task instead of waiting for an ISO
+   or preseed install. This covers disposable VMs cloned or overlaid from an operator-listed base image or template
+   VM, a reset-to-snapshot loop, and automatic expiry of abandoned VMs. Its first question is why cloud-init never
+   applied its user data in the trial; the smallest evidence is one boot with a known-good seed disk, checked through
+   the guest agent. If cloud-init cannot be made to work, the design clones a prepared template VM instead.
+2. **Reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input. This
+   covers the wait tool (console text, screen text or the guest agent), long-running processes whose output streams
+   back, and expect-style console sessions. `type_text` returns at once, and the trial lost input that way.
+3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
+   passing them through its context, and reaches services running in the guest. This covers copying from the VM,
+   directory sync, the guest's IP address and port forwarding. Each new path out of the guest needs a guardrail.
+4. **Seeing what happened.** When something fails in the guest, an agent can find out why. This covers console output
+   buffered from VM start, guest resource usage, and events such as a crash or reboot.
+5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
+   and it needs a network policy for each VM, which outcome 6 would otherwise bring.
+6. **Operator trust and control.** An operator can let agents run with less supervision. This covers an audit log of
+   mutating calls (following `akarasulu/nested-mcp-server`), `max_vms` enforced across processes (today only an
+   in-process lock guards it, so several stdio instances can race past it), network policies for each VM, scoping per
+   session, and tested `qemu:///session` support. Session scope is the survey's strongest guardrail: VMs there cannot
+   reach the user's system VMs at all, and `uri` is already a config key but untested.
+
+Two items stand outside the outcomes, because their result is already clear. Either can land at any time.
+
+- **MCP tool annotations.** Set `readOnlyHint`, `destructiveHint` and `idempotentHint` on every tool, so that clients
+  and permission layers can gate `delete_vm`, `snapshot_revert`, `detach_disk` and similar tools apart from reads.
+  `src/` sets none today.
+- **Integration tests against real libvirt.** Turn the test-bed call lists into automated tests that run only when
+  the test bed is present, and skip otherwise.
+
+Open questions for the designs:
+
+- Outcome 1: should disposable VMs live on `qemu:///system`, as today, or on `qemu:///session`, which outcome 6 would
+  otherwise test?
+- Outcome 5: should it bring its own network policy, or wait for outcome 6?
 
 ## Current goal
 
