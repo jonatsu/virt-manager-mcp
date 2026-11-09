@@ -285,20 +285,25 @@ fn check_template(conn: &Connect, m: &Manage, name: &str) -> Result<UsableTempla
     let path = vol.get_path()?;
     for dom in conn.list_all_domains(0)? {
         let disks = parse_disks(&inactive_xml(&dom)?)?;
-        if disks
-            .iter()
-            .any(|d| d.file.as_deref() == Some(path.as_str()))
-        {
-            bail!(
-                "template volume '{}' is a disk of VM '{}'; a template must never be attached",
+        if uses_volume(&disks, &path, &m.disk_pool, &t.volume) {
+            // The VM may be one the agent cannot see, so its name goes to the log only.
+            tracing::warn!(
+                "template '{name}': volume '{}' is a disk of VM '{}'",
                 t.volume,
                 dom.get_name().unwrap_or_default()
+            );
+            bail!(
+                "template volume '{}' is attached to a VM as a disk, and a template must never be; the server log \
+                 names the VM",
+                t.volume
             );
         }
     }
     let user_data = match &t.user_data {
-        Some(file) => std::fs::read_to_string(file)
-            .with_context(|| format!("cannot read user data {}", file.display()))?,
+        Some(file) => std::fs::read_to_string(file).map_err(|e| {
+            tracing::warn!("template '{name}': cannot read user data {}: {e}", file.display());
+            anyhow!("the user data file of template '{name}' cannot be read; the server log has the reason")
+        })?,
         None => format!("{}\n", seed::CLOUD_CONFIG_HEADER),
     };
     seed::check_user_data(&user_data).with_context(|| format!("user data of template '{name}'"))?;
@@ -306,6 +311,15 @@ fn check_template(conn: &Connect, m: &Manage, name: &str) -> Result<UsableTempla
         path,
         capacity: vol.get_info()?.capacity,
         user_data,
+    })
+}
+
+/// Whether any of `disks` is the volume `volume` of pool `pool_name` at `path`, given either by file path or as a
+/// pool-volume reference. A `<backingStore>` inside a disk does not count: `parse_disks` reads only direct sources.
+fn uses_volume(disks: &[DiskInfo], path: &str, pool_name: &str, volume: &str) -> bool {
+    disks.iter().any(|d| {
+        d.file.as_deref() == Some(path)
+            || (d.pool.as_deref() == Some(pool_name) && d.volume.as_deref() == Some(volume))
     })
 }
 
@@ -407,28 +421,33 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                 return Err(e);
             }
         };
-        let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
-        let xml = domain_xml(&DomainSpec {
-            name: &vm.name,
-            windows: t.os == GuestOs::Windows,
-            vcpus,
-            memory_mib,
-            uefi: t.firmware == Firmware::Uefi,
-            tpm: false,
-            disks: vec![Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
-            network: network.as_deref(),
-            uuid: Some(&uuid),
-            mac: None,
-            owner: Owner {
-                template: Some(vm.template.clone()),
-                generation: Some(generation),
-                expires,
-            },
-        });
-        if let Err(e) = Domain::define_xml(conn, &xml) {
+        let defined = (|| -> Result<()> {
+            let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
+            let xml = domain_xml(&DomainSpec {
+                name: &vm.name,
+                windows: t.os == GuestOs::Windows,
+                vcpus,
+                memory_mib,
+                uefi: t.firmware == Firmware::Uefi,
+                tpm: false,
+                disks: vec![Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
+                network: network.as_deref(),
+                uuid: Some(&uuid),
+                mac: None,
+                owner: Owner {
+                    template: Some(vm.template.clone()),
+                    generation: Some(generation),
+                    expires,
+                },
+            });
+            Domain::define_xml(conn, &xml)
+                .map_err(|e| anyhow!("cannot define VM '{}': {}", vm.name, e.message()))?;
+            Ok(())
+        })();
+        if let Err(e) = defined {
             let _ = seed_vol.delete(0);
             let _ = overlay.delete(0);
-            bail!("cannot define VM '{}': {}", vm.name, e.message());
+            return Err(e);
         }
         let mut message = format!(
             "created VM '{}' from template '{}' ({vcpus} vCPUs, {memory_mib} MiB, {} GiB disk {}/{overlay_name})",
@@ -506,22 +525,23 @@ pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
         };
 
         // 4. The same domain with the new disks and owner attributes.
-        let old_xml = inactive_xml(&dom)?;
-        let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
-        let new_owner = Owner {
-            generation: Some(next),
-            ..owner.clone()
-        };
-        let edited = replace_disks(
-            &old_xml,
-            &[Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
-        )
-        .and_then(|(xml, old)| Ok((replace_owner(&xml, &new_owner)?, old)));
-        let old_disks = match edited.and_then(|(xml, old)| {
+        let redefined = (|| -> Result<Vec<DiskInfo>> {
+            let old_xml = inactive_xml(&dom)?;
+            let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
+            let new_owner = Owner {
+                generation: Some(next),
+                ..owner.clone()
+            };
+            let (xml, old) = replace_disks(
+                &old_xml,
+                &[Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
+            )?;
+            let xml = replace_owner(&xml, &new_owner)?;
             Domain::define_xml(conn, &xml)
                 .map_err(|e| anyhow!("cannot redefine '{name}': {}", e.message()))?;
             Ok(old)
-        }) {
+        })();
+        let old_disks = match redefined {
             Ok(old) => old,
             Err(e) => {
                 let _ = seed_vol.delete(0);
@@ -1726,6 +1746,31 @@ mod tests {
         let disks = parse_disks(xml).unwrap();
         assert_eq!(disks.len(), 1);
         assert_eq!(disks[0].file.as_deref(), Some("/pool/t-g1.qcow2"));
+    }
+
+    #[test]
+    fn template_in_use_by_path_or_pool_volume() {
+        let by_path = "<domain><devices><disk type='file' device='disk'>\
+                       <source file='/pool/tpl.qcow2'/><target dev='vda'/></disk></devices></domain>";
+        let by_volume = "<domain><devices><disk type='volume' device='disk'>\
+                         <source pool='agent-vms' volume='tpl.qcow2'/><target dev='vda'/></disk></devices></domain>";
+        let other_pool = "<domain><devices><disk type='volume' device='disk'>\
+                          <source pool='elsewhere' volume='tpl.qcow2'/><target dev='vda'/></disk></devices></domain>";
+        let uses = |xml: &str| {
+            uses_volume(
+                &parse_disks(xml).unwrap(),
+                "/pool/tpl.qcow2",
+                "agent-vms",
+                "tpl.qcow2",
+            )
+        };
+        assert!(uses(by_path));
+        assert!(uses(by_volume));
+        assert!(!uses(other_pool));
+        let overlay = "<domain><devices><disk type='file' device='disk'><source file='/pool/t-g1.qcow2'/>\
+                       <backingStore type='file'><source file='/pool/tpl.qcow2'/></backingStore>\
+                       <target dev='vda'/></disk></devices></domain>";
+        assert!(!uses(overlay));
     }
 
     #[test]
