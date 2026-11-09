@@ -1,6 +1,7 @@
 # Disposable VMs from templates: design
 
-Status: proposed, 2026-11-09, awaiting the user's review. Once built, the code wins and this design follows it.
+Status: accepted by the user on 2026-11-09, with the recommended lifetime policy and Debian 13 as the first
+template. Once built, the code wins and this design follows it.
 Basis: roadmap outcome 1 in [`fork-roadmap.md`](fork-roadmap.md), shaped by the confirmed draft
 [`disposable-vms-draft.md`](disposable-vms-draft.md), with evidence in
 [`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md).
@@ -115,8 +116,8 @@ passed. Two processes may sweep the same VM; the one that finds it gone treats t
 
 | Question | Kind | Recommendation |
 | -- | -- | -- |
-| Default and maximum lifetime | User decision | No default; a maximum of 1440 minutes when an agent sets one. |
-| Which templates first | User decision | Debian 13 only. |
+| Default and maximum lifetime | Decided by the user | No default; a maximum of 1440 minutes when an agent sets one. |
+| Which templates first | Decided by the user | Debian 13 only. |
 | Can agents extend a lifetime? | Deferred | Not in this version; revisit if agents lose work to expiry. |
 | Does cloud-init accept the `fatfs` seed? | Assumption | The first build slice boots one on the test bed. |
 

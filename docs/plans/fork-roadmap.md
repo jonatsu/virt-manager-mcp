@@ -98,6 +98,9 @@ The conformance reviews of the second autopilot run found these. None blocks the
    data, and the clean-up after a failed `chmod`, rest on the test bed. A seam over the agent calls would allow it.
 5. **`console_read` with `wait_ms: 0` right after `stop_vm`** can return `closed: null`, because the reader records
    the stream's end a moment later. A non-zero wait reports it.
+6. **Convert the existing documents to the short, plain style.** `AGENTS.md` now asks for short, plain designs. The
+   user wants this roadmap, the brainstorm draft, the test-bed README and the research notes brought into the same
+   style; the research copies keep their copied text and change only their own notes.
 
 ## Outcomes
 
