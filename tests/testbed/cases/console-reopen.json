@@ -1,0 +1,42 @@
+[
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "trial-deb13",
+      "force": true
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "trial-deb13"
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "trial-deb13",
+      "force": true
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "trial-deb13",
+      "text": ""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "wait_ms": 3000
+    }
+  },
+  {
+    "tool": "console_close",
+    "args": {
+      "vm": "trial-deb13"
+    }
+  }
+]

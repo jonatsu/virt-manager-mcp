@@ -23,6 +23,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `console-after-start.json` | Opens the console during boot and reads one byte at a time. |
 | `write-file-mode.json` | `write_file` modes: 644 by default, an explicit `600`, a kept `640` on append and overwrite, a refused `4755`. |
 | `start-vm-waits-for-agent.json` | Stops the guest agent, which restarts 20 s later; `start_vm` waits and reports it responding. |
+| `console-reopen.json` | A second `console_open` reports the session open; with `force: true` it replaces the session, which then works. |
 | `console-closed-on-power-off.json` | Powers the VM off under an open console, once from inside the guest and once with a forced `stop_vm`; each next read reports the console closed. The case starts the VM again. |
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the

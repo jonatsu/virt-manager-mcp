@@ -132,9 +132,13 @@ impl Consoles {
     ) -> Result<String> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.get(vm) {
-            if s.buffer.lock().unwrap().closed.is_none() {
+            // A session counts as live while its reader runs and has not recorded an end. With
+            // `force`, even a live one is replaced: after a power-off its stream may never end.
+            let live = s.buffer.lock().unwrap().closed.is_none()
+                && s.reader.as_ref().is_some_and(|h| !h.is_finished());
+            if live && !force {
                 return Ok(format!(
-                    "console for '{vm}' is already open (device: {})",
+                    "console for '{vm}' is already open (device: {}); pass force: true to reopen it",
                     s.device.as_deref().unwrap_or("default")
                 ));
             }

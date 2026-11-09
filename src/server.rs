@@ -194,7 +194,8 @@ pub struct ConsoleOpenParams {
     pub vm: String,
     /// Console device alias (e.g. "serial0", "console1"); omit for the first console.
     pub device: Option<String>,
-    /// Take over the console even if another client (e.g. virt-manager) has it open.
+    /// Take over the console even if another client (e.g. virt-manager) has it open. Also replaces this
+    /// server's own session for the VM, discarding its buffered output.
     #[serde(default)]
     pub force: bool,
 }
