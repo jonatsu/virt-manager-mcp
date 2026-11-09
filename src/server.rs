@@ -964,17 +964,7 @@ impl VirtServer {
                     return Ok(vec![ContentBlock::text(msg)]);
                 }
             }
-            let wait = Duration::from_secs(p.wait_for_agent_secs.unwrap_or(60).min(300));
-            if !wait.is_zero() {
-                let dom = s.hv.domain(&name)?;
-                let agent = Agent::new(&dom, 2);
-                let ready = agent::wait_for(wait, Duration::from_secs(1), || agent.ping());
-                msg.push_str(if ready {
-                    "; guest agent is responding"
-                } else {
-                    "; guest agent not responding yet (the guest may still be booting)"
-                });
-            }
+            msg.push_str(&agent_wait_report(s, &name, p.wait_for_agent_secs));
             Ok(vec![ContentBlock::text(msg)])
         })
         .await
@@ -1001,17 +991,7 @@ impl VirtServer {
                 return Ok(vec![ContentBlock::text(msg)]);
             }
             msg.push_str("; started");
-            let wait = Duration::from_secs(p.wait_for_agent_secs.unwrap_or(60).min(300));
-            if !wait.is_zero() {
-                let dom = s.hv.domain(&p.vm)?;
-                let agent = Agent::new(&dom, 2);
-                let ready = agent::wait_for(wait, Duration::from_secs(1), || agent.ping());
-                msg.push_str(if ready {
-                    "; guest agent is responding"
-                } else {
-                    "; guest agent not responding yet (the guest may still be booting)"
-                });
-            }
+            msg.push_str(&agent_wait_report(s, &p.vm, p.wait_for_agent_secs));
             Ok(vec![ContentBlock::text(msg)])
         })
         .await
@@ -1249,6 +1229,25 @@ impl State {
 
     fn consoles_has(&self, vm: &str) -> bool {
         self.consoles.is_open(vm)
+    }
+}
+
+/// Waits for the guest agent of a VM that create or reset just started, up to `wait_secs` (default 60, max 300).
+/// Returns text to append to the result: the VM already exists, so a failure here is reported, never an error.
+fn agent_wait_report(s: &State, vm: &str, wait_secs: Option<u64>) -> String {
+    let wait = Duration::from_secs(wait_secs.unwrap_or(60).min(300));
+    if wait.is_zero() {
+        return String::new();
+    }
+    let dom = match s.hv.domain(vm) {
+        Ok(dom) => dom,
+        Err(e) => return format!("; the VM is not running now ({e:#})"),
+    };
+    let agent = Agent::new(&dom, 2);
+    if agent::wait_for(wait, Duration::from_secs(1), || agent.ping()) {
+        "; guest agent is responding".into()
+    } else {
+        "; guest agent not responding yet (the guest may still be booting)".into()
     }
 }
 

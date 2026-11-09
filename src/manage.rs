@@ -97,7 +97,10 @@ pub fn owner_of(dom: &Domain) -> Option<Owner> {
 /// The owner attributes in a domain's XML, or `None` when it has no owner element in `OWNER_NS`.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "reset and expiry, later changes, read owners")
+    expect(
+        dead_code,
+        reason = "a test oracle for the owner element in domain XML; production reads it through libvirt"
+    )
 )]
 fn owner_in_domain_xml(xml: &str) -> Result<Option<Owner>> {
     let doc = roxmltree::Document::parse(xml)?;
@@ -505,6 +508,10 @@ pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
             "VM '{name}' was not made from a template; only VMs from create_vm_from_template can be reset"
         );
     };
+    // Another process's sweep may be deleting it right now, which could orphan the new disks.
+    if is_expired(&owner, now_epoch()) {
+        bail!("VM '{name}' has expired and is about to be deleted; create a new VM instead");
+    };
     hv.with_conn(|conn| {
         // 1. Everything that can fail without changing anything.
         let template = check_template(conn, m, &template_name)?;
@@ -537,15 +544,17 @@ pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
             dom.destroy()
                 .map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;
         }
+        let off = "the VM was powered off, and some of its snapshots may be gone; its disks are unchanged";
         // A managed save would restore memory that refers to the old disks.
-        if dom.has_managed_save(0)? {
-            dom.managed_save_remove(0).map_err(|e| {
-                anyhow!("cannot remove the saved state of '{name}': {}", e.message())
-            })?;
+        if dom.has_managed_save(0).context(off)? {
+            dom.managed_save_remove(0)
+                .map_err(|e| anyhow!("cannot remove the saved state of '{name}': {}", e.message()))
+                .context(off)?;
         }
-        for snap in dom.list_all_snapshots(0)? {
+        for snap in dom.list_all_snapshots(0).context(off)? {
             snap.delete(sys::VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY)
-                .map_err(|e| anyhow!("cannot remove a snapshot of '{name}': {}", e.message()))?;
+                .map_err(|e| anyhow!("cannot remove a snapshot of '{name}': {}", e.message()))
+                .context(off)?;
         }
         let partial = "the VM was powered off and its snapshots were removed; its disks are unchanged";
 
