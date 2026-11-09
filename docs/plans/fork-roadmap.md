@@ -32,9 +32,9 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
 
 1. **Build and test gate: passing.** `cargo build --locked`, `cargo test --locked` (10 unit tests, none touching
    libvirt) and `cargo clippy --locked --all-targets` pass with no warnings on rustc 1.99.1.
-2. **Reformat once with default rustfmt.** `cargo fmt --check` reports 118 differing hunks, so upstream does not run
-   rustfmt with default settings. The fork diverges from upstream rather than tracking it, so it reformats in a
-   commit of its own and keeps default settings. Evidence: `cargo fmt --check` passes.
+2. **Done: reformatted once with default rustfmt.** Upstream did not run rustfmt with default settings. The fork
+   diverges from upstream rather than tracking it, so it reformatted in a commit of its own and keeps default
+   settings. `cargo fmt --check` passes.
 3. **Add a project `AGENTS.md`.** The repository has no instruction file for agents working on this code. The two
    `example-global-*.md` files are templates for the server's users, not for contributors. The new file states the
    build gate, the libvirt test bed and its limits, and the rule that tests never touch VMs outside the test bed.

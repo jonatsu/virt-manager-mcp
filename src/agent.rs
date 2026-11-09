@@ -66,7 +66,12 @@ impl<'a> Agent<'a> {
 
     // ---- command execution -------------------------------------------------
 
-    pub fn exec(&self, spec: &ExecSpec, timeout: Duration, max_output: usize) -> Result<ExecOutcome> {
+    pub fn exec(
+        &self,
+        spec: &ExecSpec,
+        timeout: Duration,
+        max_output: usize,
+    ) -> Result<ExecOutcome> {
         let mut args = json!({
             "path": spec.path,
             "arg": spec.args,
@@ -132,7 +137,9 @@ impl<'a> Agent<'a> {
     fn kill(&self, pid: i64) -> Result<()> {
         let spec = match self.os()? {
             GuestOs::Linux => ExecSpec::new("kill", ["-KILL", &pid.to_string()]),
-            GuestOs::Windows => ExecSpec::new("taskkill.exe", ["/F", "/T", "/PID", &pid.to_string()]),
+            GuestOs::Windows => {
+                ExecSpec::new("taskkill.exe", ["/F", "/T", "/PID", &pid.to_string()])
+            }
         };
         self.call(
             "guest-exec",
@@ -144,9 +151,12 @@ impl<'a> Agent<'a> {
     // ---- file access --------------------------------------------------------
 
     fn open(&self, path: &str, mode: &str) -> Result<i64> {
-        self.call("guest-file-open", Some(json!({ "path": path, "mode": mode })))?
-            .as_i64()
-            .ok_or_else(|| anyhow!("guest-file-open returned no handle"))
+        self.call(
+            "guest-file-open",
+            Some(json!({ "path": path, "mode": mode })),
+        )?
+        .as_i64()
+        .ok_or_else(|| anyhow!("guest-file-open returned no handle"))
     }
 
     fn close(&self, handle: i64) {
@@ -168,11 +178,17 @@ impl<'a> Agent<'a> {
                 let want = (max_bytes - data.len()).min(FILE_CHUNK);
                 if want == 0 {
                     // Probe one byte so the caller learns whether more data exists.
-                    let r = self.call("guest-file-read", Some(json!({ "handle": handle, "count": 1 })))?;
+                    let r = self.call(
+                        "guest-file-read",
+                        Some(json!({ "handle": handle, "count": 1 })),
+                    )?;
                     let more = r.get("count").and_then(Value::as_u64).unwrap_or(0) > 0;
                     return Ok((data, !more));
                 }
-                let r = self.call("guest-file-read", Some(json!({ "handle": handle, "count": want })))?;
+                let r = self.call(
+                    "guest-file-read",
+                    Some(json!({ "handle": handle, "count": want })),
+                )?;
                 if let Some(b) = r.get("buf-b64").and_then(Value::as_str) {
                     data.extend(B64.decode(b)?);
                 }
@@ -304,7 +320,10 @@ mod tests {
     fn powershell_encodes_utf16le() {
         let spec = powershell("echo é");
         let decoded = B64.decode(spec.args.last().unwrap()).unwrap();
-        let utf16: Vec<u16> = decoded.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let utf16: Vec<u16> = decoded
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         assert_eq!(String::from_utf16(&utf16).unwrap(), "echo é");
     }
 }

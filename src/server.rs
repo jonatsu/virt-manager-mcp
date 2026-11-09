@@ -36,8 +36,20 @@ const MUTATING_TOOLS: &[&str] = &[
 /// Tools behind [manage] create / delete / reconfigure / snapshots.
 const CREATE_TOOLS: &[&str] = &["create_vm"];
 const DELETE_TOOLS: &[&str] = &["delete_vm"];
-const RECONFIGURE_TOOLS: &[&str] = &["configure_vm", "attach_disk", "detach_disk", "set_cdrom", "attach_nic", "detach_nic"];
-const SNAPSHOT_TOOLS: &[&str] = &["snapshot_create", "snapshot_list", "snapshot_revert", "snapshot_delete"];
+const RECONFIGURE_TOOLS: &[&str] = &[
+    "configure_vm",
+    "attach_disk",
+    "detach_disk",
+    "set_cdrom",
+    "attach_nic",
+    "detach_nic",
+];
+const SNAPSHOT_TOOLS: &[&str] = &[
+    "snapshot_create",
+    "snapshot_list",
+    "snapshot_revert",
+    "snapshot_delete",
+];
 
 pub struct State {
     pub hv: Hypervisor,
@@ -360,14 +372,23 @@ impl VirtServer {
             tool_router.remove_route("copy_to_vm");
         }
         let m = &config.manage;
-        let off = |on: bool, tools: &'static [&'static str]| if on && !config.read_only { &[][..] } else { tools };
+        let off = |on: bool, tools: &'static [&'static str]| {
+            if on && !config.read_only {
+                &[][..]
+            } else {
+                tools
+            }
+        };
         for name in [
             off(m.create, CREATE_TOOLS),
             off(m.delete, DELETE_TOOLS),
             off(m.reconfigure, RECONFIGURE_TOOLS),
             off(m.snapshots, SNAPSHOT_TOOLS),
             off(m.enabled(), &["describe_vm"]),
-            off((m.create || m.reconfigure) && !m.iso_dirs.is_empty(), &["list_isos"]),
+            off(
+                (m.create || m.reconfigure) && !m.iso_dirs.is_empty(),
+                &["list_isos"],
+            ),
         ]
         .concat()
         {
@@ -384,35 +405,38 @@ impl VirtServer {
         let state = self.state.clone();
         match tokio::task::spawn_blocking(move || f(&state)).await {
             Ok(Ok(content)) => Ok(CallToolResult::success(content)),
-            Ok(Err(e)) => Ok(CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))])),
+            Ok(Err(e)) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{e:#}"
+            ))])),
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
     }
 
-    #[tool(description = "List VMs this server may access: power state, whether start_vm/stop_vm may be used on them, \
-        whether the VM management tools may act on them (managed), and for running VMs whether the QEMU guest agent responds and the guest OS family.")]
+    #[tool(
+        description = "List VMs this server may access: power state, whether start_vm/stop_vm may be used on them, \
+        whether the VM management tools may act on them (managed), and for running VMs whether the QEMU guest agent responds and the guest OS family."
+    )]
     async fn list_vms(&self) -> Result<CallToolResult, ErrorData> {
         self.blocking(|s| {
             let timeout = s.hv.config.limits.agent_timeout_secs.min(3);
-            let vms: Vec<Value> = s
-                .hv
-                .allowed()?
-                .iter()
-                .map(|d| {
-                    let name = d.get_name().unwrap_or_default();
-                    let agent = Agent::new(d, timeout);
-                    let ok = d.is_active().unwrap_or(false) && agent.ping();
-                    json!({
-                        "name": name,
-                        "state": hypervisor::state_name(d),
-                        "power_control": s.hv.can_power(d) && !s.hv.config.read_only,
-                        "managed": s.hv.can_manage(d) && !s.hv.config.read_only,
-                        "guest_agent": ok,
-                        "os": if ok { agent.os().ok() } else { None },
-                        "console_open": s.consoles_has(&name),
+            let vms: Vec<Value> =
+                s.hv.allowed()?
+                    .iter()
+                    .map(|d| {
+                        let name = d.get_name().unwrap_or_default();
+                        let agent = Agent::new(d, timeout);
+                        let ok = d.is_active().unwrap_or(false) && agent.ping();
+                        json!({
+                            "name": name,
+                            "state": hypervisor::state_name(d),
+                            "power_control": s.hv.can_power(d) && !s.hv.config.read_only,
+                            "managed": s.hv.can_manage(d) && !s.hv.config.read_only,
+                            "guest_agent": ok,
+                            "os": if ok { agent.os().ok() } else { None },
+                            "console_open": s.consoles_has(&name),
+                        })
                     })
-                })
-                .collect();
+                    .collect();
             let mut out = vec![json_block(&vms)?];
             if vms.is_empty() {
                 out.push(ContentBlock::text(
@@ -424,8 +448,13 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Query the guest agent for OS details, hostname, network interfaces, filesystems, logged-in users and timezone.")]
-    async fn guest_info(&self, Parameters(p): Parameters<VmParam>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Query the guest agent for OS details, hostname, network interfaces, filesystems, logged-in users and timezone."
+    )]
+    async fn guest_info(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let agent = s.agent(&dom);
@@ -438,7 +467,9 @@ impl VirtServer {
                 ("network", "guest-network-get-interfaces"),
                 ("filesystems", "guest-get-fsinfo"),
             ] {
-                let v = agent.call(cmd, None).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+                let v = agent
+                    .call(cmd, None)
+                    .unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
                 info.insert(key.into(), v);
             }
             Ok(vec![json_block(&info)?])
@@ -446,10 +477,15 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Run a command inside the guest via the QEMU guest agent and return exit code, stdout and stderr. \
+    #[tool(
+        description = "Run a command inside the guest via the QEMU guest agent and return exit code, stdout and stderr. \
         Non-interactive: the command must not wait for user input. Provide either `command` (run by a shell; default \
-        /bin/sh on Linux, PowerShell on Windows) or `program` + `args` (run directly).")]
-    async fn exec(&self, Parameters(p): Parameters<ExecParams>) -> Result<CallToolResult, ErrorData> {
+        /bin/sh on Linux, PowerShell on Windows) or `program` + `args` (run directly)."
+    )]
+    async fn exec(
+        &self,
+        Parameters(p): Parameters<ExecParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let agent = s.agent(&dom);
@@ -462,11 +498,18 @@ impl VirtServer {
             spec.env = p.env;
             spec.stdin = p.stdin.map(String::into_bytes);
             let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(limits.exec_timeout_secs));
-            let out = agent.exec(&spec, timeout, p.max_output_bytes.unwrap_or(limits.max_output_bytes))?;
+            let out = agent.exec(
+                &spec,
+                timeout,
+                p.max_output_bytes.unwrap_or(limits.max_output_bytes),
+            )?;
 
             let mut text = serde_json::to_string(&out)?;
             if out.timed_out {
-                text.push_str(&format!("\ncommand did not finish within {}s", timeout.as_secs()));
+                text.push_str(&format!(
+                    "\ncommand did not finish within {}s",
+                    timeout.as_secs()
+                ));
             }
             text.push_str("\n--- stdout ---\n");
             text.push_str(&String::from_utf8_lossy(&out.stdout));
@@ -477,17 +520,26 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Read a file from the guest via the QEMU guest agent. Returns text, or base64 for binary content.")]
-    async fn read_file(&self, Parameters(p): Parameters<ReadFileParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Read a file from the guest via the QEMU guest agent. Returns text, or base64 for binary content."
+    )]
+    async fn read_file(
+        &self,
+        Parameters(p): Parameters<ReadFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
-            let max = p.max_bytes.unwrap_or(s.hv.config.limits.max_file_read_bytes);
+            let max = p
+                .max_bytes
+                .unwrap_or(s.hv.config.limits.max_file_read_bytes);
             let (data, eof) = s.agent(&dom).read_file(&p.path, p.offset, max)?;
             let (encoding, content) = match (p.encoding, String::from_utf8(data)) {
                 (ReadEncoding::Base64, Ok(t)) => ("base64", B64.encode(t)),
                 (ReadEncoding::Base64, Err(e)) => ("base64", B64.encode(e.into_bytes())),
                 (_, Ok(t)) => ("text", t),
-                (ReadEncoding::Text, Err(e)) => ("text", String::from_utf8_lossy(e.as_bytes()).into_owned()),
+                (ReadEncoding::Text, Err(e)) => {
+                    ("text", String::from_utf8_lossy(e.as_bytes()).into_owned())
+                }
                 (ReadEncoding::Auto, Err(e)) => ("base64", B64.encode(e.into_bytes())),
             };
             let meta = json!({
@@ -496,13 +548,19 @@ impl VirtServer {
                 "encoding": encoding,
                 "truncated": !eof,
             });
-            Ok(vec![ContentBlock::text(meta.to_string()), ContentBlock::text(content)])
+            Ok(vec![
+                ContentBlock::text(meta.to_string()),
+                ContentBlock::text(content),
+            ])
         })
         .await
     }
 
     #[tool(description = "Write (or append to) a file in the guest via the QEMU guest agent.")]
-    async fn write_file(&self, Parameters(p): Parameters<WriteFileParams>) -> Result<CallToolResult, ErrorData> {
+    async fn write_file(
+        &self,
+        Parameters(p): Parameters<WriteFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let data = match p.encoding {
@@ -510,28 +568,48 @@ impl VirtServer {
                 WriteEncoding::Base64 => B64.decode(p.content.trim())?,
             };
             let n = s.agent(&dom).write_file(&p.path, &data, p.append)?;
-            Ok(vec![ContentBlock::text(format!("wrote {n} bytes to {}", p.path))])
+            Ok(vec![ContentBlock::text(format!(
+                "wrote {n} bytes to {}",
+                p.path
+            ))])
         })
         .await
     }
 
-    #[tool(description = "Copy a file from the host into the guest via the QEMU guest agent. The file is streamed \
+    #[tool(
+        description = "Copy a file from the host into the guest via the QEMU guest agent. The file is streamed \
         directly by the server, so it can be large and never passes through the conversation. Only files inside the \
-        shared host directories (named in the server instructions) can be copied.")]
-    async fn copy_to_vm(&self, Parameters(p): Parameters<CopyToVmParams>) -> Result<CallToolResult, ErrorData> {
+        shared host directories (named in the server instructions) can be copied."
+    )]
+    async fn copy_to_vm(
+        &self,
+        Parameters(p): Parameters<CopyToVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let src = s.hv.config.share_file(&p.host_path)?;
-            let file = std::fs::File::open(&src).with_context(|| format!("cannot open {}", src.display()))?;
-            let n = s.agent(&dom).write_from(&p.guest_path, std::io::BufReader::new(file), false)?;
-            Ok(vec![ContentBlock::text(format!("copied {n} bytes from {} to {}", src.display(), p.guest_path))])
+            let file = std::fs::File::open(&src)
+                .with_context(|| format!("cannot open {}", src.display()))?;
+            let n =
+                s.agent(&dom)
+                    .write_from(&p.guest_path, std::io::BufReader::new(file), false)?;
+            Ok(vec![ContentBlock::text(format!(
+                "copied {n} bytes from {} to {}",
+                src.display(),
+                p.guest_path
+            ))])
         })
         .await
     }
 
-    #[tool(description = "Start a VM that is shut off (or resume it if paused, wake it if suspended). \
-        Only VMs with power_control: true in list_vms can be started.")]
-    async fn start_vm(&self, Parameters(p): Parameters<StartVmParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Start a VM that is shut off (or resume it if paused, wake it if suspended). \
+        Only VMs with power_control: true in list_vms can be started."
+    )]
+    async fn start_vm(
+        &self,
+        Parameters(p): Parameters<StartVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let mut msg = format!("VM '{}': {}", p.vm, s.hv.start(&p.vm)?);
             let wait = Duration::from_secs(p.wait_for_agent_secs.min(300));
@@ -559,10 +637,15 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Shut down a VM. By default asks the guest to shut down cleanly (ACPI power button or guest \
+    #[tool(
+        description = "Shut down a VM. By default asks the guest to shut down cleanly (ACPI power button or guest \
         agent) and waits for it; with force: true it is powered off immediately, which can lose unsaved data. \
-        Only VMs with power_control: true in list_vms can be stopped.")]
-    async fn stop_vm(&self, Parameters(p): Parameters<StopVmParams>) -> Result<CallToolResult, ErrorData> {
+        Only VMs with power_control: true in list_vms can be stopped."
+    )]
+    async fn stop_vm(
+        &self,
+        Parameters(p): Parameters<StopVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let wait = Duration::from_secs(p.wait_secs.unwrap_or(60).min(300));
             let off = s.hv.stop(&p.vm, p.force, wait)?;
@@ -582,17 +665,28 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "List a directory in the guest (name, type, size, modification time, mode, owner).")]
-    async fn list_dir(&self, Parameters(p): Parameters<PathParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "List a directory in the guest (name, type, size, modification time, mode, owner)."
+    )]
+    async fn list_dir(
+        &self,
+        Parameters(p): Parameters<PathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
-            Ok(vec![json_block(&fsops::list_dir(&s.agent(&dom), &p.path)?)?])
+            Ok(vec![json_block(&fsops::list_dir(
+                &s.agent(&dom),
+                &p.path,
+            )?)?])
         })
         .await
     }
 
     #[tool(description = "Get metadata of a single file or directory in the guest.")]
-    async fn stat_path(&self, Parameters(p): Parameters<PathParams>) -> Result<CallToolResult, ErrorData> {
+    async fn stat_path(
+        &self,
+        Parameters(p): Parameters<PathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             Ok(vec![json_block(&fsops::stat(&s.agent(&dom), &p.path)?)?])
@@ -600,36 +694,56 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Attach to the VM's serial/virtio text console (like `virsh console`). Output is buffered \
+    #[tool(
+        description = "Attach to the VM's serial/virtio text console (like `virsh console`). Output is buffered \
         from this point on; read it with console_read. Needs a <console>/<serial> device in the VM and a getty or \
-        other program on it in the guest.")]
-    async fn console_open(&self, Parameters(p): Parameters<ConsoleOpenParams>) -> Result<CallToolResult, ErrorData> {
+        other program on it in the guest."
+    )]
+    async fn console_open(
+        &self,
+        Parameters(p): Parameters<ConsoleOpenParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
-            let msg = s.consoles.open(&s.hv, &p.vm, &dom, p.device.as_deref(), p.force)?;
+            let msg = s
+                .consoles
+                .open(&s.hv, &p.vm, &dom, p.device.as_deref(), p.force)?;
             Ok(vec![ContentBlock::text(msg)])
         })
         .await
     }
 
-    #[tool(description = "Read buffered output from an open serial console. Returns `next`, the offset to pass as \
-        `since` on the following call to get only new output.")]
-    async fn console_read(&self, Parameters(p): Parameters<ConsoleReadParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Read buffered output from an open serial console. Returns `next`, the offset to pass as \
+        `since` on the following call to get only new output."
+    )]
+    async fn console_read(
+        &self,
+        Parameters(p): Parameters<ConsoleReadParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let wait = Duration::from_millis(p.wait_ms.min(30_000));
-            let r = s.consoles.read(&p.vm, p.since, p.max_bytes.unwrap_or(64 * 1024), wait)?;
+            let r = s
+                .consoles
+                .read(&p.vm, p.since, p.max_bytes.unwrap_or(64 * 1024), wait)?;
             let mut text = String::from_utf8_lossy(&r.data).into_owned();
             if p.strip_ansi.unwrap_or(true) {
                 text = strip_ansi(&text);
             }
             let meta = json!({ "next": r.next, "dropped_bytes": r.dropped, "closed": r.closed });
-            Ok(vec![ContentBlock::text(meta.to_string()), ContentBlock::text(text)])
+            Ok(vec![
+                ContentBlock::text(meta.to_string()),
+                ContentBlock::text(text),
+            ])
         })
         .await
     }
 
     #[tool(description = "Send text to an open serial console (by default followed by Enter).")]
-    async fn console_write(&self, Parameters(p): Parameters<ConsoleWriteParams>) -> Result<CallToolResult, ErrorData> {
+    async fn console_write(
+        &self,
+        Parameters(p): Parameters<ConsoleWriteParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             s.hv.domain(&p.vm)?;
             let mut data = p.text.into_bytes();
@@ -637,22 +751,35 @@ impl VirtServer {
                 data.push(b'\r');
             }
             s.consoles.write(&p.vm, &data)?;
-            Ok(vec![ContentBlock::text(format!("sent {} bytes", data.len()))])
+            Ok(vec![ContentBlock::text(format!(
+                "sent {} bytes",
+                data.len()
+            ))])
         })
         .await
     }
 
     #[tool(description = "Detach from a VM's serial console.")]
-    async fn console_close(&self, Parameters(p): Parameters<VmParam>) -> Result<CallToolResult, ErrorData> {
+    async fn console_close(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
-            let msg = if s.consoles.close(&p.vm) { "console closed" } else { "no console was open" };
+            let msg = if s.consoles.close(&p.vm) {
+                "console closed"
+            } else {
+                "no console was open"
+            };
             Ok(vec![ContentBlock::text(msg)])
         })
         .await
     }
 
     #[tool(description = "Take a screenshot of the VM's graphical display (PNG).")]
-    async fn screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> Result<CallToolResult, ErrorData> {
+    async fn screenshot(
+        &self,
+        Parameters(p): Parameters<ScreenshotParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let max_width = match p.max_width.unwrap_or(1280) {
@@ -668,36 +795,65 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Press key combinations on the VM's virtual keyboard, in order (e.g. ctrl+alt+delete, win+r, enter).")]
-    async fn send_keys(&self, Parameters(p): Parameters<SendKeysParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Press key combinations on the VM's virtual keyboard, in order (e.g. ctrl+alt+delete, win+r, enter)."
+    )]
+    async fn send_keys(
+        &self,
+        Parameters(p): Parameters<SendKeysParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
-            let combos: Vec<Vec<u32>> = p.keys.iter().map(|k| display::parse_combo(k)).collect::<Result<_>>()?;
+            let combos: Vec<Vec<u32>> = p
+                .keys
+                .iter()
+                .map(|k| display::parse_combo(k))
+                .collect::<Result<_>>()?;
             for combo in &combos {
                 display::send_combo(&dom, combo, p.hold_ms.unwrap_or(50))?;
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Ok(vec![ContentBlock::text(format!("sent {} key combo(s)", combos.len()))])
+            Ok(vec![ContentBlock::text(format!(
+                "sent {} key combo(s)",
+                combos.len()
+            ))])
         })
         .await
     }
 
-    #[tool(description = "Type text on the VM's virtual keyboard into whatever has focus (graphical or text console). \
-        Assumes the guest uses a US keyboard layout.")]
-    async fn type_text(&self, Parameters(p): Parameters<TypeTextParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Type text on the VM's virtual keyboard into whatever has focus (graphical or text console). \
+        Assumes the guest uses a US keyboard layout."
+    )]
+    async fn type_text(
+        &self,
+        Parameters(p): Parameters<TypeTextParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
-            display::type_text(&dom, &p.text, Duration::from_millis(p.delay_ms.unwrap_or(20)))?;
-            Ok(vec![ContentBlock::text(format!("typed {} characters", p.text.chars().count()))])
+            display::type_text(
+                &dom,
+                &p.text,
+                Duration::from_millis(p.delay_ms.unwrap_or(20)),
+            )?;
+            Ok(vec![ContentBlock::text(format!(
+                "typed {} characters",
+                p.text.chars().count()
+            ))])
         })
         .await
     }
 
-    #[tool(description = "Create a new VM (shut off; start it with start_vm). It gets a new qcow2 system disk, an empty \
+    #[tool(
+        description = "Create a new VM (shut off; start it with start_vm). It gets a new qcow2 system disk, an empty \
         or ISO-loaded SATA CD-ROM it boots from after the disk, a virtio NIC, the QEMU guest agent channel, a serial \
         console and a SPICE display. The guest agent must still be installed inside the guest. Limits and allowed \
-        networks are named in the server instructions.")]
-    async fn create_vm(&self, Parameters(p): Parameters<CreateVmParams>) -> Result<CallToolResult, ErrorData> {
+        networks are named in the server instructions."
+    )]
+    async fn create_vm(
+        &self,
+        Parameters(p): Parameters<CreateVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let msg = manage::create(
                 &s.hv,
@@ -719,9 +875,14 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Delete a shut-off VM with managed: true in list_vms, including its snapshots, NVRAM and TPM \
-        state. Its disks in the server's disk pool are deleted; other disks and ISOs are left in place. Cannot be undone.")]
-    async fn delete_vm(&self, Parameters(p): Parameters<VmParam>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Delete a shut-off VM with managed: true in list_vms, including its snapshots, NVRAM and TPM \
+        state. Its disks in the server's disk pool are deleted; other disks and ISOs are left in place. Cannot be undone."
+    )]
+    async fn delete_vm(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let msg = manage::delete(&s.hv, &p.vm)?;
             s.consoles.close(&p.vm);
@@ -730,36 +891,77 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Show the configuration of a VM with managed: true in list_vms: vCPUs, memory, firmware, TPM, \
-        disks and CD-ROMs (with targets), and network interfaces (with MACs).")]
-    async fn describe_vm(&self, Parameters(p): Parameters<VmParam>) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| Ok(vec![json_block(&manage::describe(&s.hv, &p.vm)?)?])).await
+    #[tool(
+        description = "Show the configuration of a VM with managed: true in list_vms: vCPUs, memory, firmware, TPM, \
+        disks and CD-ROMs (with targets), and network interfaces (with MACs)."
+    )]
+    async fn describe_vm(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| Ok(vec![json_block(&manage::describe(&s.hv, &p.vm)?)?]))
+            .await
     }
 
-    #[tool(description = "Change the vCPU count and/or memory of a managed VM. Changes the persistent configuration, \
-        so a running VM picks them up after it is shut down and started again.")]
-    async fn configure_vm(&self, Parameters(p): Parameters<ConfigureVmParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Change the vCPU count and/or memory of a managed VM. Changes the persistent configuration, \
+        so a running VM picks them up after it is shut down and started again."
+    )]
+    async fn configure_vm(
+        &self,
+        Parameters(p): Parameters<ConfigureVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
-            Ok(vec![ContentBlock::text(manage::set_resources(&s.hv, &p.vm, p.vcpus, p.memory_mib)?)])
+            Ok(vec![ContentBlock::text(manage::set_resources(
+                &s.hv,
+                &p.vm,
+                p.vcpus,
+                p.memory_mib,
+            )?)])
         })
         .await
     }
 
-    #[tool(description = "Create a new empty qcow2 disk in the server's disk pool and attach it to a managed VM as the \
-        next free virtio disk (vdb, vdc, ...). Also works while the VM is running.")]
-    async fn attach_disk(&self, Parameters(p): Parameters<AttachDiskParams>) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| Ok(vec![ContentBlock::text(manage::attach_disk(&s.hv, &p.vm, p.size_gib)?)])).await
+    #[tool(
+        description = "Create a new empty qcow2 disk in the server's disk pool and attach it to a managed VM as the \
+        next free virtio disk (vdb, vdc, ...). Also works while the VM is running."
+    )]
+    async fn attach_disk(
+        &self,
+        Parameters(p): Parameters<AttachDiskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            Ok(vec![ContentBlock::text(manage::attach_disk(
+                &s.hv, &p.vm, p.size_gib,
+            )?)])
+        })
+        .await
     }
 
-    #[tool(description = "Detach a disk from a shut-off managed VM and DELETE its volume if it is in the server's disk \
-        pool (disks elsewhere are only detached). Use describe_vm to find the target.")]
-    async fn detach_disk(&self, Parameters(p): Parameters<DetachDiskParams>) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| Ok(vec![ContentBlock::text(manage::detach_disk(&s.hv, &p.vm, &p.target)?)])).await
+    #[tool(
+        description = "Detach a disk from a shut-off managed VM and DELETE its volume if it is in the server's disk \
+        pool (disks elsewhere are only detached). Use describe_vm to find the target."
+    )]
+    async fn detach_disk(
+        &self,
+        Parameters(p): Parameters<DetachDiskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            Ok(vec![ContentBlock::text(manage::detach_disk(
+                &s.hv, &p.vm, &p.target,
+            )?)])
+        })
+        .await
     }
 
-    #[tool(description = "Insert an ISO (from list_isos) into a managed VM's CD-ROM drive, or eject it by omitting iso. \
-        Works while the VM is running. A shut-off VM without a CD-ROM drive gets one added.")]
-    async fn set_cdrom(&self, Parameters(p): Parameters<SetCdromParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Insert an ISO (from list_isos) into a managed VM's CD-ROM drive, or eject it by omitting iso. \
+        Works while the VM is running. A shut-off VM without a CD-ROM drive gets one added."
+    )]
+    async fn set_cdrom(
+        &self,
+        Parameters(p): Parameters<SetCdromParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let msg = manage::set_cdrom(&s.hv, &p.vm, p.target.as_deref(), p.iso.as_deref())?;
             Ok(vec![ContentBlock::text(msg)])
@@ -767,24 +969,50 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Add a virtio network interface on an allowed libvirt network to a managed VM (also live).")]
-    async fn attach_nic(&self, Parameters(p): Parameters<AttachNicParams>) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| Ok(vec![ContentBlock::text(manage::attach_nic(&s.hv, &p.vm, &p.network)?)])).await
+    #[tool(
+        description = "Add a virtio network interface on an allowed libvirt network to a managed VM (also live)."
+    )]
+    async fn attach_nic(
+        &self,
+        Parameters(p): Parameters<AttachNicParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            Ok(vec![ContentBlock::text(manage::attach_nic(
+                &s.hv, &p.vm, &p.network,
+            )?)])
+        })
+        .await
     }
 
-    #[tool(description = "Remove a network interface, identified by MAC address (see describe_vm), from a managed VM.")]
-    async fn detach_nic(&self, Parameters(p): Parameters<DetachNicParams>) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| Ok(vec![ContentBlock::text(manage::detach_nic(&s.hv, &p.vm, &p.mac)?)])).await
+    #[tool(
+        description = "Remove a network interface, identified by MAC address (see describe_vm), from a managed VM."
+    )]
+    async fn detach_nic(
+        &self,
+        Parameters(p): Parameters<DetachNicParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            Ok(vec![ContentBlock::text(manage::detach_nic(
+                &s.hv, &p.vm, &p.mac,
+            )?)])
+        })
+        .await
     }
 
     #[tool(description = "List the ISO images on the host that create_vm and set_cdrom may use.")]
     async fn list_isos(&self) -> Result<CallToolResult, ErrorData> {
-        self.blocking(|s| Ok(vec![json_block(&manage::list_isos(&s.hv.config.manage))?])).await
+        self.blocking(|s| Ok(vec![json_block(&manage::list_isos(&s.hv.config.manage))?]))
+            .await
     }
 
-    #[tool(description = "Create a snapshot of a managed VM. For a running VM it includes the memory state, so \
-        reverting resumes exactly where it was.")]
-    async fn snapshot_create(&self, Parameters(p): Parameters<SnapshotCreateParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Create a snapshot of a managed VM. For a running VM it includes the memory state, so \
+        reverting resumes exactly where it was."
+    )]
+    async fn snapshot_create(
+        &self,
+        Parameters(p): Parameters<SnapshotCreateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let msg = manage::snapshot_create(&s.hv, &p.vm, &p.snapshot, p.description.as_deref())?;
             Ok(vec![ContentBlock::text(msg)])
@@ -793,12 +1021,21 @@ impl VirtServer {
     }
 
     #[tool(description = "List the snapshots of a managed VM, oldest first.")]
-    async fn snapshot_list(&self, Parameters(p): Parameters<VmParam>) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| Ok(vec![json_block(&manage::snapshot_list(&s.hv, &p.vm)?)?])).await
+    async fn snapshot_list(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| Ok(vec![json_block(&manage::snapshot_list(&s.hv, &p.vm)?)?]))
+            .await
     }
 
-    #[tool(description = "Revert a managed VM to a snapshot. Changes made since the snapshot are lost.")]
-    async fn snapshot_revert(&self, Parameters(p): Parameters<SnapshotParams>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Revert a managed VM to a snapshot. Changes made since the snapshot are lost."
+    )]
+    async fn snapshot_revert(
+        &self,
+        Parameters(p): Parameters<SnapshotParams>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let msg = manage::snapshot_revert(&s.hv, &p.vm, &p.snapshot)?;
             if !s.hv.lookup(&p.vm)?.is_active()? {
@@ -810,8 +1047,18 @@ impl VirtServer {
     }
 
     #[tool(description = "Delete a snapshot of a managed VM. The VM itself is not changed.")]
-    async fn snapshot_delete(&self, Parameters(p): Parameters<SnapshotParams>) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| Ok(vec![ContentBlock::text(manage::snapshot_delete(&s.hv, &p.vm, &p.snapshot)?)])).await
+    async fn snapshot_delete(
+        &self,
+        Parameters(p): Parameters<SnapshotParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            Ok(vec![ContentBlock::text(manage::snapshot_delete(
+                &s.hv,
+                &p.vm,
+                &p.snapshot,
+            )?)])
+        })
+        .await
     }
 }
 
@@ -831,7 +1078,11 @@ impl ServerHandler for VirtServer {
                 extra.push_str(" start_vm/stop_vm can power VMs on and off where list_vms shows power_control: true.");
             }
             if !config.host_share_dirs.is_empty() {
-                let dirs: Vec<String> = config.host_share_dirs.iter().map(|d| d.display().to_string()).collect();
+                let dirs: Vec<String> = config
+                    .host_share_dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect();
                 extra.push_str(&format!(
                     " copy_to_vm can copy host files from these directories into a guest: {}.",
                     dirs.join(", ")
@@ -864,7 +1115,12 @@ fn manage_instructions(m: &crate::config::Manage) -> String {
         return " This server cannot create, delete or reconfigure VMs.".into();
     }
     let mut ops = Vec::new();
-    for (on, op) in [(m.create, "create"), (m.delete, "delete"), (m.reconfigure, "reconfigure"), (m.snapshots, "snapshot")] {
+    for (on, op) in [
+        (m.create, "create"),
+        (m.delete, "delete"),
+        (m.reconfigure, "reconfigure"),
+        (m.snapshots, "snapshot"),
+    ] {
         if on {
             ops.push(op);
         }
@@ -898,12 +1154,19 @@ fn shell_spec(os: GuestOs, shell: Shell, cmd: &str) -> Result<ExecSpec> {
     Ok(match (os, shell) {
         (GuestOs::Linux, Shell::Default | Shell::Sh) => ExecSpec::new("/bin/sh", ["-c", cmd]),
         (GuestOs::Linux, Shell::Bash) => ExecSpec::new("bash", ["-c", cmd]),
-        (GuestOs::Windows, Shell::Default | Shell::Powershell) => {
-            powershell(&format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}"))
+        (GuestOs::Windows, Shell::Default | Shell::Powershell) => powershell(&format!(
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}"
+        )),
+        (GuestOs::Windows, Shell::Cmd) => ExecSpec::new(
+            "cmd.exe",
+            ["/d", "/s", "/c", &format!("chcp 65001 >nul & {cmd}")],
+        ),
+        (GuestOs::Linux, Shell::Cmd | Shell::Powershell) => {
+            bail!("this shell is not available on a Linux guest")
         }
-        (GuestOs::Windows, Shell::Cmd) => ExecSpec::new("cmd.exe", ["/d", "/s", "/c", &format!("chcp 65001 >nul & {cmd}")]),
-        (GuestOs::Linux, Shell::Cmd | Shell::Powershell) => bail!("this shell is not available on a Linux guest"),
-        (GuestOs::Windows, Shell::Sh | Shell::Bash) => bail!("this shell is not available on a Windows guest"),
+        (GuestOs::Windows, Shell::Sh | Shell::Bash) => {
+            bail!("this shell is not available on a Windows guest")
+        }
     })
 }
 

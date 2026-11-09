@@ -121,7 +121,9 @@ async fn main() -> Result<()> {
 
     match cli.transport {
         Transport::Stdio => {
-            let service = VirtServer::new(state).serve(rmcp::transport::stdio()).await?;
+            let service = VirtServer::new(state)
+                .serve(rmcp::transport::stdio())
+                .await?;
             service.waiting().await?;
         }
         Transport::Http => serve_http(state, &config).await?,
@@ -134,11 +136,12 @@ async fn serve_http(state: Arc<State>, config: &Config) -> Result<()> {
         Some(t) if !t.is_empty() => Arc::new(format!("Bearer {t}")),
         _ => bail!("HTTP mode requires http.token in the config file or VIRTMANAGER_MCP_TOKEN"),
     };
-    let service: StreamableHttpService<VirtServer, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(VirtServer::new(state.clone())),
-        Default::default(),
-        StreamableHttpServerConfig::default(),
-    );
+    let service: StreamableHttpService<VirtServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || Ok(VirtServer::new(state.clone())),
+            Default::default(),
+            StreamableHttpServerConfig::default(),
+        );
     let app = axum::Router::new()
         .nest_service("/mcp", service)
         .layer(middleware::from_fn_with_state(token, require_bearer));
@@ -155,7 +158,11 @@ async fn serve_http(state: Arc<State>, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn require_bearer(AxumState(expected): AxumState<Arc<String>>, req: Request, next: Next) -> Response {
+async fn require_bearer(
+    AxumState(expected): AxumState<Arc<String>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let ok = req
         .headers()
         .get(header::AUTHORIZATION)

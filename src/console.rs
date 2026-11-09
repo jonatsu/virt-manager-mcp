@@ -61,7 +61,14 @@ pub struct Consoles {
 }
 
 impl Consoles {
-    pub fn open(&self, hv: &Hypervisor, vm: &str, dom: &Domain, device: Option<&str>, force: bool) -> Result<String> {
+    pub fn open(
+        &self,
+        hv: &Hypervisor,
+        vm: &str,
+        dom: &Domain,
+        device: Option<&str>,
+        force: bool,
+    ) -> Result<String> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.get(vm) {
             if s.buffer.lock().unwrap().closed.is_none() {
@@ -74,7 +81,11 @@ impl Consoles {
         }
 
         let stream = hv.with_conn(|conn| Ok(Stream::new(conn, sys::VIR_STREAM_NONBLOCK)?))?;
-        let flags = if force { sys::VIR_DOMAIN_CONSOLE_FORCE } else { sys::VIR_DOMAIN_CONSOLE_SAFE };
+        let flags = if force {
+            sys::VIR_DOMAIN_CONSOLE_FORCE
+        } else {
+            sys::VIR_DOMAIN_CONSOLE_SAFE
+        };
         dom.open_console(device, &stream, flags).map_err(|e| {
             anyhow!(
                 "cannot open console: {} (it may be in use, e.g. by virt-manager; retry with force=true to take it over)",
@@ -102,12 +113,20 @@ impl Consoles {
                 device: device.map(str::to_string),
             },
         );
-        Ok(format!("console for '{vm}' opened; output is buffered from now on"))
+        Ok(format!(
+            "console for '{vm}' opened; output is buffered from now on"
+        ))
     }
 
     /// Returns buffered output from absolute offset `since` (None = only the
     /// latest `tail` bytes). Waits up to `wait` for new data if none is available.
-    pub fn read(&self, vm: &str, since: Option<u64>, max_bytes: usize, wait: Duration) -> Result<ReadResult> {
+    pub fn read(
+        &self,
+        vm: &str,
+        since: Option<u64>,
+        max_bytes: usize,
+        wait: Duration,
+    ) -> Result<ReadResult> {
         let buffer = self.buffer(vm)?;
         let deadline = Instant::now() + wait;
         loop {
@@ -151,12 +170,17 @@ impl Consoles {
         let deadline = Instant::now() + Duration::from_secs(10);
         while sent < data.len() {
             let rest = &data[sent..];
-            let n = unsafe { sys::virStreamSend(stream.as_ptr(), rest.as_ptr() as *const _, rest.len()) };
+            let n = unsafe {
+                sys::virStreamSend(stream.as_ptr(), rest.as_ptr() as *const _, rest.len())
+            };
             match n {
                 n if n >= 0 => sent += n as usize,
                 -2 if Instant::now() < deadline => std::thread::sleep(POLL),
                 -2 => bail!("timed out writing to console"),
-                _ => bail!("console write failed: {}", virt::error::Error::last_error().message()),
+                _ => bail!(
+                    "console write failed: {}",
+                    virt::error::Error::last_error().message()
+                ),
             }
         }
         Ok(())
@@ -190,7 +214,9 @@ fn read_loop(stream: &Stream, buffer: &Mutex<Buffer>, stop: &AtomicBool, cap: us
         if stop.load(Ordering::Relaxed) {
             break "closed by client".to_string();
         }
-        let n = unsafe { sys::virStreamRecv(stream.as_ptr(), chunk.as_mut_ptr() as *mut _, chunk.len()) };
+        let n = unsafe {
+            sys::virStreamRecv(stream.as_ptr(), chunk.as_mut_ptr() as *mut _, chunk.len())
+        };
         match n {
             0 => break "console stream ended (VM shut down or console taken over)".to_string(),
             -2 => std::thread::sleep(POLL),
@@ -203,7 +229,12 @@ fn read_loop(stream: &Stream, buffer: &Mutex<Buffer>, stop: &AtomicBool, cap: us
                     b.start += excess as u64;
                 }
             }
-            _ => break format!("console error: {}", virt::error::Error::last_error().message()),
+            _ => {
+                break format!(
+                    "console error: {}",
+                    virt::error::Error::last_error().message()
+                );
+            }
         }
     };
     buffer.lock().unwrap().closed = Some(reason);

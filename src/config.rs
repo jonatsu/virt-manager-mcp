@@ -241,7 +241,9 @@ fn file_in(dirs: &[PathBuf], path: &str, key: &str) -> Result<PathBuf> {
     if !p.is_absolute() {
         bail!("{path}: path must be absolute");
     }
-    let real = p.canonicalize().with_context(|| format!("cannot access {path}"))?;
+    let real = p
+        .canonicalize()
+        .with_context(|| format!("cannot access {path}"))?;
     if !dirs.iter().any(|d| real.starts_with(d)) {
         bail!("{path} is not inside {key}");
     }
@@ -254,7 +256,10 @@ fn file_in(dirs: &[PathBuf], path: &str, key: &str) -> Result<PathBuf> {
 /// Accepts `cwd` as a project directory unless sharing it would expose too much.
 fn project_dir(cwd: PathBuf, home: Option<&Path>) -> Result<PathBuf> {
     if cwd.parent().is_none() || home.is_some_and(|h| h.starts_with(&cwd)) {
-        bail!("not sharing {}: it is the root or home directory, not a project", cwd.display());
+        bail!(
+            "not sharing {}: it is the root or home directory, not a project",
+            cwd.display()
+        );
     }
     Ok(cwd)
 }
@@ -265,19 +270,27 @@ mod tests {
 
     #[test]
     fn share_file_stays_inside_share_dirs() {
-        let root = std::env::temp_dir().join(format!("virtmanager-mcp-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("virtmanager-mcp-test-{}", std::process::id()));
         let share = root.join("share");
         std::fs::create_dir_all(share.join("sub")).unwrap();
         std::fs::write(share.join("sub/ok.txt"), "x").unwrap();
         std::fs::write(root.join("secret.txt"), "x").unwrap();
         std::os::unix::fs::symlink(root.join("secret.txt"), share.join("link.txt")).unwrap();
 
-        let mut config = Config { host_share_dirs: vec![share.clone()], ..Config::default() };
+        let mut config = Config {
+            host_share_dirs: vec![share.clone()],
+            ..Config::default()
+        };
         config.validate().unwrap();
         let s = |p: &Path| p.to_str().unwrap().to_string();
 
         assert!(config.share_file(&s(&share.join("sub/ok.txt"))).is_ok());
-        assert!(config.share_file(&s(&share.join("sub/../../secret.txt"))).is_err());
+        assert!(
+            config
+                .share_file(&s(&share.join("sub/../../secret.txt")))
+                .is_err()
+        );
         assert!(config.share_file(&s(&share.join("link.txt"))).is_err());
         assert!(config.share_file(&s(&share.join("sub"))).is_err());
         assert!(config.share_file("sub/ok.txt").is_err());

@@ -53,7 +53,10 @@ impl Hypervisor {
         }
         let mut conn = self.conn.write().unwrap();
         if !conn.is_alive().unwrap_or(false) {
-            tracing::warn!("libvirt connection lost, reconnecting to {}", self.config.uri);
+            tracing::warn!(
+                "libvirt connection lost, reconnecting to {}",
+                self.config.uri
+            );
             let _ = conn.close();
             *conn = open(&self.config.uri)?;
         }
@@ -102,7 +105,8 @@ impl Hypervisor {
             Ok(doms
                 .into_iter()
                 .filter(|d| {
-                    d.get_name().is_ok_and(|n| self.config.is_allowed(&n)) || (manage && manage::is_owned(d))
+                    d.get_name().is_ok_and(|n| self.config.is_allowed(&n))
+                        || (manage && manage::is_owned(d))
                 })
                 .collect())
         })
@@ -143,19 +147,24 @@ impl Hypervisor {
     pub fn start(&self, name: &str) -> Result<String> {
         let dom = self.power_domain(name)?;
         if !dom.is_active()? {
-            dom.create().map_err(|e| anyhow!("cannot start '{name}': {}", e.message()))?;
+            dom.create()
+                .map_err(|e| anyhow!("cannot start '{name}': {}", e.message()))?;
             return Ok("started".into());
         }
         Ok(match dom.get_state()?.0 {
             sys::VIR_DOMAIN_PAUSED => {
-                dom.resume().map_err(|e| anyhow!("cannot resume '{name}': {}", e.message()))?;
+                dom.resume()
+                    .map_err(|e| anyhow!("cannot resume '{name}': {}", e.message()))?;
                 "resumed from pause".into()
             }
             sys::VIR_DOMAIN_PMSUSPENDED => {
-                dom.pm_wakeup(0).map_err(|e| anyhow!("cannot wake '{name}': {}", e.message()))?;
+                dom.pm_wakeup(0)
+                    .map_err(|e| anyhow!("cannot wake '{name}': {}", e.message()))?;
                 "woken from suspend".into()
             }
-            sys::VIR_DOMAIN_CRASHED => bail!("VM '{name}' has crashed; stop it with force: true, then start it"),
+            sys::VIR_DOMAIN_CRASHED => {
+                bail!("VM '{name}' has crashed; stop it with force: true, then start it")
+            }
             _ => "already running".into(),
         })
     }
@@ -169,10 +178,12 @@ impl Hypervisor {
             return Ok(true);
         }
         if force {
-            dom.destroy().map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;
+            dom.destroy()
+                .map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;
             return Ok(true);
         }
-        dom.shutdown().map_err(|e| anyhow!("cannot shut down '{name}': {}", e.message()))?;
+        dom.shutdown()
+            .map_err(|e| anyhow!("cannot shut down '{name}': {}", e.message()))?;
         let start = Instant::now();
         while dom.is_active()? {
             if start.elapsed() >= wait {

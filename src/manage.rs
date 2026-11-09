@@ -29,7 +29,8 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 /// Whether `dom` was created by this server.
 pub fn is_owned(dom: &Domain) -> bool {
-    dom.get_metadata(sys::VIR_DOMAIN_METADATA_ELEMENT as i32, Some(OWNER_NS), 0).is_ok()
+    dom.get_metadata(sys::VIR_DOMAIN_METADATA_ELEMENT as i32, Some(OWNER_NS), 0)
+        .is_ok()
 }
 
 /// Parameters of a new VM, already validated against the config by `create`.
@@ -52,8 +53,16 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
     check_vcpus(m, vm.vcpus)?;
     check_memory(m, vm.memory_mib)?;
     check_disk(m, vm.disk_gib)?;
-    let iso = vm.iso.as_deref().map(|p| hv.config.iso_file(p)).transpose()?;
-    let driver_iso = vm.driver_iso.as_deref().map(|p| hv.config.iso_file(p)).transpose()?;
+    let iso = vm
+        .iso
+        .as_deref()
+        .map(|p| hv.config.iso_file(p))
+        .transpose()?;
+    let driver_iso = vm
+        .driver_iso
+        .as_deref()
+        .map(|p| hv.config.iso_file(p))
+        .transpose()?;
     let network = match vm.network.clone() {
         Some(n) => Some(n),
         None => m.networks.first().cloned(),
@@ -111,11 +120,18 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
         .collect();
     hv.with_conn(|conn| {
         let m = &hv.config.manage;
-        let pool = if m.disk_pool.is_empty() { None } else { Some(disk_pool(conn, m)?) };
+        let pool = if m.disk_pool.is_empty() {
+            None
+        } else {
+            Some(disk_pool(conn, m)?)
+        };
         let mut remove = Vec::new();
         let mut kept = Vec::new();
         for d in &disks {
-            match pool.as_ref().and_then(|p| pool_volume(conn, p, &m.disk_pool, d)) {
+            match pool
+                .as_ref()
+                .and_then(|p| pool_volume(conn, p, &m.disk_pool, d))
+            {
                 Some(vol) => remove.push(vol),
                 None => kept.push(d.source()),
             }
@@ -137,7 +153,10 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
             }
         }
         if !kept.is_empty() {
-            msg.push_str(&format!("; left disks outside manage.disk_pool in place: {}", kept.join(", ")));
+            msg.push_str(&format!(
+                "; left disks outside manage.disk_pool in place: {}",
+                kept.join(", ")
+            ));
         }
         Ok(msg)
     })
@@ -149,10 +168,17 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
     let xml = inactive_xml(&dom)?;
     let doc = roxmltree::Document::parse(&xml)?;
     let root = doc.root_element();
-    let text = |tag: &str| child(root, tag).and_then(|n| n.text()).unwrap_or_default().trim().to_string();
+    let text = |tag: &str| {
+        child(root, tag)
+            .and_then(|n| n.text())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
     let vcpu = child(root, "vcpu");
     let os = child(root, "os");
-    let uefi = os.is_some_and(|o| o.attribute("firmware") == Some("efi") || child(o, "loader").is_some());
+    let uefi =
+        os.is_some_and(|o| o.attribute("firmware") == Some("efi") || child(o, "loader").is_some());
     let devices = child(root, "devices");
     let has = |tag: &str| devices.is_some_and(|d| child(d, tag).is_some());
 
@@ -187,7 +213,12 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
 }
 
 /// Changes vCPUs and/or memory in the persistent configuration (applies at next boot).
-pub fn set_resources(hv: &Hypervisor, name: &str, vcpus: Option<u32>, memory_mib: Option<u64>) -> Result<String> {
+pub fn set_resources(
+    hv: &Hypervisor,
+    name: &str,
+    vcpus: Option<u32>,
+    memory_mib: Option<u64>,
+) -> Result<String> {
     let m = &hv.config.manage;
     if vcpus.is_none() && memory_mib.is_none() {
         bail!("provide vcpus and/or memory_mib");
@@ -232,7 +263,9 @@ pub fn set_resources(hv: &Hypervisor, name: &str, vcpus: Option<u32>, memory_mib
     }
     let mut msg = format!("VM '{name}' configured with {}", done.join(" and "));
     if dom.is_active()? {
-        msg.push_str("; the VM is running, so this takes effect after it is shut down and started again");
+        msg.push_str(
+            "; the VM is running, so this takes effect after it is shut down and started again",
+        );
     }
     Ok(msg)
 }
@@ -243,7 +276,10 @@ pub fn attach_disk(hv: &Hypervisor, name: &str, size_gib: u64) -> Result<String>
     check_disk(m, size_gib)?;
     let dom = hv.manage_domain(name)?;
     let _guard = LOCK.lock().unwrap();
-    let used: Vec<String> = parse_disks(&inactive_xml(&dom)?)?.into_iter().map(|d| d.target).collect();
+    let used: Vec<String> = parse_disks(&inactive_xml(&dom)?)?
+        .into_iter()
+        .map(|d| d.target)
+        .collect();
     let target = ('b'..='z')
         .map(|c| format!("vd{c}"))
         .find(|t| !used.contains(t))
@@ -263,7 +299,10 @@ pub fn attach_disk(hv: &Hypervisor, name: &str, size_gib: u64) -> Result<String>
             let _ = vol.delete(0);
             bail!("cannot attach disk: {}{}", e.message(), running_hint(&dom));
         }
-        Ok(format!("attached new {size_gib} GiB disk {}/{vol_name} to '{name}' as {target}", m.disk_pool))
+        Ok(format!(
+            "attached new {size_gib} GiB disk {}/{vol_name} to '{name}' as {target}",
+            m.disk_pool
+        ))
     })
 }
 
@@ -272,7 +311,9 @@ pub fn detach_disk(hv: &Hypervisor, name: &str, target: &str) -> Result<String> 
     let m = &hv.config.manage;
     let dom = hv.manage_domain(name)?;
     if dom.is_active()? {
-        bail!("VM '{name}' is running; shut it down with stop_vm first (the disk is deleted after detaching)");
+        bail!(
+            "VM '{name}' is running; shut it down with stop_vm first (the disk is deleted after detaching)"
+        );
     }
     let _guard = LOCK.lock().unwrap();
     let xml = inactive_xml(&dom)?;
@@ -292,9 +333,16 @@ pub fn detach_disk(hv: &Hypervisor, name: &str, target: &str) -> Result<String> 
         match vol {
             Some(vol) => match vol.delete(0) {
                 Ok(()) => msg.push_str(&format!("; deleted {}", disk.source())),
-                Err(e) => msg.push_str(&format!("; could not delete {}: {}", disk.source(), e.message())),
+                Err(e) => msg.push_str(&format!(
+                    "; could not delete {}: {}",
+                    disk.source(),
+                    e.message()
+                )),
             },
-            None => msg.push_str(&format!("; {} is outside manage.disk_pool and was left in place", disk.source())),
+            None => msg.push_str(&format!(
+                "; {} is outside manage.disk_pool and was left in place",
+                disk.source()
+            )),
         }
         Ok(msg)
     })
@@ -302,20 +350,34 @@ pub fn detach_disk(hv: &Hypervisor, name: &str, target: &str) -> Result<String> 
 
 /// Inserts an ISO into a CD-ROM drive, or ejects it with `iso: None`. Without
 /// `target` the first CD-ROM drive is used; a shut-off VM without one gets a new drive.
-pub fn set_cdrom(hv: &Hypervisor, name: &str, target: Option<&str>, iso: Option<&str>) -> Result<String> {
+pub fn set_cdrom(
+    hv: &Hypervisor,
+    name: &str,
+    target: Option<&str>,
+    iso: Option<&str>,
+) -> Result<String> {
     let iso = iso.map(|p| hv.config.iso_file(p)).transpose()?;
     let dom = hv.manage_domain(name)?;
     let _guard = LOCK.lock().unwrap();
     let active = dom.is_active()?;
     // The live definition carries the fields libvirt compares when changing media.
-    let xml = if active { dom.get_xml_desc(0)? } else { inactive_xml(&dom)? };
+    let xml = if active {
+        dom.get_xml_desc(0)?
+    } else {
+        inactive_xml(&dom)?
+    };
     let disks = parse_disks(&xml)?;
-    let source = iso.as_deref().map(|p| format!("<source file='{}'/>", esc(&p.to_string_lossy()))).unwrap_or_default();
+    let source = iso
+        .as_deref()
+        .map(|p| format!("<source file='{}'/>", esc(&p.to_string_lossy())))
+        .unwrap_or_default();
     let what = match &iso {
         Some(p) => format!("inserted {}", p.display()),
         None => "ejected the medium".to_string(),
     };
-    let cdrom = disks.iter().find(|d| d.device == "cdrom" && target.is_none_or(|t| d.target == t));
+    let cdrom = disks
+        .iter()
+        .find(|d| d.device == "cdrom" && target.is_none_or(|t| d.target == t));
     let Some(cdrom) = cdrom else {
         if let Some(t) = target {
             bail!("VM '{name}' has no CD-ROM drive '{t}'");
@@ -361,16 +423,30 @@ pub fn attach_nic(hv: &Hypervisor, name: &str, network: &str) -> Result<String> 
     let m = &hv.config.manage;
     let dom = hv.manage_domain(name)?;
     hv.with_conn(|conn| check_network(conn, m, network))?;
-    let before: Vec<String> = parse_nics(&inactive_xml(&dom)?)?.into_iter().map(|n| n.mac).collect();
-    let xml = format!("<interface type='network'><source network='{}'/><model type='virtio'/></interface>", esc(network));
+    let before: Vec<String> = parse_nics(&inactive_xml(&dom)?)?
+        .into_iter()
+        .map(|n| n.mac)
+        .collect();
+    let xml = format!(
+        "<interface type='network'><source network='{}'/><model type='virtio'/></interface>",
+        esc(network)
+    );
     dom.attach_device_flags(&xml, live_and_config(&dom)?)
-        .map_err(|e| anyhow!("cannot attach network interface: {}{}", e.message(), running_hint(&dom)))?;
+        .map_err(|e| {
+            anyhow!(
+                "cannot attach network interface: {}{}",
+                e.message(),
+                running_hint(&dom)
+            )
+        })?;
     let mac = parse_nics(&inactive_xml(&dom)?)?
         .into_iter()
         .map(|n| n.mac)
         .find(|mac| !before.contains(mac))
         .unwrap_or_default();
-    Ok(format!("attached a network interface on '{network}' to '{name}' (MAC {mac})"))
+    Ok(format!(
+        "attached a network interface on '{network}' to '{name}' (MAC {mac})"
+    ))
 }
 
 pub fn detach_nic(hv: &Hypervisor, name: &str, mac: &str) -> Result<String> {
@@ -382,10 +458,18 @@ pub fn detach_nic(hv: &Hypervisor, name: &str, mac: &str) -> Result<String> {
         .with_context(|| format!("VM '{name}' has no network interface with MAC {mac}"))?;
     dom.detach_device_flags(&xml[nic.range.clone()], live_and_config(&dom)?)
         .map_err(|e| anyhow!("cannot detach network interface: {}", e.message()))?;
-    Ok(format!("detached network interface {} from '{name}'", nic.mac))
+    Ok(format!(
+        "detached network interface {} from '{name}'",
+        nic.mac
+    ))
 }
 
-pub fn snapshot_create(hv: &Hypervisor, name: &str, snapshot: &str, description: Option<&str>) -> Result<String> {
+pub fn snapshot_create(
+    hv: &Hypervisor,
+    name: &str,
+    snapshot: &str,
+    description: Option<&str>,
+) -> Result<String> {
     check_name(snapshot, "snapshot name")?;
     let dom = hv.manage_domain(name)?;
     let xml = format!(
@@ -396,11 +480,16 @@ pub fn snapshot_create(hv: &Hypervisor, name: &str, snapshot: &str, description:
     DomainSnapshot::create_xml(&dom, &xml, 0).map_err(|e| {
         let mut msg = format!("cannot create snapshot '{snapshot}': {}", e.message());
         if e.message().contains("pflash") {
-            msg.push_str(" (a running UEFI VM cannot be snapshotted here; shut it down with stop_vm first)");
+            msg.push_str(
+                " (a running UEFI VM cannot be snapshotted here; shut it down with stop_vm first)",
+            );
         }
         anyhow!(msg)
     })?;
-    Ok(format!("created snapshot '{snapshot}' of '{name}' ({})", hypervisor::state_name(&dom)))
+    Ok(format!(
+        "created snapshot '{snapshot}' of '{name}' ({})",
+        hypervisor::state_name(&dom)
+    ))
 }
 
 pub fn snapshot_list(hv: &Hypervisor, name: &str) -> Result<Vec<Value>> {
@@ -430,7 +519,10 @@ pub fn snapshot_revert(hv: &Hypervisor, name: &str, snapshot: &str) -> Result<St
         .map_err(|e| anyhow!("snapshot '{snapshot}' not found: {}", e.message()))?;
     snap.revert(0)
         .map_err(|e| anyhow!("cannot revert to '{snapshot}': {}", e.message()))?;
-    Ok(format!("reverted '{name}' to snapshot '{snapshot}'; the VM is now {}", hypervisor::state_name(&dom)))
+    Ok(format!(
+        "reverted '{name}' to snapshot '{snapshot}'; the VM is now {}",
+        hypervisor::state_name(&dom)
+    ))
 }
 
 pub fn snapshot_delete(hv: &Hypervisor, name: &str, snapshot: &str) -> Result<String> {
@@ -451,14 +543,25 @@ pub struct IsoFile {
 /// `.iso` files in `manage.iso_dirs` (searched up to three directory levels deep).
 pub fn list_isos(m: &Manage) -> Vec<IsoFile> {
     fn walk(dir: &Path, depth: u32, out: &mut Vec<IsoFile>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
             if meta.is_dir() && depth < 3 {
                 walk(&path, depth + 1, out);
-            } else if meta.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("iso")) {
-                out.push(IsoFile { path: path.to_string_lossy().into_owned(), size_bytes: meta.len() });
+            } else if meta.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
+            {
+                out.push(IsoFile {
+                    path: path.to_string_lossy().into_owned(),
+                    size_bytes: meta.len(),
+                });
             }
         }
     }
@@ -475,40 +578,57 @@ pub fn list_isos(m: &Manage) -> Vec<IsoFile> {
 fn check_name(name: &str, what: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         && !name.starts_with(['.', '-']);
     if !ok {
-        bail!("{what} must be 1-64 characters of A-Z, a-z, 0-9, '.', '_', '-' and not start with '.' or '-'");
+        bail!(
+            "{what} must be 1-64 characters of A-Z, a-z, 0-9, '.', '_', '-' and not start with '.' or '-'"
+        );
     }
     Ok(())
 }
 
 fn check_vcpus(m: &Manage, n: u32) -> Result<()> {
     if n == 0 || n > m.max_vcpus {
-        bail!("vcpus must be between 1 and {} (manage.max_vcpus)", m.max_vcpus);
+        bail!(
+            "vcpus must be between 1 and {} (manage.max_vcpus)",
+            m.max_vcpus
+        );
     }
     Ok(())
 }
 
 fn check_memory(m: &Manage, mib: u64) -> Result<()> {
     if !(256..=m.max_memory_mib).contains(&mib) {
-        bail!("memory_mib must be between 256 and {} (manage.max_memory_mib)", m.max_memory_mib);
+        bail!(
+            "memory_mib must be between 256 and {} (manage.max_memory_mib)",
+            m.max_memory_mib
+        );
     }
     Ok(())
 }
 
 fn check_disk(m: &Manage, gib: u64) -> Result<()> {
     if gib == 0 || gib > m.max_disk_gib {
-        bail!("disk size must be between 1 and {} GiB (manage.max_disk_gib)", m.max_disk_gib);
+        bail!(
+            "disk size must be between 1 and {} GiB (manage.max_disk_gib)",
+            m.max_disk_gib
+        );
     }
     Ok(())
 }
 
 fn check_network(conn: &Connect, m: &Manage, network: &str) -> Result<()> {
     if !m.networks.iter().any(|n| n == network) {
-        bail!("network '{network}' is not in manage.networks ({})", m.networks.join(", "));
+        bail!(
+            "network '{network}' is not in manage.networks ({})",
+            m.networks.join(", ")
+        );
     }
-    Network::lookup_by_name(conn, network).map_err(|e| anyhow!("network '{network}': {}", e.message()))?;
+    Network::lookup_by_name(conn, network)
+        .map_err(|e| anyhow!("network '{network}': {}", e.message()))?;
     Ok(())
 }
 
@@ -534,13 +654,23 @@ fn create_volume(pool: &StoragePool, name: &str, gib: u64) -> Result<StorageVol>
          <target><format type='qcow2'/></target></volume>",
         esc(name)
     );
-    StorageVol::create_xml(pool, &xml, 0).map_err(|e| anyhow!("cannot create volume '{name}': {}", e.message()))
+    StorageVol::create_xml(pool, &xml, 0)
+        .map_err(|e| anyhow!("cannot create volume '{name}': {}", e.message()))
 }
 
 /// The pool volume backing `disk`, if it lives in the pool named `pool_name`.
-fn pool_volume(conn: &Connect, pool: &StoragePool, pool_name: &str, disk: &DiskInfo) -> Option<StorageVol> {
+fn pool_volume(
+    conn: &Connect,
+    pool: &StoragePool,
+    pool_name: &str,
+    disk: &DiskInfo,
+) -> Option<StorageVol> {
     if let (Some(p), Some(v)) = (&disk.pool, &disk.volume) {
-        return if p == pool_name { StorageVol::lookup_by_name(pool, v).ok() } else { None };
+        return if p == pool_name {
+            StorageVol::lookup_by_name(pool, v).ok()
+        } else {
+            None
+        };
     }
     let vol = StorageVol::lookup_by_path(conn, disk.file.as_deref()?).ok()?;
     let owner = StoragePool::lookup_by_volume(&vol).ok()?.get_name().ok()?;
@@ -611,7 +741,9 @@ impl DiskInfo {
 
 fn parse_disks(xml: &str) -> Result<Vec<DiskInfo>> {
     let doc = roxmltree::Document::parse(xml)?;
-    let Some(devices) = child(doc.root_element(), "devices") else { return Ok(Vec::new()) };
+    let Some(devices) = child(doc.root_element(), "devices") else {
+        return Ok(Vec::new());
+    };
     Ok(devices
         .children()
         .filter(|n| n.has_tag_name("disk"))
@@ -621,8 +753,14 @@ fn parse_disks(xml: &str) -> Result<Vec<DiskInfo>> {
             let target = child(d, "target");
             DiskInfo {
                 device: d.attribute("device").unwrap_or("disk").to_string(),
-                target: target.and_then(|t| t.attribute("dev")).unwrap_or_default().to_string(),
-                bus: target.and_then(|t| t.attribute("bus")).unwrap_or_default().to_string(),
+                target: target
+                    .and_then(|t| t.attribute("dev"))
+                    .unwrap_or_default()
+                    .to_string(),
+                bus: target
+                    .and_then(|t| t.attribute("bus"))
+                    .unwrap_or_default()
+                    .to_string(),
                 file: src("file").or_else(|| src("dev")),
                 pool: src("pool"),
                 volume: src("volume"),
@@ -645,14 +783,25 @@ struct NicInfo {
 
 fn parse_nics(xml: &str) -> Result<Vec<NicInfo>> {
     let doc = roxmltree::Document::parse(xml)?;
-    let Some(devices) = child(doc.root_element(), "devices") else { return Ok(Vec::new()) };
+    let Some(devices) = child(doc.root_element(), "devices") else {
+        return Ok(Vec::new());
+    };
     Ok(devices
         .children()
         .filter(|n| n.has_tag_name("interface"))
         .map(|i| {
-            let attr = |tag: &str, a: &str| child(i, tag).and_then(|n| n.attribute(a)).unwrap_or_default().to_string();
+            let attr = |tag: &str, a: &str| {
+                child(i, tag)
+                    .and_then(|n| n.attribute(a))
+                    .unwrap_or_default()
+                    .to_string()
+            };
             let source = child(i, "source")
-                .and_then(|s| s.attribute("network").or(s.attribute("bridge")).or(s.attribute("dev")))
+                .and_then(|s| {
+                    s.attribute("network")
+                        .or(s.attribute("bridge"))
+                        .or(s.attribute("dev"))
+                })
                 .unwrap_or_default()
                 .to_string();
             NicInfo {
@@ -683,7 +832,9 @@ fn domain_xml(
     network: Option<&str>,
 ) -> String {
     let cdrom = |dev: &str, iso: Option<&Path>, boot: &str| {
-        let source = iso.map(|p| format!("<source file='{}'/>", esc(&p.to_string_lossy()))).unwrap_or_default();
+        let source = iso
+            .map(|p| format!("<source file='{}'/>", esc(&p.to_string_lossy())))
+            .unwrap_or_default();
         format!(
             "<disk type='file' device='cdrom'><driver name='qemu' type='raw'/>{source}\
              <target dev='{dev}' bus='sata'/><readonly/>{boot}</disk>"
@@ -691,7 +842,10 @@ fn domain_xml(
     };
     // Root ports for every PCIe device plus spares, so disks and NICs can be hot-plugged.
     let mut devices = vec!["<controller type='pci' index='0' model='pcie-root'/>".to_string()];
-    devices.extend(std::iter::repeat_n("<controller type='pci' model='pcie-root-port'/>".to_string(), 14));
+    devices.extend(std::iter::repeat_n(
+        "<controller type='pci' model='pcie-root-port'/>".to_string(),
+        14,
+    ));
     devices.extend([
         format!(
             "<disk type='file' device='disk'><driver name='qemu' type='qcow2' discard='unmap'/>\
@@ -704,7 +858,10 @@ fn domain_xml(
         devices.push(cdrom("sdb", driver_iso, ""));
     }
     if let Some(n) = network {
-        devices.push(format!("<interface type='network'><source network='{}'/><model type='virtio'/></interface>", esc(n)));
+        devices.push(format!(
+            "<interface type='network'><source network='{}'/><model type='virtio'/></interface>",
+            esc(n)
+        ));
     }
     devices.extend(
         [
@@ -784,7 +941,13 @@ mod tests {
             driver_iso: None,
             network: Some("default".into()),
         };
-        let xml = domain_xml(&vm, "/pool/t.qcow2", Some(Path::new("/isos/a'b&c.iso")), None, Some("net"));
+        let xml = domain_xml(
+            &vm,
+            "/pool/t.qcow2",
+            Some(Path::new("/isos/a'b&c.iso")),
+            None,
+            Some("net"),
+        );
         let doc = roxmltree::Document::parse(&xml).unwrap();
         let disks = parse_disks(&xml).unwrap();
         assert_eq!(disks[1].file.as_deref(), Some("/isos/a'b&c.iso"));

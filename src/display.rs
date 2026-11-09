@@ -12,15 +12,25 @@ use virt::sys;
 use crate::hypervisor::Hypervisor;
 
 /// Takes a screenshot and returns it as PNG bytes plus the final (width, height).
-pub fn screenshot(hv: &Hypervisor, dom: &Domain, screen: u32, max_width: Option<u32>) -> Result<(Vec<u8>, u32, u32)> {
+pub fn screenshot(
+    hv: &Hypervisor,
+    dom: &Domain,
+    screen: u32,
+    max_width: Option<u32>,
+) -> Result<(Vec<u8>, u32, u32)> {
     let stream = hv.with_conn(|conn| Ok(Stream::new(conn, 0)?))?;
-    let mime = dom
-        .screenshot(&stream, screen, 0)
-        .map_err(|e| anyhow!("screenshot failed: {} (does the VM have a graphical display?)", e.message()))?;
+    let mime = dom.screenshot(&stream, screen, 0).map_err(|e| {
+        anyhow!(
+            "screenshot failed: {} (does the VM have a graphical display?)",
+            e.message()
+        )
+    })?;
     let mut raw = Vec::new();
     let mut chunk = vec![0u8; 256 * 1024];
     loop {
-        let n = stream.recv(&mut chunk).context("reading screenshot stream")?;
+        let n = stream
+            .recv(&mut chunk)
+            .context("reading screenshot stream")?;
         if n == 0 {
             break;
         }
@@ -31,9 +41,11 @@ pub fn screenshot(hv: &Hypervisor, dom: &Domain, screen: u32, max_width: Option<
     let format = match mime.as_str() {
         "image/png" => ImageFormat::Png,
         "image/x-portable-pixmap" => ImageFormat::Pnm,
-        other => ImageFormat::from_mime_type(other).ok_or_else(|| anyhow!("unsupported screenshot format {other}"))?,
+        other => ImageFormat::from_mime_type(other)
+            .ok_or_else(|| anyhow!("unsupported screenshot format {other}"))?,
     };
-    let mut img = image::load_from_memory_with_format(&raw, format).context("decoding screenshot")?;
+    let mut img =
+        image::load_from_memory_with_format(&raw, format).context("decoding screenshot")?;
     if let Some(w) = max_width
         && w > 0
         && img.width() > w
@@ -52,11 +64,20 @@ pub fn send_combo(dom: &Domain, keys: &[u32], hold_ms: u32) -> Result<()> {
         bail!("no keys given");
     }
     if keys.len() > sys::VIR_DOMAIN_SEND_KEY_MAX_KEYS as usize {
-        bail!("at most {} keys per combo", sys::VIR_DOMAIN_SEND_KEY_MAX_KEYS);
+        bail!(
+            "at most {} keys per combo",
+            sys::VIR_DOMAIN_SEND_KEY_MAX_KEYS
+        );
     }
     let mut codes = keys.to_vec();
-    dom.send_key(sys::VIR_KEYCODE_SET_LINUX, hold_ms, codes.as_mut_ptr(), codes.len() as i32, 0)
-        .map_err(|e| anyhow!("send_key failed: {}", e.message()))
+    dom.send_key(
+        sys::VIR_KEYCODE_SET_LINUX,
+        hold_ms,
+        codes.as_mut_ptr(),
+        codes.len() as i32,
+        0,
+    )
+    .map_err(|e| anyhow!("send_key failed: {}", e.message()))
 }
 
 /// Parses "ctrl+alt+delete", "Enter", "shift+a", ... into Linux keycodes.
@@ -146,22 +167,69 @@ fn key_by_name(name: &str) -> Option<u32> {
 
 fn char_to_keys(c: char) -> Option<Vec<u32>> {
     let (code, shift) = char_key(c)?;
-    Some(if shift { vec![KEY_LEFTSHIFT, code] } else { vec![code] })
+    Some(if shift {
+        vec![KEY_LEFTSHIFT, code]
+    } else {
+        vec![code]
+    })
 }
 
 /// Maps a character to (keycode, needs_shift) for a US layout.
 fn char_key(c: char) -> Option<(u32, bool)> {
-    const ROW_QWERTY: [(char, u32); 10] =
-        [('q', 16), ('w', 17), ('e', 18), ('r', 19), ('t', 20), ('y', 21), ('u', 22), ('i', 23), ('o', 24), ('p', 25)];
-    const ROW_ASDF: [(char, u32); 9] =
-        [('a', 30), ('s', 31), ('d', 32), ('f', 33), ('g', 34), ('h', 35), ('j', 36), ('k', 37), ('l', 38)];
-    const ROW_ZXCV: [(char, u32); 7] = [('z', 44), ('x', 45), ('c', 46), ('v', 47), ('b', 48), ('n', 49), ('m', 50)];
+    const ROW_QWERTY: [(char, u32); 10] = [
+        ('q', 16),
+        ('w', 17),
+        ('e', 18),
+        ('r', 19),
+        ('t', 20),
+        ('y', 21),
+        ('u', 22),
+        ('i', 23),
+        ('o', 24),
+        ('p', 25),
+    ];
+    const ROW_ASDF: [(char, u32); 9] = [
+        ('a', 30),
+        ('s', 31),
+        ('d', 32),
+        ('f', 33),
+        ('g', 34),
+        ('h', 35),
+        ('j', 36),
+        ('k', 37),
+        ('l', 38),
+    ];
+    const ROW_ZXCV: [(char, u32); 7] = [
+        ('z', 44),
+        ('x', 45),
+        ('c', 46),
+        ('v', 47),
+        ('b', 48),
+        ('n', 49),
+        ('m', 50),
+    ];
     // (unshifted, shifted, code)
     const SYMBOLS: [(char, char, u32); 21] = [
-        ('1', '!', 2), ('2', '@', 3), ('3', '#', 4), ('4', '$', 5), ('5', '%', 6),
-        ('6', '^', 7), ('7', '&', 8), ('8', '*', 9), ('9', '(', 10), ('0', ')', 11),
-        ('-', '_', 12), ('=', '+', 13), ('[', '{', 26), (']', '}', 27), (';', ':', 39),
-        ('\'', '"', 40), ('`', '~', 41), ('\\', '|', 43), (',', '<', 51), ('.', '>', 52),
+        ('1', '!', 2),
+        ('2', '@', 3),
+        ('3', '#', 4),
+        ('4', '$', 5),
+        ('5', '%', 6),
+        ('6', '^', 7),
+        ('7', '&', 8),
+        ('8', '*', 9),
+        ('9', '(', 10),
+        ('0', ')', 11),
+        ('-', '_', 12),
+        ('=', '+', 13),
+        ('[', '{', 26),
+        (']', '}', 27),
+        (';', ':', 39),
+        ('\'', '"', 40),
+        ('`', '~', 41),
+        ('\\', '|', 43),
+        (',', '<', 51),
+        ('.', '>', 52),
         ('/', '?', 53),
     ];
     match c {

@@ -46,15 +46,23 @@ function Entry($i) {
 pub fn list_dir(agent: &Agent, path: &str) -> Result<Vec<Entry>> {
     match agent.os()? {
         GuestOs::Linux => {
-            let out = run(agent, ExecSpec::new("/bin/sh", ["-c", LINUX_LIST, "sh", path, LINUX_FMT]))?;
-            out.lines().filter(|l| !l.is_empty()).map(parse_linux).collect()
+            let out = run(
+                agent,
+                ExecSpec::new("/bin/sh", ["-c", LINUX_LIST, "sh", path, LINUX_FMT]),
+            )?;
+            out.lines()
+                .filter(|l| !l.is_empty())
+                .map(parse_linux)
+                .collect()
         }
         GuestOs::Windows => {
             let script = format!(
                 "{PS_PRELUDE}{PS_ENTRY}\nConvertTo-Json -Compress -Depth 2 -InputObject @(Get-ChildItem -LiteralPath {} -Force | ForEach-Object {{ Entry $_ }})",
                 ps_quote(path)
             );
-            Ok(serde_json::from_str(run(agent, powershell(&script))?.trim())?)
+            Ok(serde_json::from_str(
+                run(agent, powershell(&script))?.trim(),
+            )?)
         }
     }
 }
@@ -70,7 +78,9 @@ pub fn stat(agent: &Agent, path: &str) -> Result<Entry> {
                 "{PS_PRELUDE}{PS_ENTRY}\nConvertTo-Json -Compress -Depth 2 -InputObject (Entry (Get-Item -LiteralPath {} -Force))",
                 ps_quote(path)
             );
-            Ok(serde_json::from_str(run(agent, powershell(&script))?.trim())?)
+            Ok(serde_json::from_str(
+                run(agent, powershell(&script))?.trim(),
+            )?)
         }
     }
 }
@@ -121,8 +131,14 @@ mod tests {
     #[test]
     fn parses_gnu_stat_line_with_pipe_in_name() {
         let e = parse_linux("regular file|42|1700000000|644|root|./a|b.txt").unwrap();
-        assert_eq!((e.name.as_str(), e.kind.as_str(), e.size), ("a|b.txt", "file", Some(42)));
-        assert_eq!(parse_linux("directory|4096|1|755|u|./d").unwrap().kind, "directory");
+        assert_eq!(
+            (e.name.as_str(), e.kind.as_str(), e.size),
+            ("a|b.txt", "file", Some(42))
+        );
+        assert_eq!(
+            parse_linux("directory|4096|1|755|u|./d").unwrap().kind,
+            "directory"
+        );
         assert!(parse_linux("garbage").is_err());
     }
 }
