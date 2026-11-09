@@ -26,6 +26,13 @@ use crate::seed;
 /// XML namespace of the metadata element that marks VMs created by this server.
 const OWNER_NS: &str = "http://virtmanager-mcp/owner/1";
 
+/// Undefining a VM also removes its managed save, snapshot and checkpoint metadata, NVRAM and TPM state.
+const UNDEFINE_FLAGS: u32 = sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
+    | sys::VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
+    | sys::VIR_DOMAIN_UNDEFINE_CHECKPOINTS_METADATA
+    | sys::VIR_DOMAIN_UNDEFINE_NVRAM
+    | sys::VIR_DOMAIN_UNDEFINE_TPM;
+
 /// Serialises operations that check limits or pick names and then act on them.
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -632,6 +639,73 @@ fn replace_owner(xml: &str, owner: &Owner) -> Result<String> {
     ))
 }
 
+/// Owned VMs with an expiry, as (UUID, owner) pairs, for the sweep to choose from.
+pub fn owned_with_expiry(hv: &Hypervisor) -> Result<Vec<(String, Owner)>> {
+    hv.with_conn(|conn| {
+        Ok(conn
+            .list_all_domains(0)?
+            .iter()
+            .filter_map(|d| {
+                let owner = owner_of(d)?;
+                owner.expires?;
+                Some((d.get_uuid_string().ok()?, owner))
+            })
+            .collect())
+    })
+}
+
+/// Deletes the VM with `uuid` if it is still owned and expired at `now`, re-read just before acting, so a VM
+/// deleted and recreated meanwhile is left alone. Powers it off first, then deletes its pool volumes, then
+/// undefines it, so a failure part-way leaves a domain the next sweep finds again. Returns what was done, or
+/// `None` when there was nothing to do.
+pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
+    let m = &hv.config.manage;
+    let _guard = LOCK.lock().unwrap();
+    hv.with_conn(|conn| {
+        let Ok(dom) = Domain::lookup_by_uuid_string(conn, uuid) else {
+            return Ok(None);
+        };
+        if !owner_of(&dom).is_some_and(|o| is_expired(&o, now)) {
+            return Ok(None);
+        }
+        let name = dom.get_name()?;
+        if dom.is_active()? {
+            dom.destroy()
+                .map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;
+        }
+        let disks: Vec<DiskInfo> = parse_disks(&inactive_xml(&dom)?)?
+            .into_iter()
+            .filter(|d| d.device == "disk")
+            .collect();
+        let pool = disk_pool(conn, m)?;
+        let mut msg = format!("expired VM '{name}' ({uuid}) deleted");
+        for d in &disks {
+            match pool_volume(conn, &pool, &m.disk_pool, d) {
+                Some(vol) => match vol.delete(0) {
+                    Ok(()) => msg.push_str(&format!("; deleted disk {}", d.source())),
+                    Err(e) => msg.push_str(&format!(
+                        "; could not delete disk {}: {}",
+                        d.source(),
+                        e.message()
+                    )),
+                },
+                None => msg.push_str(&format!(
+                    "; left disk {} outside manage.disk_pool",
+                    d.source()
+                )),
+            }
+        }
+        dom.undefine_flags(UNDEFINE_FLAGS)
+            .map_err(|e| anyhow!("cannot undefine '{name}': {}", e.message()))?;
+        Ok(Some(msg))
+    })
+}
+
+/// Whether an owner's expiry has passed at `now`. VMs without an expiry never expire.
+pub fn is_expired(owner: &Owner, now: u64) -> bool {
+    owner.expires.is_some_and(|at| at <= now)
+}
+
 /// Undefines a shut-off VM and deletes its disk volumes that are in the disk pool.
 pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
     let dom = hv.manage_domain(name)?;
@@ -661,12 +735,7 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
                 None => kept.push(d.source()),
             }
         }
-        let flags = sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
-            | sys::VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
-            | sys::VIR_DOMAIN_UNDEFINE_CHECKPOINTS_METADATA
-            | sys::VIR_DOMAIN_UNDEFINE_NVRAM
-            | sys::VIR_DOMAIN_UNDEFINE_TPM;
-        dom.undefine_flags(flags)
+        dom.undefine_flags(UNDEFINE_FLAGS)
             .map_err(|e| anyhow!("cannot undefine '{name}': {}", e.message()))?;
 
         let mut msg = format!("deleted VM '{name}'");

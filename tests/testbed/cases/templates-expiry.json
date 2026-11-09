@@ -1,0 +1,48 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-exp",
+      "template": "debian13",
+      "lifetime_minutes": 1,
+      "wait_for_agent_secs": 0
+    }
+  },
+  {
+    "tool": "attach_disk",
+    "args": {
+      "vm": "t-exp",
+      "size_gib": 1
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-keep",
+      "template": "debian13",
+      "start": false
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 130
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "list_vms",
+    "args": {}
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-keep"
+    }
+  }
+]

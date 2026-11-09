@@ -7,6 +7,7 @@ mod hypervisor;
 mod manage;
 mod seed;
 mod server;
+mod sweep;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,6 +65,15 @@ struct Cli {
     /// Let copy_to_vm read from the directory the server was started in (the project directory).
     #[arg(long)]
     share_project_dir: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Delete every expired VM made from a template once, then exit. Meant for a systemd timer, so VMs expire
+    /// while no server runs. Needs manage.create and a template in the config.
+    Sweep,
 }
 
 #[tokio::main]
@@ -120,6 +130,13 @@ async fn main() -> Result<()> {
         hv,
         consoles: Consoles::default(),
     });
+
+    if let Some(Command::Sweep) = cli.command {
+        let deleted = sweep::sweep_once(&state)?;
+        tracing::info!("sweep done: {deleted} expired VMs deleted");
+        return Ok(());
+    }
+    sweep::spawn(state.clone())?;
 
     match cli.transport {
         Transport::Stdio => {

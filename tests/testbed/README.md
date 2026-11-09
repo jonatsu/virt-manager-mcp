@@ -35,6 +35,8 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-create.json` | `list_templates` hiding a missing volume; three VMs from templates, one UEFI, timed to a responding agent; hostname, size and lifetime refusals and `max_vms`; deletion of overlays, seeds and attached disks. |
 | `templates-reset.json` | Resets a VM with a marker file, a snapshot and an attached disk; refuses the unowned `t-listed`, a `create_vm` VM and `trial-deb13`; leaves `t-s` running on the `scratch` template. |
 | `templates-reset-missing.json` | Run after `virsh vol-delete --pool agent-vms tpl-scratch.qcow2`: the reset of `t-s` fails with its disks in place, then the case deletes its VMs. |
+| `templates-expiry.json` | `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without one; after 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
+| `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
 
 `templates-reset.json` needs `t-listed`, a VM defined with `virsh` and never started, and `tpl-scratch.qcow2`, made with
 `virsh vol-clone --pool agent-vms tpl-debian13.qcow2 tpl-scratch.qcow2`.

@@ -1,0 +1,18 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-exp2",
+      "template": "debian13",
+      "lifetime_minutes": 1,
+      "start": false
+    }
+  },
+  {
+    "tool": "attach_disk",
+    "args": {
+      "vm": "t-exp2",
+      "size_gib": 1
+    }
+  }
+]
