@@ -91,8 +91,9 @@ The conformance reviews of the second autopilot run found these. None blocks the
    reports its end left `console_open` answering "already open". `force: true` now replaces this server's own
    session too, and a session whose reader has stopped counts as closed. `tests/testbed/cases/console-reopen.json`
    shows it.
-2. **README: file writes need `guest-exec`.** `write_file` and `copy_to_vm` run `test`, `chmod` and `rm` through
-   `guest-exec` on Linux guests, so a guest agent that blocks `guest-exec` but allows file operations fails on writes.
+2. **Done: the README says file writes need `guest-exec`.** `write_file` and `copy_to_vm` run `test`, `chmod` and
+   `rm` through `guest-exec` on Linux guests, so a guest agent that blocks `guest-exec` but allows file operations
+   fails on writes.
 3. **An overwrite with `mode` truncates first.** `write_from` opens with `wb` before `chmod`, so a failed `chmod`
    leaves an existing file empty. Either set the mode after the first write or document it.
 4. **No test covers `write_from`'s ordering.** Only the pure helpers are unit-tested; setting the mode before the

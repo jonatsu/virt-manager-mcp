@@ -153,8 +153,9 @@ sudo systemctl enable --now qemu-guest-agent
 ```
 
 > **RHEL / CentOS / Rocky / Alma:** the packaged agent blocks `guest-exec` and file
-> operations by default. Remove them from `BLOCK_RPCS` (or the `--block-rpcs` / `FILTER_RPC_ARGS`
-> setting) in `/etc/sysconfig/qemu-ga` and restart the agent.
+> operations by default. Unblock both, because file writes also use `guest-exec`: remove them
+> from `BLOCK_RPCS` (or the `--block-rpcs` / `FILTER_RPC_ARGS` setting) in
+> `/etc/sysconfig/qemu-ga` and restart the agent.
 
 Serial console (for `console_*`): the default virt-manager VM has a `pty` serial console. Enable a login
 on it with:
@@ -234,6 +235,8 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 - `write_file` gives a new file on a Linux guest mode 644, or the octal `mode` it is given (up to
   `777`). Overwriting or appending keeps an existing file's mode unless `mode` is given. The guest
   agent itself would create the file world-writable, so the mode is set before any data is written.
+  On Linux guests `write_file` and `copy_to_vm` therefore also need `guest-exec`, which runs `test`,
+  `chmod` and `rm`; an agent that allows file operations but blocks `guest-exec` cannot write files.
 - `stop_vm` without `force` sends a shutdown request and waits (60 s by default). A guest that
   ignores ACPI and has no guest agent will not shut down; use `force: true` to power it off.
 - `type_text` assumes a US keyboard layout in the guest and supports printable ASCII only.
