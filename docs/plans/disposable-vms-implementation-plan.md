@@ -83,9 +83,12 @@ a design change for the user to approve.
 
 **Changes.** The script takes the pool and volume name, and refuses an existing volume, so it never rebuilds a template
 in use. It downloads the Debian 13 `genericcloud` image, verifies it against `SHA512SUMS`, uploads it, boots it once
-as `t-tpl-build` with a seed that installs the guest agent, runs `cloud-init clean --logs --machine-id` through the
-agent, powers off and undefines the domain. It builds that seed with `xorriso`, as the probe did, because the script
-runs before the server is configured. The how-to goes in `docs/templates.md`, linked from the README.
+as `t-tpl-build` with 1 vCPU and 1 GiB and a seed that installs the guest agent, runs
+`cloud-init clean --logs --machine-id` through the agent, powers off and undefines the domain. It builds that seed
+with `xorriso`, as the probe did, because the script runs before the server is configured. It uses one vCPU because
+the fresh cloud image reset in a loop on its first boots with two
+([`2026-11-10-fatfs-seed-boot.md`](../research/2026-11-10-fatfs-seed-boot.md)). The how-to goes in
+`docs/templates.md`, linked from the README.
 
 **Verification.** `shellcheck` and `shfmt` pass through `pre-commit`. Running the script for `tpl-debian13.qcow2`
 leaves the volume in the pool, no `t-tpl-build` domain, and no domain using the volume; a second run refuses. Record
@@ -110,11 +113,13 @@ disks, the chosen firmware, a given UUID and MAC address, and the new owner attr
 **Changes.** `domain_xml` takes a list of disks, the firmware, the owner attributes and an optional UUID and MAC;
 `create_vm` passes its one disk and CD-ROM and no UUID. The server generates a VM's UUID before building its seed,
 because the seed's instance ID contains it; add `uuid` 1.x as a direct dependency with its `v4` feature, the version
-`Cargo.lock` already holds. Volume creation gains a qcow2 overlay with `<backingStore>` and a raw volume sized in
-bytes. The upload uses `Stream::new` and `StorageVol::upload`, loops on `send` until every byte is sent, then calls
-`finish`, and calls `abort` on every error path. Owner attributes (`template`, `generation`, `expires` in UTC epoch
-seconds) get a parser next to `is_owned`. Rename `trial-new*` in `tests/testbed/cases/lifecycle-guardrails.json` to
-`t-new*`, to keep that case inside the test-bed names.
+`Cargo.lock` already holds. Every disk is a `<disk type='file'>` with the volume's path, as `create_vm` writes today,
+because a seed given as a pool-volume reference failed to open on a later start. Volume creation gains a qcow2
+overlay with `<backingStore>` and a raw volume sized in bytes. The upload uses `Stream::new` and
+`StorageVol::upload`, loops on `send` until every byte is sent, then calls `finish`, and calls `abort` on every error
+path. Owner attributes (`template`, `generation`, `expires` in UTC epoch seconds) get a parser next to `is_owned`.
+Rename `trial-new*` in `tests/testbed/cases/lifecycle-guardrails.json` to `t-new*`, to keep that case inside the
+test-bed names.
 
 **Verification.** The existing `domain_xml` tests pass unchanged in meaning; new tests cover a template domain's XML,
 the owner attributes round trip, and that a domain without the owner element still counts as not owned.
@@ -137,8 +142,8 @@ names them. Add `tests/testbed/config-templates.toml` and the case `templates-cr
 `<backingStore>`. The case:
 
 - lists the templates, without `missing`, and shows creating from `missing` failing with the reason;
-- creates `t-vm1` between two `__time__` marks, expecting a responding agent in about 10 s, then `t-vm2` from the same
-  template while `t-vm1` runs;
+- creates `t-vm1` with 2 vCPUs between two `__time__` marks, expecting a responding agent in about 10 s, then `t-vm2`
+  from the same template while `t-vm1` runs;
 - creates `t-uefi` from `debian13-uefi` and sees its agent respond;
 - refuses an invalid hostname, `max_vms`, memory above `max_memory_mib`, and a lifetime above the cap;
 - attaches a disk to `t-vm1`, then deletes every VM it made.
@@ -204,7 +209,7 @@ against the design and this plan. Both close before the outcome counts as done.
 
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
-| 1 Seed image |  |  |  |
+| 1 Seed image | see unit-1 commits | `fatfs` seed applied: [`2026-11-10-fatfs-seed-boot.md`](../research/2026-11-10-fatfs-seed-boot.md) | pending |
 | 2 Template script |  |  |  |
 | 3 Template config |  |  |  |
 | 4 Volumes and domain XML |  |  |  |
