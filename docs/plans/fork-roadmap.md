@@ -107,9 +107,10 @@ under one of them.
 
 1. **A clean VM in seconds, not minutes.** An agent gets a fresh, disposable VM per task instead of waiting for an ISO
    or preseed install. This covers disposable VMs cloned or overlaid from an operator-listed base image or template
-   VM, a reset-to-snapshot loop, and automatic expiry of abandoned VMs. Its first question is why cloud-init never
-   applied its user data in the trial; the smallest evidence is one boot with a known-good seed disk, checked through
-   the guest agent. If cloud-init cannot be made to work, the design clones a prepared template VM instead.
+   VM, a reset-to-snapshot loop, and automatic expiry of abandoned VMs. Its first question is answered: cloud-init
+   applies a NoCloud seed disk on this host, and an overlay on a base that already has the guest agent answers about
+   8 s after power-on, against 44 s when cloud-init installs the agent
+   ([`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md)).
 2. **Reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input. This
    covers the wait tool (console text, screen text or the guest agent), long-running processes whose output streams
    back, and expect-style console sessions. `type_text` returns at once, and the trial lost input that way.
