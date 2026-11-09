@@ -29,13 +29,16 @@ pub const CLOUD_CONFIG_HEADER: &str = "#cloud-config";
 
 /// Builds a seed image holding `meta-data` with the instance ID and hostname, and `user-data`.
 ///
-/// Callers pass a hostname that already follows the hostname rule and an instance ID made of a UUID and a
-/// generation number, so neither needs YAML quoting.
+/// The instance ID and hostname go into `meta-data` unquoted, so each must be a plain token: letters, digits, `-`,
+/// `_` and `.` only.
 ///
 /// # Errors
 ///
-/// Fails when the user data lacks the `#cloud-config` header or exceeds [`MAX_USER_DATA`].
+/// Fails when the instance ID or hostname is not a plain token, or the user data lacks the `#cloud-config` header
+/// line or exceeds [`MAX_USER_DATA`].
 pub fn build(instance_id: &str, hostname: &str, user_data: &str) -> Result<Vec<u8>> {
+    check_token(instance_id, "instance ID")?;
+    check_token(hostname, "hostname")?;
     check_user_data(user_data)?;
     let size = usize::try_from(SEED_BYTES).expect("the seed size fits in memory");
     let mut disk = Cursor::new(vec![0u8; size]);
@@ -52,26 +55,41 @@ pub fn build(instance_id: &str, hostname: &str, user_data: &str) -> Result<Vec<u
                 .with_context(|| format!("creating {name} in the seed image"))?;
             file.write_all(body.as_bytes())
                 .with_context(|| format!("writing {name} to the seed image"))?;
+            // Dropping the file would also flush its directory entry, but would only log a failure.
+            file.flush()
+                .with_context(|| format!("closing {name} in the seed image"))?;
         }
         fs.unmount().context("closing the seed image")?;
     }
     Ok(disk.into_inner())
 }
 
-/// Checks that user data has the `#cloud-config` header and fits in the seed image.
+/// Checks that user data's first line is the `#cloud-config` header and that it fits in the seed image.
+///
+/// Other headers that share the prefix, such as `#cloud-config-archive`, are different content types to cloud-init,
+/// so the first line must be the header alone.
 ///
 /// # Errors
 ///
 /// Returns the reason the user data is unusable.
 pub fn check_user_data(user_data: &str) -> Result<()> {
-    if !user_data.starts_with(CLOUD_CONFIG_HEADER) {
-        bail!("user data must start with {CLOUD_CONFIG_HEADER}");
+    let first_line = user_data.lines().next().unwrap_or_default().trim_end();
+    if first_line != CLOUD_CONFIG_HEADER {
+        bail!("user data must start with a {CLOUD_CONFIG_HEADER} line");
     }
     if user_data.len() > MAX_USER_DATA {
         bail!(
             "user data is {} bytes; the seed holds at most {MAX_USER_DATA}",
             user_data.len()
         );
+    }
+    Ok(())
+}
+
+fn check_token(value: &str, what: &str) -> Result<()> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    if value.is_empty() || !value.chars().all(plain) {
+        bail!("the seed's {what} {value:?} may hold only letters, digits, '-', '_' and '.'");
     }
     Ok(())
 }
@@ -110,9 +128,39 @@ mod tests {
     }
 
     #[test]
+    fn seed_is_fat12() {
+        let image = build("abc-1", "t-vm1", "#cloud-config\n").unwrap();
+        let fs = FileSystem::new(Cursor::new(image), FsOptions::new()).unwrap();
+        assert_eq!(fs.fat_type(), fatfs::FatType::Fat12);
+    }
+
+    #[test]
     fn user_data_needs_header() {
-        let err = build("abc-1", "t-vm1", "packages: [curl]\n").unwrap_err();
-        assert!(err.to_string().contains("#cloud-config"), "{err}");
+        for data in [
+            "packages: [curl]\n",
+            "#cloud-config-archive\n- type: text/cloud-config\n",
+            "",
+        ] {
+            let err = build("abc-1", "t-vm1", data).unwrap_err();
+            assert!(err.to_string().contains("#cloud-config"), "{err}");
+        }
+        assert!(check_user_data("#cloud-config\r\nhostname: x\n").is_ok());
+        assert!(check_user_data("#cloud-config").is_ok());
+    }
+
+    #[test]
+    fn meta_data_values_are_plain_tokens() {
+        for (id, host) in [
+            ("abc-1\nlocal-hostname: evil", "t-vm1"),
+            ("abc-1", "t-vm1 x"),
+            ("", "t-vm1"),
+            ("abc-1", ""),
+        ] {
+            assert!(
+                build(id, host, "#cloud-config\n").is_err(),
+                "{id:?} {host:?}"
+            );
+        }
     }
 
     #[test]
