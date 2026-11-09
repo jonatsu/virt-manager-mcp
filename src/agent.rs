@@ -18,6 +18,36 @@ const FILE_CHUNK: usize = 1024 * 1024;
 /// hang qemu-ga past the agent timeout, while 64 KiB copies several MB/s.
 const WRITE_CHUNK: usize = 64 * 1024;
 
+/// Mode for files that `write_from` creates when the caller gives none: what a umask of 022 gives.
+pub const DEFAULT_FILE_MODE: u32 = 0o644;
+
+/// Timeout for the small helper commands (`test`, `chmod`) that file writes run.
+const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Parses permission bits given as octal digits, such as "644" or "0600". Only the 0o777 bits are
+/// accepted: setuid, setgid and sticky bits are refused.
+pub fn parse_mode(text: &str) -> Result<u32> {
+    let digits = text.trim();
+    let valid =
+        (1..=4).contains(&digits.len()) && digits.bytes().all(|b| (b'0'..=b'7').contains(&b));
+    let mode = u32::from_str_radix(digits, 8)
+        .ok()
+        .filter(|m| valid && *m <= 0o777);
+    mode.ok_or_else(|| {
+        anyhow!("invalid mode {text:?}: expected octal permission bits from 0 to 777")
+    })
+}
+
+/// The mode to set after opening a file: the caller's `mode` if given, else the default for a new
+/// file. An existing file keeps its mode.
+fn mode_to_set(existed: bool, mode: Option<u32>) -> Option<u32> {
+    match (mode, existed) {
+        (Some(m), _) => Some(m),
+        (None, false) => Some(DEFAULT_FILE_MODE),
+        (None, true) => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GuestOs {
@@ -163,6 +193,29 @@ impl<'a> Agent<'a> {
         let _ = self.call("guest-file-close", Some(json!({ "handle": handle })));
     }
 
+    /// Whether `path` exists in a Linux guest, following symlinks like `open` does.
+    fn exists(&self, path: &str) -> Result<bool> {
+        let out = self.exec(&ExecSpec::new("test", ["-e", path]), HELPER_TIMEOUT, 0)?;
+        match out.exit_code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!("cannot check whether {path} exists in the guest"),
+        }
+    }
+
+    /// Sets permission bits on a Linux guest file.
+    fn chmod(&self, path: &str, mode: u32) -> Result<()> {
+        let spec = ExecSpec::new("chmod", [format!("{mode:o}"), "--".into(), path.into()]);
+        let out = self.exec(&spec, HELPER_TIMEOUT, 4096)?;
+        if out.exit_code != Some(0) {
+            bail!(
+                "chmod {mode:o} {path} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
     /// Reads up to `max_bytes` starting at `offset`. Returns the data and whether EOF was reached.
     pub fn read_file(&self, path: &str, offset: u64, max_bytes: usize) -> Result<(Vec<u8>, bool)> {
         let handle = self.open(path, "rb")?;
@@ -202,14 +255,42 @@ impl<'a> Agent<'a> {
         result
     }
 
-    pub fn write_file(&self, path: &str, data: &[u8], append: bool) -> Result<u64> {
-        self.write_from(path, data, append)
+    pub fn write_file(
+        &self,
+        path: &str,
+        data: &[u8],
+        append: bool,
+        mode: Option<u32>,
+    ) -> Result<u64> {
+        self.write_from(path, data, append, mode)
     }
 
     /// Streams `src` into a guest file in `WRITE_CHUNK` pieces. Returns the number of bytes written.
-    pub fn write_from(&self, path: &str, mut src: impl Read, append: bool) -> Result<u64> {
+    ///
+    /// The guest agent creates files world-writable (mode 666). On Linux guests a file this call
+    /// creates gets `mode`, or `DEFAULT_FILE_MODE`, before any data is written; an existing file
+    /// keeps its mode unless `mode` is given. Windows guests have no mode bits and reject `mode`.
+    pub fn write_from(
+        &self,
+        path: &str,
+        mut src: impl Read,
+        append: bool,
+        mode: Option<u32>,
+    ) -> Result<u64> {
+        let linux = self.os()? == GuestOs::Linux;
+        if !linux && mode.is_some() {
+            bail!("mode is only supported on Linux guests");
+        }
+        let new_mode = if linux {
+            mode_to_set(self.exists(path)?, mode)
+        } else {
+            None
+        };
         let handle = self.open(path, if append { "ab" } else { "wb" })?;
         let result = (|| {
+            if let Some(m) = new_mode {
+                self.chmod(path, m)?;
+            }
             let mut written = 0u64;
             let mut buf = Vec::with_capacity(WRITE_CHUNK);
             loop {
@@ -325,5 +406,43 @@ mod tests {
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(String::from_utf16(&utf16).unwrap(), "echo é");
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn parse_mode_accepts_octal_permission_bits() {
+        assert_eq!(parse_mode("644").unwrap(), 0o644);
+        assert_eq!(parse_mode("0600").unwrap(), 0o600);
+        assert_eq!(parse_mode(" 755 ").unwrap(), 0o755);
+        assert_eq!(parse_mode("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_mode_refuses_special_bits_and_non_octal() {
+        for bad in [
+            "4755", "1777", "7777", "8", "64a", "", "0o644", "-644", "06440",
+        ] {
+            assert!(parse_mode(bad).is_err(), "{bad:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn new_file_gets_the_default_mode() {
+        assert_eq!(mode_to_set(false, None), Some(DEFAULT_FILE_MODE));
+    }
+
+    #[test]
+    fn existing_file_keeps_its_mode() {
+        assert_eq!(mode_to_set(true, None), None);
+    }
+
+    #[test]
+    fn explicit_mode_applies_to_new_and_existing_files() {
+        assert_eq!(mode_to_set(false, Some(0o600)), Some(0o600));
+        assert_eq!(mode_to_set(true, Some(0o640)), Some(0o640));
     }
 }

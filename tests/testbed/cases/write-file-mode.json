@@ -1,0 +1,66 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -f /tmp/mode-default /tmp/mode-explicit /tmp/mode-existing; install -m 640 /dev/null /tmp/mode-existing"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp/mode-default",
+      "content": "default\n"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp/mode-explicit",
+      "content": "explicit\n",
+      "mode": "600"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp/mode-existing",
+      "content": "appended\n",
+      "append": true
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp/mode-existing",
+      "content": "overwritten\n"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "trial-deb13",
+      "path": "/tmp/mode-refused",
+      "content": "x\n",
+      "mode": "4755"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "stat -c '%a %n' /tmp/mode-default /tmp/mode-explicit /tmp/mode-existing; ls /tmp/mode-refused 2>&1"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -f /tmp/mode-default /tmp/mode-explicit /tmp/mode-existing"
+    }
+  }
+]

@@ -228,8 +228,12 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   is open, `console_open` fails unless `force: true`, which disconnects the other client.
 - `copy_to_vm` streams the file in 64 KiB guest-agent requests, so the data never passes through
   the conversation. The host path is resolved (symlinks, `..`) before the `host_share_dirs`
-  check, so links pointing outside a share are refused. The guest file gets the guest agent's
-  default permissions; run `chmod +x` through `exec` for scripts. The parent directory must exist.
+  check, so links pointing outside a share are refused. On a Linux guest a new file gets mode 644
+  and an existing one keeps its mode; run `chmod +x` through `exec` for scripts. The parent directory
+  must exist.
+- `write_file` gives a new file on a Linux guest mode 644, or the octal `mode` it is given (up to
+  `777`). Overwriting or appending keeps an existing file's mode unless `mode` is given. The guest
+  agent itself would create the file world-writable, so the mode is set before any data is written.
 - `stop_vm` without `force` sends a shutdown request and waits (60 s by default). A guest that
   ignores ACPI and has no guest agent will not shut down; use `force: true` to power it off.
 - `type_text` assumes a US keyboard layout in the guest and supports printable ASCII only.

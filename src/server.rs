@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::agent::{Agent, ExecSpec, GuestOs, powershell};
+use crate::agent::{self, Agent, ExecSpec, GuestOs, powershell};
 use crate::console::Consoles;
 use crate::hypervisor::{self, Hypervisor};
 use crate::{display, fsops, manage};
@@ -150,6 +150,9 @@ pub struct WriteFileParams {
     /// Append instead of overwriting.
     #[serde(default)]
     pub append: bool,
+    /// Permission bits as octal, from "0" to "777" (e.g. "600"). A new file gets 644 when omitted; an existing
+    /// file keeps its mode unless this is given. Linux guests only.
+    pub mode: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -557,7 +560,10 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Write (or append to) a file in the guest via the QEMU guest agent.")]
+    #[tool(
+        description = "Write (or append to) a file in the guest via the QEMU guest agent. On Linux guests a new \
+        file gets mode 644 unless `mode` says otherwise; an existing file keeps its mode."
+    )]
     async fn write_file(
         &self,
         Parameters(p): Parameters<WriteFileParams>,
@@ -568,7 +574,8 @@ impl VirtServer {
                 WriteEncoding::Text => p.content.into_bytes(),
                 WriteEncoding::Base64 => B64.decode(p.content.trim())?,
             };
-            let n = s.agent(&dom).write_file(&p.path, &data, p.append)?;
+            let mode = p.mode.as_deref().map(agent::parse_mode).transpose()?;
+            let n = s.agent(&dom).write_file(&p.path, &data, p.append, mode)?;
             Ok(vec![ContentBlock::text(format!(
                 "wrote {n} bytes to {}",
                 p.path
@@ -591,9 +598,12 @@ impl VirtServer {
             let src = s.hv.config.share_file(&p.host_path)?;
             let file = std::fs::File::open(&src)
                 .with_context(|| format!("cannot open {}", src.display()))?;
-            let n =
-                s.agent(&dom)
-                    .write_from(&p.guest_path, std::io::BufReader::new(file), false)?;
+            let n = s.agent(&dom).write_from(
+                &p.guest_path,
+                std::io::BufReader::new(file),
+                false,
+                None,
+            )?;
             Ok(vec![ContentBlock::text(format!(
                 "copied {n} bytes from {} to {}",
                 src.display(),

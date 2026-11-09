@@ -71,8 +71,12 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    `tests/testbed/cases/console-closed-on-power-off.json`, the guest powers itself off under an open console, and the
    next read returns `closed: "console stream ended ..."` with the kernel's last line. A forced `stop_vm` closes the
    session itself, so a later read reports that no console is open.
-3. **`write_file` creates new files with mode 666.** Tighten the default, set the mode after writing, and consider a
-   `mode` parameter. Evidence: a new file has the chosen mode, and an appended existing file keeps its own.
+3. **Done: `write_file` no longer creates world-writable files.** The guest agent creates files with mode 666.
+   On Linux guests, `write_from` in `src/agent.rs` now sets the mode right after opening a new file, before any data
+   is written: 644 by default, or the new optional octal `mode` parameter, which refuses bits above 777. An existing
+   file keeps its mode unless `mode` is given. `copy_to_vm` shares the path, so its new files get 644 too.
+   `tests/testbed/cases/write-file-mode.json` shows 644, 600, a kept 640 after append and overwrite, and a refused
+   `4755`.
 4. **`start_vm` on a running VM ignores `wait_for_agent_secs`.** It returns "already running" at once, even when the
    guest agent is not yet up. Evidence: `start_vm` on a running VM whose agent is down waits up to the given time.
 

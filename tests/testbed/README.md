@@ -21,6 +21,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `lifecycle-guardrails.json` | `create_vm` refusals (bad name, vCPU cap, existing name, `max_vms`, ISO outside `iso_dirs`), then start, stop and delete. |
 | `console-stall.json` | Logs in as root on the serial console, rereading from offset 0 with `wait_ms`. |
 | `console-after-start.json` | Opens the console during boot and reads one byte at a time. |
+| `write-file-mode.json` | `write_file` modes: 644 by default, an explicit `600`, a kept `640` on append and overwrite, a refused `4755`. |
 | `console-closed-on-power-off.json` | Powers the guest off from inside under an open console; the read reports the console closed. The case starts the VM again. |
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
