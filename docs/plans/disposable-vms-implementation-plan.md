@@ -1,0 +1,212 @@
+# Disposable VMs from templates: implementation plan
+
+Status: plan for roadmap outcome 1, built from [`disposable-vms-design.md`](disposable-vms-design.md) and revised for
+the plan-critic review of 2026-11-09. The design owns behaviour; this plan owns order and checks. Progress goes in
+the execution record at the end.
+
+## Overview
+
+The work adds a seed-image builder, a template recipe and template config, then the three tools and expiry. The order
+follows risk and dependencies. The `fatfs` seed is the one unproven assumption, so the first unit builds it and boots
+a VM with it before anything depends on it. The template script comes next, because every later test-bed check needs
+a real template. The config and the libvirt plumbing follow, and the tools build on both.
+
+```mermaid
+flowchart LR
+  U1[1 Seed image] --> U2[2 Template script]
+  U1 --> U4[4 Volumes and domain XML]
+  U3[3 Template config] --> U4
+  U2 --> U5[5 Create from template]
+  U4 --> U5
+  U5 --> U6[6 Reset]
+  U5 --> U7[7 Expiry]
+  U6 --> U8[8 Docs and final gate]
+  U7 --> U8
+```
+
+## Preflight
+
+These apply to every unit, which names only its additions.
+
+- **Rules.** Follow `AGENTS.md`, including its guardrails section: a change to ownership, `is_allowed` or
+  `can_manage` needs a test that shows a refusal still happens. Load `rust-style`, `rust-error-handling` and
+  `rust-testing` before editing Rust, and `bash-shell` before the template script.
+- **Gate.** Every commit passes the build gate in `AGENTS.md`, plus `cargo +1.89 test --locked`, because CI also
+  tests on the declared `rust-version`.
+- **Test bed.** Run cases as `tests/testbed/README.md` describes. The client has no assertions, so a case passes when
+  a reader of its replies sees each expected result; record what was seen in the execution record. Touch only
+  `trial-deb13` and VMs and volumes named `t-*` or `tpl-*` in the `agent-vms` pool on `qemu:///system`.
+- **Template config.** Template cases use `tests/testbed/config-templates.toml`, so the existing cases keep their
+  `max_vms = 1` config. It leaves `trial-deb13` out of `allowed_vms`, sets `create`, `delete`, `reconfigure` and
+  `snapshots` on, `max_vms = 4`, and lists `t-listed` in `allowed_vms`, `power_vms` and `manage_vms`. Its templates
+  are `debian13` on `tpl-debian13.qcow2`, `debian13-uefi` on the same volume with `firmware = "uefi"`, `scratch` on
+  `tpl-scratch.qcow2`, and `missing` on a volume that does not exist.
+- **Template safety.** Never delete or rebuild `tpl-debian13.qcow2` during a test. A failure path that needs a
+  missing template deletes `tpl-scratch.qcow2`, a `virsh vol-clone` of it.
+- **Locking.** Every operation that picks names, counts VMs or replaces disks holds `LOCK` in `src/manage.rs` up to
+  the domain's define. Starting a VM and waiting for its agent happen after the lock is released.
+- **Review.** After each unit marked "reviewed", dispatch `code-reviewer` on the unit's commits with the test
+  evidence; units 4, 6 and 7 use `model: opus`, because they touch ownership metadata, destructive paths or a
+  background thread. Fix blocking findings before the next dependent unit starts.
+- **Commits.** One logical change per commit, Conventional Commits, explicit pathspecs.
+
+## Units
+
+### 1. Seed image (reviewed)
+
+**Outcome.** A function builds a 2 MiB FAT image labelled `CIDATA` holding `meta-data` and `user-data`, and
+cloud-init in Debian 13 applies it. This settles the design's open assumption.
+
+**Changes.** Add `fatfs` 0.3.6. Try default features off with `std` and `alloc`, which keeps its `chrono` and
+`bitflags` 1 additions out; take the defaults if that does not build on 1.89. Add a `seed` module in `src/seed.rs`
+with a function from instance ID, hostname and user data to the image bytes. It refuses user data that does not fit
+the image. Unit tests read the image back with `fatfs` and check the label, both files and their contents. An
+`#[ignore]`d test writes an image to the path in `SEED_OUT`, for the boot check; the crate has no library target, so
+an example could not reach the module.
+
+**Verification.** `cargo deny check advisories` stays clean with the new crate, and the 1.89 build passes. On the test
+bed, upload the plain Debian 13 cloud image as `t-seed-base.qcow2`, create an overlay `t-seed.qcow2` on it, and define
+`t-seed` with `virsh`, as in the probe, but with the written seed as a read-only virtio disk. The user data sets the
+hostname and installs `qemu-guest-agent`. Expected: `cloud-init status --long` reports `done` with
+`DataSourceNoCloud` and no errors, and `hostname` prints `t-seed`. Delete `t-seed` and the three volumes afterwards.
+
+**Recovery.** If cloud-init does not read the image, stop: the design's fallback is an ISO writer, and the switch is
+a design change for the user to approve.
+
+### 2. Template script (self-reviewed)
+
+**Outcome.** `scripts/make-template.sh` builds a template volume in a pool, and a short how-to explains it.
+
+**Changes.** The script takes the pool and volume name, and refuses an existing volume, so it never rebuilds a template
+in use. It downloads the Debian 13 `genericcloud` image, verifies it against `SHA512SUMS`, uploads it, boots it once
+as `t-tpl-build` with a seed that installs the guest agent, runs `cloud-init clean --logs --machine-id` through the
+agent, powers off and undefines the domain. It builds that seed with `xorriso`, as the probe did, because the script
+runs before the server is configured. The how-to goes in `docs/templates.md`, linked from the README.
+
+**Verification.** `shellcheck` and `shfmt` pass through `pre-commit`. Running the script for `tpl-debian13.qcow2`
+leaves the volume in the pool, no `t-tpl-build` domain, and no domain using the volume; a second run refuses. Record
+the volume's checksum, from `virsh vol-download` piped to `sha256sum`, in the execution record. A self-review is
+enough: the script runs only operator-side, and unit 5 boots the result.
+
+### 3. Template config (reviewed with unit 4)
+
+**Outcome.** The config accepts `[manage.templates.<name>]` and `manage.max_lifetime_minutes`, and rejects bad input
+at load.
+
+**Changes.** In `src/config.rs`, add a `Template` struct (`volume`, `os`, `firmware`, `description`, `user_data`) and
+the two `Manage` fields, with `max_lifetime_minutes` defaulting to 1440. `Config::validate` rejects an unknown firmware
+or `os`, a template name that is not a hostname label, and a zero lifetime cap. Unit tests cover each rejection and a
+config without templates.
+
+### 4. Volumes and domain XML (reviewed, Opus)
+
+**Outcome.** `src/manage.rs` can create an overlay and a seed volume, upload the seed, and write a domain with several
+disks, the chosen firmware, a given UUID and MAC address, and the new owner attributes. `create_vm` behaves as before.
+
+**Changes.** `domain_xml` takes a list of disks, the firmware, the owner attributes and an optional UUID and MAC;
+`create_vm` passes its one disk and CD-ROM and no UUID. The server generates a VM's UUID before building its seed,
+because the seed's instance ID contains it; add `uuid` 1.x as a direct dependency with its `v4` feature, the version
+`Cargo.lock` already holds. Volume creation gains a qcow2 overlay with `<backingStore>` and a raw volume sized in
+bytes. The upload uses `Stream::new` and `StorageVol::upload`, loops on `send` until every byte is sent, then calls
+`finish`, and calls `abort` on every error path. Owner attributes (`template`, `generation`, `expires` in UTC epoch
+seconds) get a parser next to `is_owned`. Rename `trial-new*` in `tests/testbed/cases/lifecycle-guardrails.json` to
+`t-new*`, to keep that case inside the test-bed names.
+
+**Verification.** The existing `domain_xml` tests pass unchanged in meaning; new tests cover a template domain's XML,
+the owner attributes round trip, and that a domain without the owner element still counts as not owned.
+`lifecycle-guardrails.json` passes, which shows `create_vm` and its refusals unchanged.
+
+### 5. Create from template (reviewed)
+
+**Outcome.** `list_templates` and `create_vm_from_template` work as the design's "Templates" and "Creating a VM"
+sections describe, including the lifetime, and an agent gets a responding guest agent in about 10 s.
+
+**Changes.** Template checks run on every use: the volume is present and qcow2, no domain uses it, and the user-data
+file still starts with `#cloud-config` and fits the seed. "Uses it" means a direct disk source in a domain's inactive
+XML, read with `parse_disks`; a running overlay's nested `<backingStore>` does not count. Add the use count, the
+hostname rule for names, and the lifetime parameter, refused above `max_lifetime_minutes`. Creation cleans up the
+volumes it made when a step fails, and keeps the VM when start or the agent wait fails after define. In
+`src/server.rs`, the two tools appear only with `manage.create` and a configured template, and `manage_instructions`
+names them. Add `tests/testbed/config-templates.toml` and the case `templates-create.json`.
+
+**Verification.** Unit tests cover the hostname rule, the lifetime cap and the in-use check on XML with a nested
+`<backingStore>`. The case:
+
+- lists the templates, without `missing`, and shows creating from `missing` failing with the reason;
+- creates `t-vm1` between two `__time__` marks, expecting a responding agent in about 10 s, then `t-vm2` from the same
+  template while `t-vm1` runs;
+- creates `t-uefi` from `debian13-uefi` and sees its agent respond;
+- refuses an invalid hostname, `max_vms`, and a lifetime above the cap;
+- creates `t-big` with memory above the host's free memory but within `max_memory_mib`, and expects the VM kept and the
+  start failure reported;
+- attaches a disk to `t-vm1`, then deletes every VM it made.
+
+Afterwards `virsh vol-list agent-vms` shows no `t-vm*`, `t-uefi` or `t-big` volume. A run with the default test-bed
+config shows the tools are not advertised. The template's checksum matches unit 2's.
+
+### 6. Reset (reviewed, Opus)
+
+**Outcome.** `reset_vm` follows the design's six steps and keeps the name, UUID, MAC address, hardware and expiry.
+
+**Changes.** The reset in `src/manage.rs` takes `LOCK` for steps 1 to 5. It checks for itself that the VM is owned and
+has a `template` attribute, because `can_manage` also passes VMs listed in `manage_vms`. It edits the domain's
+inactive XML, replacing the disks and owner attributes, so vCPU, memory and NIC changes survive; a UEFI VM starts with
+`VIR_DOMAIN_START_RESET_NVRAM`, so its firmware variables return to the template's. The tool in `src/server.rs` needs
+`create`, `delete` and a template. Unit tests cover the generation naming and the XML edit.
+
+**Verification.** The case `templates-reset.json` creates `t-r` with a lifetime, writes a marker file, takes a
+snapshot, attaches a disk, and resets. Expected: the marker is gone, `snapshot_list` is empty, UUID, MAC and `expires`
+are unchanged, the generation is 2, and no generation-1 or attached volume is left. Refusals:
+
+- `t-listed`, defined with `virsh` and no owner element, is refused, and its disk is untouched;
+- `t-plain`, made by `create_vm`, is refused;
+- `trial-deb13` is refused at lookup, because this config does not allow it.
+
+A failure path creates `t-s` from `scratch`, deletes `tpl-scratch.qcow2`, and expects the reset to stop with the old
+disks in place. A run with `delete = false` does not advertise `reset_vm`.
+
+### 7. Expiry (reviewed, Opus)
+
+**Outcome.** Expired owned VMs are deleted by one sweep thread per server process and by `virtmanager-mcp sweep`, as
+the design's "Expiry" section describes.
+
+**Changes.** A `sweep` module with the selection, pure and unit-tested on owner attributes and the clock, and the
+destroy path: UUID lookup, `expires` re-read, force off, deletion of pool volumes, then undefine, with logging. It
+deletes volumes before undefining, so a crash between them leaves a domain the next sweep finds again. The destroy
+path takes `LOCK`. In `src/main.rs`, the CLI gains an optional subcommand, `sweep`, and serving starts the sweep thread
+once before the transport starts.
+
+**Verification.** Unit tests: selection skips VMs without `expires` and VMs not yet expired; the gate refuses with
+`read_only` or no templates; a VM whose `expires` changed after selection is left alone. The case
+`templates-expiry.json` creates `t-exp` with a 1-minute lifetime and an attached disk and `t-keep` without a lifetime,
+waits 130 s, which covers one 60 s sweep after expiry, and lists VMs: `t-exp` is gone with its volumes, and `t-keep`
+and `t-listed` remain. For the command, a short case creates `t-exp2` with a 1-minute lifetime and exits; after 70 s
+with no server running, `virtmanager-mcp --config ... sweep` exits 0, and `t-exp2` and its volumes are gone.
+
+Two processes sweeping one VM, a failed upload and a failed define have no test-bed case, because they need fault
+injection in libvirt. Their handling is reviewed in code, and the unit tests cover the logic that does not need
+libvirt.
+
+### 8. Docs and final gate
+
+**Outcome.** The README documents the three tools and the template config, the design matches the code, and the
+roadmap marks outcome 1 done.
+
+**Verification.** The full build gate and `cargo +1.89 test --locked` pass at the final commit. Every test-bed case,
+old and new, passes on a fresh build. After the cases, `virsh list --all` shows no `t-*` VM other than `t-listed`,
+which the run then removes, and `virsh vol-list agent-vms` shows no `t-*` volume. The template checksum matches unit
+2's. Then two separate reviews: `code-reviewer` (Opus) over the whole outcome, and a fresh `conformance-review`
+against the design and this plan. Both close before the outcome counts as done.
+
+## Execution record
+
+| Unit | Commits | Evidence | Review |
+| -- | -- | -- | -- |
+| 1 Seed image |  |  |  |
+| 2 Template script |  |  |  |
+| 3 Template config |  |  |  |
+| 4 Volumes and domain XML |  |  |  |
+| 5 Create from template |  |  |  |
+| 6 Reset |  |  |  |
+| 7 Expiry |  |  |  |
+| 8 Docs and final gate |  |  |  |
