@@ -110,7 +110,8 @@ under one of them.
    VM, a reset-to-snapshot loop, and automatic expiry of abandoned VMs. Its first question is answered: cloud-init
    applies a NoCloud seed disk on this host, and an overlay on a base that already has the guest agent answers about
    8 s after power-on, against 44 s when cloud-init installs the agent
-   ([`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md)).
+   ([`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md)). Its direction
+   is drafted in [`disposable-vms-draft.md`](disposable-vms-draft.md).
 2. **Reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input. This
    covers the wait tool (console text, screen text or the guest agent), long-running processes whose output streams
    back, and expect-style console sessions. `type_text` returns at once, and the trial lost input that way.
