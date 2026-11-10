@@ -83,34 +83,44 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
 
 ## Follow-ups
 
-The conformance reviews of the second and third autopilot runs found these. None blocks the server's use.
+Reviews of earlier work found these. None blocks the server's use.
 
-1. **Done: a stale console session could not be replaced.** After `stop_vm` keeps a session, a stream that never
-   reports its end left `console_open` answering "already open". `force: true` now replaces this server's own
-   session too, and a session whose reader has stopped counts as closed. `tests/testbed/cases/console-reopen.json`
-   shows it.
-2. **Done: the README says file writes need `guest-exec`.** `write_file` and `copy_to_vm` run `test`, `chmod` and
-   `rm` through `guest-exec` on Linux guests, so a guest agent that blocks `guest-exec` but allows file operations
-   fails on writes.
-3. **An overwrite with `mode` truncates first.** `write_from` opens with `wb` before `chmod`, so a failed `chmod`
-   leaves an existing file empty. Either set the mode after the first write or document it.
-4. **No test covers `write_from`'s ordering.** Only the pure helpers are unit-tested; setting the mode before the
-   data, and the clean-up after a failed `chmod`, rest on the test bed. A seam over the agent calls would allow it.
-5. **`console_read` with `wait_ms: 0` right after `stop_vm`** can return `closed: null`, because the reader records
-   the stream's end a moment later. A non-zero wait reports it.
-6. **Convert the existing documents to the short, plain style.** `AGENTS.md` asks for short, plain designs. Bring this
-   roadmap, the brainstorm draft, the test-bed README and the research notes into the same style; the research copies
-   keep their copied text and change only their own notes.
-7. **Done: an expiry no longer hides a failed volume deletion.** A volume that cannot be deleted keeps the domain, the
-   expiry counts as failed so `virtmanager-mcp sweep` exits non-zero, and the next sweep retries it. Unit tests cover
-   the decision; producing the failure needs root, so the test-bed README lists the manual check.
-8. **Done: a refused `reset_vm` keeps the console open.** `reset_vm` closes the console only once `manage::reset` has
-   passed every check, just before it forces the VM off. In `templates-reset-saved.json`, a console opened before a
-   refused reset still reads output after it; in `templates-reset-uefi.json`, a reset that goes ahead closes it.
-9. **Done: a test shows reset and expiry leaving a disk outside `disk_pool`.** `templates-outside-disk.json`, with the
-   steps in the test-bed README, attaches a user-owned file to two VMs with `virsh`; the sweep's expiry and a reset
-   both leave it in place, with its owner and checksum unchanged. A reset now reports such a disk as not deleted
-   because it is no pool volume, rather than as one it could not delete.
+01. **Done: a stale console session could not be replaced.** After `stop_vm` keeps a session, a stream that never
+    reports its end left `console_open` answering "already open". `force: true` now replaces this server's own
+    session too, and a session whose reader has stopped counts as closed. `tests/testbed/cases/console-reopen.json`
+    shows it.
+02. **Done: the README says file writes need `guest-exec`.** `write_file` and `copy_to_vm` run `test`, `chmod` and
+    `rm` through `guest-exec` on Linux guests, so a guest agent that blocks `guest-exec` but allows file operations
+    fails on writes.
+03. **An overwrite with `mode` truncates first.** `write_from` opens with `wb` before `chmod`, so a failed `chmod`
+    leaves an existing file empty. Either set the mode after the first write or document it.
+04. **No test covers `write_from`'s ordering.** Only the pure helpers are unit-tested; setting the mode before the
+    data, and the clean-up after a failed `chmod`, rest on the test bed. A seam over the agent calls would allow it.
+05. **`console_read` with `wait_ms: 0` right after `stop_vm`** can return `closed: null`, because the reader records
+    the stream's end a moment later. A non-zero wait reports it.
+06. **Convert the existing documents to the short, plain style.** `AGENTS.md` asks for short, plain designs. Bring this
+    roadmap, the brainstorm draft, the test-bed README and the research notes into the same style; the research copies
+    keep their copied text and change only their own notes.
+07. **Done: an expiry no longer hides a failed volume deletion.** A volume that cannot be deleted keeps the domain, the
+    expiry counts as failed so `virtmanager-mcp sweep` exits non-zero, and the next sweep retries it. Unit tests cover
+    the decision; producing the failure needs root, so the test-bed README lists the manual check.
+08. **Done: a refused `reset_vm` keeps the console open.** `reset_vm` closes the console only once `manage::reset` has
+    passed every check, just before it forces the VM off. In `templates-reset-saved.json`, a console opened before a
+    refused reset still reads output after it; in `templates-reset-uefi.json`, a reset that goes ahead closes it.
+09. **Done: a test shows reset and expiry leaving a disk outside `disk_pool`.** `templates-outside-disk.json`, with the
+    steps in the test-bed README, attaches a user-owned file to two VMs with `virsh`; the sweep's expiry and a reset
+    both leave it in place, with its owner and checksum unchanged. A reset now reports such a disk as not deleted
+    because it is no pool volume, rather than as one it could not delete.
+10. **Done: a slow `console_open` no longer stalls every wait.** Each `wait_for` poll takes the console sessions lock
+    to scan. `Consoles::open` and `Consoles::close` now hold that lock only to check and swap entries, and call
+    libvirt and drop a replaced session, which joins its reader and aborts its stream, without it.
+11. **An unterminated OSC sequence hides the output after it.** `ansi::strip` holds back everything after `ESC ]`
+    until a BEL or `ESC \` arrives, so a stray `ESC ]` from line noise stops console waits with `strip_ansi` from
+    matching, and hides the rest of a stripped `console_read`. Capping an OSC at a newline or a few KiB would bound
+    it; a captured boot log would show whether stray sequences occur.
+12. **Console conditions strip the same output once each.** Every console condition runs `ansi::strip` over its own
+    span on each poll with new output, which costs little at the default 256 KiB scrollback but grows with
+    `console_buffer_bytes` and the number of conditions. Strip once per poll and share the result.
 
 ## Outcomes
 
@@ -131,7 +141,13 @@ before it is built, and each feature from the earlier list sits under one of the
    tool (console text, screen text, a settled screen, the guest agent, a command or a job), the mouse and region
    screenshots, paced console input, long-running jobs on Linux and Windows whose output streams back, and
    expect-style console sessions. `type_text` returns at once, and the trial lost input that way. Design:
-   [`live-interaction-design.md`](live-interaction-design.md), accepted.
+   [`live-interaction-design.md`](live-interaction-design.md), accepted. Run 1 is done: `wait_for` with console,
+   guest-agent, command, `job_done` and `job_output` conditions; console generations, a wait cursor and paced
+   `console_write`; and background jobs on Linux guests (`job_start`, `job_read`, `job_stop`, `job_list`). A
+   serial-only OpenWrt guest, `t-owrt`, joined the test bed. Evidence:
+   [`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md), whose execution
+   record holds each unit's commits, test-bed results and reviews. Run 2 brings OCR, screen conditions and the mouse,
+   and run 3 brings Windows.
 3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
    passing them through its context, and reaches services running in the guest. This covers copying from the VM,
    directory sync, the guest's IP address and port forwarding. Each new path out of the guest needs a guardrail.
@@ -165,6 +181,8 @@ and the plan's execution record holds its evidence. Follow-ups 7 to 9 landed in 
 outside-disk test-bed cases passed with no `t-*` VM or volume left and the template checksum unchanged. A separate
 conformance review found no material mismatch. The manual root check for follow-up 7 has not been run yet.
 
-Next is outcome 2, from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each
-with its own plan. Run 1 follows
-[`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md).
+Outcome 2 comes from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each with
+its own plan. Run 1 is done, per
+[`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md). Next is the plan for
+run 2: OCR with the screen-text and settled-screen conditions, the mouse, region screenshots, and the screenshot
+attachment for `wait_for`. It starts with the probe that decides between `ocrs` and Tesseract.
