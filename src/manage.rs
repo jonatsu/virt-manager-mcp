@@ -495,8 +495,9 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
 
 /// Returns a VM made from a template to the template's state, keeping its name, UUID, MAC address, hardware and
 /// expiry. The new disks exist before the old ones are deleted, so a failure leaves the VM with one complete set.
-/// The VM is left shut off; `start_after_reset` starts it.
-pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
+/// The VM is left shut off; `start_after_reset` starts it. `before_power_off` runs once every check has passed,
+/// just before the VM is forced off, so a refused reset leaves the caller's state, such as its console, alone.
+pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Result<String> {
     let m = &hv.config.manage;
     let dom = hv.manage_domain(name)?;
     let _guard = LOCK.lock().unwrap();
@@ -540,6 +541,7 @@ pub fn reset(hv: &Hypervisor, name: &str) -> Result<String> {
         let seed_image = seed::build(&format!("{uuid}-{next}"), name, &template.user_data)?;
 
         // 2. Power off and drop saved memory and snapshot metadata; the snapshots' data lives in the old overlay.
+        before_power_off();
         if dom.is_active()? {
             dom.destroy()
                 .map_err(|e| anyhow!("cannot power off '{name}': {}", e.message()))?;

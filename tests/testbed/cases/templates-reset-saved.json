@@ -23,7 +23,34 @@
     }
   },
   {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-u"
+    }
+  },
+  {
     "tool": "reset_vm",
+    "args": {
+      "vm": "t-u"
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "t-u",
+      "text": ""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-u",
+      "since": 0,
+      "wait_ms": 3000
+    }
+  },
+  {
+    "tool": "console_close",
     "args": {
       "vm": "t-u"
     }

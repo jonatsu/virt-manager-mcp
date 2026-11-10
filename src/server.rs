@@ -981,8 +981,9 @@ impl VirtServer {
         Parameters(p): Parameters<ResetVmParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
-            s.consoles.close(&p.vm);
-            let mut msg = manage::reset(&s.hv, &p.vm)?;
+            let mut msg = manage::reset(&s.hv, &p.vm, || {
+                s.consoles.close(&p.vm);
+            })?;
             if let Err(e) = manage::start_after_reset(&s.hv, &p.vm) {
                 msg.push_str(&format!(
                     "; it could not be started ({e:#}); fix the cause, then use reset_vm again, which also \
