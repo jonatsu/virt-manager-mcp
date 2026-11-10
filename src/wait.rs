@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use image::RgbImage;
+use regex::Regex as TextRegex;
 use regex::bytes::Regex;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -106,6 +107,18 @@ pub enum Condition {
         /// Display head index (default 0).
         screen: Option<u32>,
     },
+    /// Text read from the screen by OCR matches `pattern`, a regular expression (Rust `regex` syntax), on the
+    /// recognised lines joined by newlines. OCR runs on frames captured every 500 ms, only when the screen, or the
+    /// region, changed. All screen conditions of one wait name the same display head. Needs `display.ocr_models`;
+    /// refused in read-only mode.
+    ScreenText {
+        pattern: String,
+        /// Read only this part of the screen, in pixels of a full-screen image from `screenshot` or a wait's
+        /// attachment, with that image's size.
+        region: Option<Region>,
+        /// Display head index (default 0).
+        screen: Option<u32>,
+    },
 }
 
 impl Condition {
@@ -118,13 +131,16 @@ impl Condition {
             Condition::JobDone { .. } => "job_done",
             Condition::JobOutput { .. } => "job_output",
             Condition::ScreenSettled { .. } => "screen_settled",
+            Condition::ScreenText { .. } => "screen_text",
         }
     }
 
     /// The display head a screen condition reads, or `None` for the other kinds.
     fn screen(&self) -> Option<u32> {
         match self {
-            Condition::ScreenSettled { screen, .. } => Some(screen.unwrap_or(0)),
+            Condition::ScreenSettled { screen, .. } | Condition::ScreenText { screen, .. } => {
+                Some(screen.unwrap_or(0))
+            }
             Condition::Console { .. }
             | Condition::Agent
             | Condition::Command { .. }
@@ -156,11 +172,17 @@ pub enum Check {
         region: Option<CheckedRegion>,
         screen: u32,
     },
+    ScreenText {
+        regex: TextRegex,
+        region: Option<CheckedRegion>,
+        screen: u32,
+    },
 }
 
 /// Refuses a list of conditions the server will not wait for, before any libvirt call: an empty or overlong list, a
 /// pattern that does not compile, an offset without its generation, a command or screen condition in read-only
-/// mode, screen conditions on different display heads, and a bad region or `settle_secs` for a call of `timeout`.
+/// mode, `screen_text` without OCR models, screen conditions on different display heads, and a bad region or
+/// `settle_secs` for a call of `timeout`.
 pub fn validate_conditions(
     config: &Config,
     timeout: Duration,
@@ -255,10 +277,35 @@ pub fn validate_conditions(
                         screen: screen.unwrap_or(0),
                     }
                 }
+                Condition::ScreenText {
+                    pattern,
+                    region,
+                    screen,
+                } => {
+                    if config.read_only {
+                        bail!("condition {i}: screen conditions are disabled in read-only mode");
+                    }
+                    if config.display.ocr_models.is_none() {
+                        bail!("condition {i}: {NO_OCR_MODELS}");
+                    }
+                    Check::ScreenText {
+                        regex: TextRegex::new(pattern)
+                            .map_err(|e| anyhow!("condition {i}: bad pattern: {e}"))?,
+                        region: region
+                            .map(|r| r.check())
+                            .transpose()
+                            .map_err(|e| anyhow!("condition {i}: {e:#}"))?,
+                        screen: screen.unwrap_or(0),
+                    }
+                }
             })
         })
         .collect()
 }
+
+/// Why `screen_text` is refused on a server without OCR models.
+pub const NO_OCR_MODELS: &str = "screen_text needs the OCR models: set display.ocr_models to the directory that \
+     scripts/fetch-ocr-models.sh fills";
 
 /// Checks `settle_secs`: at least one frame interval, and at most the call's `timeout` less one frame interval,
 /// because every frame of the wait starts before its end. A zero timeout is left to [`run`], whose refusal says that
@@ -290,6 +337,19 @@ pub trait Env {
     fn cancelled(&self) -> bool;
     /// Called every 5 s with the time waited so far.
     fn progress(&self, waited: Duration);
+    /// The recogniser `screen_text` reads frames with, loaded once and shared, or `None` without OCR models.
+    fn recogniser(&self) -> Option<Arc<dyn Recognise>>;
+}
+
+/// Reads the text lines of a frame. Probe threads share one behind an `Arc`, so tests use a fake.
+pub trait Recognise: Send + Sync + 'static {
+    fn read_lines(&self, frame: &RgbImage) -> Result<Vec<String>>;
+}
+
+impl Recognise for display::Recognizer {
+    fn read_lines(&self, frame: &RgbImage) -> Result<Vec<String>> {
+        display::Recognizer::read_lines(self, frame)
+    }
 }
 
 /// A process the `command` probe started.
@@ -396,6 +456,7 @@ pub struct LiveEnv<'a> {
     pub vm: &'a str,
     pub cancelled: Box<dyn Fn() -> bool + 'a>,
     pub progress: Box<dyn Fn(Duration) + 'a>,
+    pub recogniser: Option<Arc<dyn Recognise>>,
 }
 
 impl Env for LiveEnv<'_> {
@@ -421,6 +482,10 @@ impl Env for LiveEnv<'_> {
 
     fn progress(&self, waited: Duration) {
         (self.progress)(waited);
+    }
+
+    fn recogniser(&self) -> Option<Arc<dyn Recognise>> {
+        self.recogniser.clone()
     }
 }
 
@@ -448,6 +513,8 @@ pub enum Outcome {
         resume: Vec<(usize, u64, Option<u64>)>,
         /// Each command condition's process still running, or the exit code of its last run.
         commands: Vec<(usize, Option<i64>, Option<i64>)>,
+        /// Each screen_text condition's last OCR text, cut to the result's text limit, or `None` before any read.
+        texts: Vec<(usize, Option<String>)>,
     },
     Cancelled,
 }
@@ -481,20 +548,34 @@ impl Outcome {
             Outcome::Closed { index, reason } => {
                 json!({ "result": "closed", "index": index, "reason": reason, "waited_ms": waited_ms })
             }
-            Outcome::TimedOut { resume, commands } => json!({
-                "result": "timed_out",
-                "waited_ms": waited_ms,
-                "resume": resume.iter().map(|(index, since, generation)| {
-                    let mut point = json!({ "index": index, "since": since });
-                    if let Some(generation) = generation {
-                        point["generation"] = json!(generation);
-                    }
-                    point
-                }).collect::<Vec<_>>(),
-                "commands": commands.iter().map(|(index, pid, code)| {
-                    json!({ "index": index, "running_pid": pid, "last_exit_code": code })
-                }).collect::<Vec<_>>(),
-            }),
+            Outcome::TimedOut {
+                resume,
+                commands,
+                texts,
+            } => {
+                let mut v = json!({
+                    "result": "timed_out",
+                    "waited_ms": waited_ms,
+                    "resume": resume.iter().map(|(index, since, generation)| {
+                        let mut point = json!({ "index": index, "since": since });
+                        if let Some(generation) = generation {
+                            point["generation"] = json!(generation);
+                        }
+                        point
+                    }).collect::<Vec<_>>(),
+                    "commands": commands.iter().map(|(index, pid, code)| {
+                        json!({ "index": index, "running_pid": pid, "last_exit_code": code })
+                    }).collect::<Vec<_>>(),
+                });
+                // Only a wait with screen_text conditions reports their text, so other results keep their shape.
+                if !texts.is_empty() {
+                    v["screen_text"] = texts
+                        .iter()
+                        .map(|(index, text)| json!({ "index": index, "last_text": text }))
+                        .collect();
+                }
+                v
+            }
             Outcome::Cancelled => json!({ "result": "cancelled", "waited_ms": waited_ms }),
         }
     }
@@ -648,6 +729,7 @@ fn at_deadline(states: &mut [State], capture_failure: Option<anyhow::Error>) -> 
 fn timed_out(states: &mut [State]) -> Result<Outcome> {
     let mut resume = Vec::new();
     let mut commands = Vec::new();
+    let mut texts = Vec::new();
     for (index, state) in states.iter_mut().enumerate() {
         match state {
             State::Console(c) => resume.push((index, c.resume, Some(c.generation))),
@@ -681,10 +763,28 @@ fn timed_out(states: &mut [State]) -> Result<Outcome> {
                 }
                 commands.push((index, c.pid, c.last_code));
             }
+            State::Text(t) => {
+                // A read that finished after the last poll counts too; one still running is abandoned.
+                if let Some(Poll::Hit { text, frame, .. }) = t.absorb()? {
+                    return Ok(Outcome::Matched {
+                        index,
+                        kind: "screen_text",
+                        text,
+                        next: None,
+                        generation: None,
+                        frame,
+                    });
+                }
+                texts.push((index, t.last_text.as_deref().map(cut_text)));
+            }
             State::Agent(_) | State::Settled(_) => {}
         }
     }
-    Ok(Outcome::TimedOut { resume, commands })
+    Ok(Outcome::TimedOut {
+        resume,
+        commands,
+        texts,
+    })
 }
 
 /// A screenshot attached to a match, or why the match has none.
@@ -910,6 +1010,7 @@ enum State {
     Command(CommandState),
     Job(JobState),
     Settled(SettleState),
+    Text(TextState),
 }
 
 impl State {
@@ -954,6 +1055,16 @@ impl State {
                 screen,
                 settle: Settle::new(max_changed_pixels, settle, region),
             }),
+            Check::ScreenText {
+                regex,
+                region,
+                screen,
+            } => State::Text(TextState::new(
+                regex,
+                region,
+                screen,
+                env.recogniser().ok_or_else(|| anyhow!(NO_OCR_MODELS))?,
+            )),
         })
     }
 
@@ -964,6 +1075,7 @@ impl State {
             State::Command(_) => "command",
             State::Job(j) => j.kind(),
             State::Settled(_) => "screen_settled",
+            State::Text(_) => "screen_text",
         }
     }
 
@@ -983,6 +1095,7 @@ impl State {
                 Some(frame) => s.poll(frame),
                 None => Ok(Poll::Pending),
             },
+            State::Text(t) => t.poll(looks.frame, now, deadline, guest),
             State::Agent(p) => {
                 if p.take() == Some(true) {
                     return Ok(Poll::hit("the guest agent answered".into()));
@@ -997,10 +1110,15 @@ impl State {
 }
 
 impl Check {
+    /// Whether the check needs the OCR recogniser.
+    pub fn reads_text(&self) -> bool {
+        matches!(self, Check::ScreenText { .. })
+    }
+
     /// The display head a screen check reads, or `None` for the other kinds.
     fn screen(&self) -> Option<u32> {
         match self {
-            Check::ScreenSettled { screen, .. } => Some(*screen),
+            Check::ScreenSettled { screen, .. } | Check::ScreenText { screen, .. } => Some(*screen),
             Check::Console { .. }
             | Check::Agent
             | Check::Command(_)
@@ -1035,6 +1153,104 @@ impl SettleState {
             }),
         })
     }
+}
+
+/// A `screen_text` condition. It runs the recogniser on its own probe thread, one read at a time, and only on a frame
+/// whose hash, on the region when one is given, differs from the one it last read. A read still running at the
+/// deadline, or when the wait is cancelled, is abandoned and its result dropped; `ocrs` cannot stop a run.
+struct TextState {
+    regex: TextRegex,
+    region: Option<CheckedRegion>,
+    screen: u32,
+    recogniser: Arc<dyn Recognise>,
+    /// The hash of the frame, or region, last handed to the recogniser.
+    read_hash: Option<u64>,
+    probe: Probe<Result<String>>,
+    /// The frame the read in flight reads, for the attachment.
+    reading: Option<Arc<RgbImage>>,
+    /// The text of the last finished read.
+    last_text: Option<String>,
+}
+
+impl TextState {
+    fn new(
+        regex: TextRegex,
+        region: Option<CheckedRegion>,
+        screen: u32,
+        recogniser: Arc<dyn Recognise>,
+    ) -> Self {
+        Self {
+            regex,
+            region,
+            screen,
+            recogniser,
+            read_hash: None,
+            probe: Probe::default(),
+            reading: None,
+            last_text: None,
+        }
+    }
+
+    /// Takes in a finished read. Returns a hit when its text matches.
+    fn absorb(&mut self) -> Result<Option<Poll>> {
+        let Some(read) = self.probe.take() else {
+            return Ok(None);
+        };
+        let frame = self.reading.take().expect("a finished read had a frame");
+        let text = read.context("reading text from the screen")?;
+        let hit = self.regex.find(&text).map(|m| Poll::Hit {
+            text: cut_text(m.as_str()),
+            next: None,
+            generation: None,
+            frame: Some(ScreenFrame {
+                screen: self.screen,
+                image: frame,
+            }),
+        });
+        self.last_text = Some(text);
+        Ok(hit)
+    }
+
+    fn poll(
+        &mut self,
+        frame: Option<&Captured>,
+        now: Instant,
+        deadline: Instant,
+        guest: &Arc<dyn Guest>,
+    ) -> Result<Poll> {
+        if let Some(hit) = self.absorb()? {
+            return Ok(hit);
+        }
+        // A frame that arrives during a read is skipped; the next one starts a read if it still differs.
+        let Some(frame) = frame.filter(|_| !self.probe.busy()) else {
+            return Ok(Poll::Pending);
+        };
+        let area = self
+            .region
+            .map(|r| r.on_frame(frame.image.width(), frame.image.height()))
+            .transpose()?;
+        let hash = display::area_hash(&frame.image, area);
+        if self.read_hash == Some(hash) {
+            return Ok(Poll::Pending);
+        }
+        let (recogniser, image) = (self.recogniser.clone(), frame.image.clone());
+        let started = self
+            .probe
+            .start_if_due(now, deadline, Duration::ZERO, guest, move |_, _| {
+                let lines = recogniser.read_lines(&display::area_image(&image, area))?;
+                Ok(lines.join("\n"))
+            });
+        if started {
+            self.read_hash = Some(hash);
+            self.reading = Some(frame.image.clone());
+        }
+        Ok(Poll::Pending)
+    }
+}
+
+/// `text` cut to the result's text limit, at a character boundary.
+fn cut_text(text: &str) -> String {
+    text[..text.floor_char_boundary(MAX_TEXT)].to_owned()
 }
 
 /// Whether a sequence of frames has settled: it keeps the previous frame and the time of the frame that last changed
@@ -1351,6 +1567,11 @@ impl<T: Send + 'static> Probe<T> {
         self.next_at = None;
     }
 
+    /// Whether a probe is in flight.
+    fn busy(&self) -> bool {
+        self.inflight.is_some()
+    }
+
     /// The finished probe's result, if one finished.
     fn take(&mut self) -> Option<T> {
         let rx = self.inflight.as_ref()?;
@@ -1551,6 +1772,7 @@ mod tests {
         progress: Mutex<Vec<Duration>>,
         /// When set, each sleep also lasts as long in real time, for probes that do real work, such as encoding.
         real_sleep: bool,
+        recogniser: Option<Arc<dyn Recognise>>,
     }
 
     impl FakeEnv {
@@ -1568,6 +1790,7 @@ mod tests {
                 cancel_at: None,
                 progress: Mutex::default(),
                 real_sleep: false,
+                recogniser: None,
             }
         }
 
@@ -1640,6 +1863,10 @@ mod tests {
 
         fn progress(&self, waited: Duration) {
             self.progress.lock().unwrap().push(waited);
+        }
+
+        fn recogniser(&self) -> Option<Arc<dyn Recognise>> {
+            self.recogniser.clone()
         }
     }
 
@@ -2183,7 +2410,8 @@ mod tests {
             o,
             Outcome::TimedOut {
                 resume: vec![],
-                commands: vec![(0, None, Some(1))]
+                commands: vec![(0, None, Some(1))],
+                texts: vec![],
             }
         );
     }
@@ -2495,6 +2723,381 @@ mod tests {
         drop(tx);
     }
 
+    /// A recogniser that returns each text in turn, split into lines; the last repeats.
+    struct FakeRecogniser {
+        texts: Mutex<Vec<&'static str>>,
+        /// The size of each image read.
+        reads: Mutex<Vec<(u32, u32)>>,
+        /// When set, every read blocks until the sender is dropped.
+        hang: Option<Mutex<Receiver<()>>>,
+        /// When set, every read fails.
+        fails: bool,
+    }
+
+    impl FakeRecogniser {
+        fn reading(texts: Vec<&'static str>) -> Self {
+            Self {
+                texts: Mutex::new(texts),
+                reads: Mutex::default(),
+                hang: None,
+                fails: false,
+            }
+        }
+    }
+
+    impl Recognise for FakeRecogniser {
+        fn read_lines(&self, frame: &RgbImage) -> Result<Vec<String>> {
+            if let Some(rx) = &self.hang {
+                let _ = rx.lock().unwrap().recv();
+            }
+            self.reads.lock().unwrap().push(frame.dimensions());
+            if self.fails {
+                bail!("the detection model failed");
+            }
+            let mut texts = self.texts.lock().unwrap();
+            let text = texts.first().copied().unwrap_or_default();
+            if texts.len() > 1 {
+                texts.remove(0);
+            }
+            Ok(text.split('\n').map(String::from).collect())
+        }
+    }
+
+    /// A config with OCR models set, as `Config::validate` leaves it.
+    fn with_models() -> Config {
+        let mut config = Config::default();
+        config.display.ocr_models = Some("/srv/ocr-models".into());
+        config
+    }
+
+    fn screen_text(pattern: &str) -> Condition {
+        Condition::ScreenText {
+            pattern: pattern.into(),
+            region: None,
+            screen: None,
+        }
+    }
+
+    /// A fake environment whose recogniser is `recogniser`.
+    fn reading_env(
+        output: Vec<(Duration, &'static [u8])>,
+        recogniser: &Arc<FakeRecogniser>,
+    ) -> FakeEnv {
+        let recogniser: Arc<dyn Recognise> = recogniser.clone();
+        FakeEnv {
+            recogniser: Some(recogniser),
+            ..FakeEnv::new(output)
+        }
+    }
+
+    /// Validates `conditions` with OCR models for a call of `secs` and runs them on `guest`.
+    fn wait_reading(
+        env: &FakeEnv,
+        guest: &Arc<FakeGuest>,
+        conditions: &[Condition],
+        secs: u64,
+    ) -> Result<Outcome> {
+        let timeout = Duration::from_secs(secs);
+        let checks = validate_conditions(&with_models(), timeout, conditions)?;
+        let guest: Arc<dyn Guest> = guest.clone();
+        run(env, guest, checks, timeout)
+    }
+
+    #[test]
+    fn screen_text_matches_the_recognised_lines_joined_by_newlines() {
+        let recogniser = Arc::new(FakeRecogniser::reading(vec![
+            "Debian\nSelect a language\nEnglish",
+        ]));
+        let guest = Arc::new(FakeGuest::showing(vec![solid(8, 6, 1)]));
+        let env = reading_env(vec![], &recogniser);
+        let o = wait_reading(&env, &guest, &[screen_text(r"language\nEng")], 10).unwrap();
+        let Outcome::Matched {
+            index,
+            kind,
+            text,
+            frame,
+            ..
+        } = &o
+        else {
+            panic!("expected a match, got {o:?}")
+        };
+        assert_eq!(
+            (*index, *kind, text.as_str()),
+            (0, "screen_text", "language\nEng")
+        );
+        assert_eq!(frame.as_ref().unwrap().screen, 0);
+        assert_eq!(*recogniser.reads.lock().unwrap(), [(8, 6)]);
+    }
+
+    #[test]
+    fn the_recogniser_runs_only_when_the_frame_changes() {
+        let recogniser = Arc::new(FakeRecogniser::reading(vec!["nothing here"]));
+        // Three frames of one screen, then another that stays.
+        let frames = [1, 1, 1, 2].map(|level| solid(8, 6, level)).to_vec();
+        let guest = Arc::new(FakeGuest::showing(frames));
+        let env = reading_env(vec![], &recogniser);
+        let o = wait_reading(&env, &guest, &[screen_text("never")], 5).unwrap();
+        assert!(matches!(o, Outcome::TimedOut { .. }), "{o:?}");
+        assert!(guest.captures.lock().unwrap().len() >= 9);
+        assert_eq!(recogniser.reads.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_recogniser_reads_only_the_region_and_only_when_it_changes() {
+        let recogniser = Arc::new(FakeRecogniser::reading(vec!["nothing here"]));
+        // The first six rows change from frame to frame; the region, the bottom four rows, never does.
+        let frames = (0..10)
+            .map(|k| with_changed(if k % 2 == 0 { 0 } else { 600 }))
+            .collect();
+        let guest = Arc::new(FakeGuest::showing(frames));
+        let env = reading_env(vec![], &recogniser);
+        let bottom = Condition::ScreenText {
+            pattern: "never".into(),
+            region: Some(Region {
+                x: 0,
+                y: 12,
+                width: 200,
+                height: 8,
+                image_width: Some(200),
+                image_height: Some(20),
+            }),
+            screen: None,
+        };
+        let o = wait_reading(&env, &guest, &[bottom], 5).unwrap();
+        assert!(matches!(o, Outcome::TimedOut { .. }), "{o:?}");
+        // The region maps onto the 100x10 frame as its bottom 100x4, read at full resolution.
+        assert_eq!(*recogniser.reads.lock().unwrap(), [(100, 4)]);
+    }
+
+    #[test]
+    fn a_time_out_returns_the_last_ocr_text_cut_to_the_limit() {
+        let recogniser = Arc::new(FakeRecogniser::reading(vec!["Hello\nWorld"]));
+        let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
+        let env = reading_env(vec![], &recogniser);
+        let o = wait_reading(&env, &guest, &[console("never"), screen_text("Goodbye")], 3).unwrap();
+        let Outcome::TimedOut { texts, .. } = &o else {
+            panic!("expected a timeout, got {o:?}")
+        };
+        assert_eq!(texts, &[(1, Some("Hello\nWorld".to_string()))]);
+        let json = o.to_json(Duration::ZERO);
+        assert_eq!(
+            json["screen_text"],
+            json!([{ "index": 1, "last_text": "Hello\nWorld" }])
+        );
+
+        // One ASCII byte, then two-byte characters: the limit falls inside one and the cut stops before it.
+        let long: &'static str = Box::leak(format!("a{}", "é".repeat(3000)).into_boxed_str());
+        let recogniser = Arc::new(FakeRecogniser::reading(vec![long]));
+        let env = reading_env(vec![], &recogniser);
+        let o = wait_reading(&env, &guest, &[screen_text("never")], 3).unwrap();
+        let Outcome::TimedOut { texts, .. } = &o else {
+            panic!("expected a timeout, got {o:?}")
+        };
+        let cut = texts[0].1.as_deref().unwrap();
+        assert_eq!(cut.len(), MAX_TEXT - 1);
+        assert!(long.starts_with(cut));
+        // A wait without screen_text conditions keeps its former result.
+        let o = wait(
+            &FakeEnv::new(vec![]),
+            FakeGuest::new(),
+            &[console("never")],
+            1,
+        );
+        assert!(o.to_json(Duration::ZERO).get("screen_text").is_none());
+    }
+
+    #[test]
+    fn a_blocking_recogniser_at_the_deadline_times_out_within_its_bound() {
+        let (tx, rx) = mpsc::channel();
+        let recogniser = Arc::new(FakeRecogniser {
+            hang: Some(Mutex::new(rx)),
+            ..FakeRecogniser::reading(vec!["Select a language"])
+        });
+        let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
+        let env = reading_env(vec![], &recogniser);
+        let o = wait_reading(&env, &guest, &[screen_text("language")], 4).unwrap();
+        let Outcome::TimedOut { texts, .. } = &o else {
+            panic!("expected a timeout, got {o:?}")
+        };
+        assert_eq!(texts, &[(0, None)], "no read finished");
+        assert!(env.elapsed() >= Duration::from_secs(4));
+        assert!(
+            env.elapsed() <= Duration::from_secs(4) + POLL,
+            "{:?}",
+            env.elapsed()
+        );
+        drop(tx);
+    }
+
+    #[test]
+    fn a_cancelled_wait_drops_a_running_read() {
+        let (tx, rx) = mpsc::channel();
+        let recogniser = Arc::new(FakeRecogniser {
+            hang: Some(Mutex::new(rx)),
+            ..FakeRecogniser::reading(vec!["Select a language"])
+        });
+        let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
+        let env = FakeEnv {
+            cancel_at: Some(ms(700)),
+            ..reading_env(vec![], &recogniser)
+        };
+        let o = wait_reading(&env, &guest, &[screen_text("language")], 30).unwrap();
+        assert_eq!(o, Outcome::Cancelled);
+        assert!(env.elapsed() < ms(800), "{:?}", env.elapsed());
+        drop(tx);
+    }
+
+    /// A `screen_text` state whose read of `frame` finished with `read` after the last poll.
+    fn finished_read(pattern: &str, read: &str) -> State {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(read.to_string())).unwrap();
+        let mut state = TextState::new(
+            TextRegex::new(pattern).unwrap(),
+            None,
+            0,
+            Arc::new(FakeRecogniser::reading(vec![])),
+        );
+        state.probe = Probe {
+            inflight: Some(rx),
+            next_at: None,
+        };
+        state.reading = Some(Arc::new(solid(4, 4, 1)));
+        State::Text(state)
+    }
+
+    #[test]
+    fn a_read_that_finished_after_the_last_poll_still_counts() {
+        let o = at_deadline(&mut [finished_read("language", "Select a language")], None).unwrap();
+        assert_eq!(matched(&o), (0, "language", None));
+        let o = at_deadline(&mut [finished_read("Goodbye", "Select a language")], None).unwrap();
+        assert_eq!(
+            o,
+            Outcome::TimedOut {
+                resume: vec![],
+                commands: vec![],
+                texts: vec![(0, Some("Select a language".into()))],
+            }
+        );
+    }
+
+    #[test]
+    fn the_lowest_index_wins_between_screen_text_and_a_console_in_one_poll() {
+        // The capture starts at 0, its frame arrives at 30 ms and starts a read, whose text arrives at 60 ms with the
+        // console's output.
+        for (conditions, winner) in [
+            (
+                [screen_text("language"), console("login:")],
+                (0, "screen_text"),
+            ),
+            ([console("login:"), screen_text("language")], (0, "console")),
+        ] {
+            let recogniser = Arc::new(FakeRecogniser::reading(vec!["Select a language"]));
+            let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
+            let env = reading_env(vec![(POLL * 2, b"login: ")], &recogniser);
+            let o = wait_reading(&env, &guest, &conditions, 10).unwrap();
+            let Outcome::Matched { index, kind, .. } = o else {
+                panic!("expected a match, got {o:?}")
+            };
+            assert_eq!((index, kind), winner);
+            assert_eq!(env.elapsed(), POLL * 2, "both held in the same poll");
+        }
+    }
+
+    #[test]
+    fn a_failed_read_ends_the_wait_with_its_cause() {
+        let recogniser = Arc::new(FakeRecogniser {
+            fails: true,
+            ..FakeRecogniser::reading(vec![])
+        });
+        let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
+        let env = reading_env(vec![], &recogniser);
+        let err = format!(
+            "{:#}",
+            wait_reading(&env, &guest, &[screen_text("x")], 5).unwrap_err()
+        );
+        assert_eq!(
+            err,
+            "reading text from the screen: the detection model failed"
+        );
+    }
+
+    #[test]
+    fn screen_text_is_refused_in_read_only_mode_and_without_models() {
+        let refused = |config: &Config, c: Condition| {
+            format!(
+                "{:#}",
+                validate_conditions(config, ANY_TIMEOUT, &[c])
+                    .err()
+                    .unwrap()
+            )
+        };
+        let read_only = Config {
+            read_only: true,
+            ..with_models()
+        };
+        assert!(refused(&read_only, screen_text("x")).contains("disabled in read-only mode"));
+        let err = refused(&Config::default(), screen_text("x"));
+        assert!(
+            err.contains("display.ocr_models") && err.contains("scripts/fetch-ocr-models.sh"),
+            "{err}"
+        );
+        assert!(refused(&with_models(), screen_text("(")).contains("bad pattern"));
+        assert!(validate_conditions(&with_models(), ANY_TIMEOUT, &[screen_text("x")]).is_ok());
+        // A server that validated the models but has no recogniser refuses the same way.
+        let checks = validate_conditions(&with_models(), ANY_TIMEOUT, &[screen_text("x")]).unwrap();
+        let err = run(
+            &FakeEnv::new(vec![]),
+            Arc::new(FakeGuest::new()),
+            checks,
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("display.ocr_models"), "{err}");
+        // screen_text and screen_settled share the display head rule.
+        let on = |screen| Condition::ScreenText {
+            pattern: "x".into(),
+            region: None,
+            screen: Some(screen),
+        };
+        let err = validate_conditions(&with_models(), ANY_TIMEOUT, &[on(1), settled(None, None)])
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("same display head"), "{err}");
+        assert!(
+            validate_conditions(&with_models(), ANY_TIMEOUT, &[on(0), settled(None, None)]).is_ok()
+        );
+    }
+
+    /// The probe's installer language screen, read through the fake frame source by the real recogniser. Run with
+    /// `VIRTMANAGER_OCR_MODELS=<dir> RTEN_NUM_THREADS=4 cargo test --release -- --ignored`: a debug build's OCR does
+    /// not finish one read within the wait's 60 s.
+    #[test]
+    #[ignore = "needs the OCR models; set VIRTMANAGER_OCR_MODELS"]
+    fn screen_text_reads_the_installer_language_screen() {
+        let dir = std::env::var_os("VIRTMANAGER_OCR_MODELS").expect(
+            "set VIRTMANAGER_OCR_MODELS to the directory scripts/fetch-ocr-models.sh filled",
+        );
+        let loading = std::time::Instant::now();
+        let recogniser: Arc<dyn Recognise> =
+            Arc::new(display::Recognizer::load(std::path::Path::new(&dir)).unwrap());
+        println!("models loaded in {} ms", loading.elapsed().as_millis());
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/research/2026-11-10-ocr-probe/deb-installer-language.png");
+        let screen = image::open(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .into_rgb8();
+        let guest = Arc::new(FakeGuest::showing(vec![screen]));
+        // OCR takes real time, so the clock runs in real time.
+        let env = FakeEnv {
+            real_sleep: true,
+            recogniser: Some(recogniser),
+            ..FakeEnv::new(vec![])
+        };
+        let o = wait_reading(&env, &guest, &[screen_text("Select a language")], 60).unwrap();
+        println!("matched after {} ms", env.elapsed().as_millis());
+        assert_eq!(matched(&o), (0, "Select a language", None));
+    }
+
     #[test]
     fn only_a_match_gets_an_attachment() {
         let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
@@ -2506,6 +3109,7 @@ mod tests {
             Outcome::TimedOut {
                 resume: vec![],
                 commands: vec![],
+                texts: vec![],
             },
         ] {
             assert_eq!(attach(&env, &guest, &o, deadline), None);
@@ -2895,7 +3499,10 @@ mod tests {
         };
         let env = FakeEnv::new(vec![]);
         let o = wait(&env, guest, &[Condition::Agent], 4);
-        let Outcome::TimedOut { resume, commands } = o else {
+        let Outcome::TimedOut {
+            resume, commands, ..
+        } = o
+        else {
             panic!("expected a timeout, got {o:?}")
         };
         assert!(resume.is_empty() && commands.is_empty());
@@ -2956,7 +3563,8 @@ mod tests {
             o,
             Outcome::TimedOut {
                 resume: vec![],
-                commands: vec![(0, Some(100), None)]
+                commands: vec![(0, Some(100), None)],
+                texts: vec![],
             }
         );
     }

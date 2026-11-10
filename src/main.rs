@@ -142,6 +142,7 @@ async fn run() -> Result<()> {
     let state = Arc::new(State {
         hv,
         consoles: Consoles::default(),
+        ocr: Default::default(),
     });
 
     if let Some(Command::Sweep) = cli.command {

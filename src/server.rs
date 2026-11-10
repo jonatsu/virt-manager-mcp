@@ -1,6 +1,6 @@
 //! MCP tool definitions.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -73,6 +73,8 @@ const SNAPSHOT_TOOLS: &[&str] = &[
 pub struct State {
     pub hv: Hypervisor,
     pub consoles: Consoles,
+    /// The OCR recogniser, loaded from `display.ocr_models` by the first `screen_text` wait and shared after.
+    pub ocr: Mutex<Option<Arc<display::Recognizer>>>,
 }
 
 #[derive(Clone)]
@@ -1019,14 +1021,17 @@ impl VirtServer {
         agent answers), `command` (a shell command run through the guest agent exits 0; Linux guests, not in \
         read-only mode), `job_done` (a job from job_start has ended) and `job_output` (a job's output from `since` \
         matches a regex); job conditions work on Linux guests, read-only mode included. `screen_settled` holds once \
-        the graphical display, captured every 500 ms, has stopped changing for `settle_secs` (not in read-only mode); \
-        all screen conditions of one wait read the same display head, and a failed capture, as on a VM without \
-        graphics, ends the call with an error. Results: `matched` with the condition's index and the matched text \
-        (lowest index wins a tie; console and job_output matches add `next`, console matches also `generation`, \
-        screen matches `screen`, and a console match moves the session's wait cursor past it); `closed` when the VM \
-        stops or restarts or the console session ends; `timed_out` with a resume point per console and job_output \
-        condition (pass it back as `since`, with `generation` for a console, to keep matching output that arrived in \
-        between) and each command's running PID. With `screenshot: true`, a match attaches a screenshot and gives \
+        the graphical display, captured every 500 ms, has stopped changing for `settle_secs`; `screen_text` holds \
+        once OCR of the display, or of a region, matches a regex over the recognised lines joined by newlines, and \
+        needs the server's display.ocr_models. Neither screen kind works in read-only mode; all screen conditions of \
+        one wait read the same display head, and a failed capture, as on a VM without graphics, ends the call with \
+        an error. Results: `matched` with the condition's index and the matched text (lowest index wins a tie; \
+        console and job_output matches add `next`, console matches also `generation`, screen matches `screen`, and a \
+        console match moves the session's wait cursor past it); `closed` when the VM stops or restarts or the \
+        console session ends; `timed_out` with a resume point per console and job_output condition (pass it back as \
+        `since`, with `generation` for a console, to keep matching output that arrived in between), each command's \
+        running PID, and each screen_text condition's last OCR text, to loosen a pattern that missed. With \
+        `screenshot: true`, a match attaches a screenshot and gives \
         its size as `screenshot`, or a `screenshot_note` when it could not be taken. A console condition without \
         `since` starts where the last console_write began, so write first, then wait. A wait never changes what \
         console_read returns."
@@ -1048,6 +1053,11 @@ impl VirtServer {
             let checks = wait::validate_conditions(&s.hv.config, timeout, &p.conditions)?;
             let attach = attachment_wanted(&s.hv.config, p.screenshot)?;
             let dom = s.hv.domain(&p.vm)?;
+            let recogniser = if checks.iter().any(wait::Check::reads_text) {
+                Some(s.recogniser()?)
+            } else {
+                None
+            };
             let notify = |waited: Duration| {
                 if let Some((token, peer)) = &progress {
                     let mut param =
@@ -1064,6 +1074,7 @@ impl VirtServer {
                 vm: &p.vm,
                 cancelled: Box::new(|| ct.is_cancelled()),
                 progress: Box::new(notify),
+                recogniser,
             };
             let started = std::time::Instant::now();
             let guest: Arc<dyn wait::Guest> = Arc::new(wait::LiveGuest(dom));
@@ -1776,6 +1787,31 @@ impl State {
     fn consoles_has(&self, vm: &str) -> bool {
         self.consoles.is_open(vm)
     }
+
+    /// The shared OCR recogniser, loaded on first use. A failed load is not kept, so the next call tries again once
+    /// the models are fixed.
+    fn recogniser(&self) -> Result<Arc<dyn wait::Recognise>> {
+        let dir = self
+            .hv
+            .config
+            .display
+            .ocr_models
+            .as_deref()
+            .ok_or_else(|| anyhow!(wait::NO_OCR_MODELS))?;
+        let mut ocr = self
+            .ocr
+            .lock()
+            .expect("no thread panics while loading the OCR models");
+        if let Some(loaded) = &*ocr {
+            return Ok(loaded.clone());
+        }
+        let loaded = Arc::new(display::Recognizer::load(dir).context(
+            "screen_text cannot load the OCR models in display.ocr_models; scripts/fetch-ocr-models.sh downloads \
+             and checks them",
+        )?);
+        *ocr = Some(loaded.clone());
+        Ok(loaded)
+    }
 }
 
 /// Waits for the guest agent of a VM that create or reset just started, up to `wait_secs` (default 60, max 300).
@@ -2019,6 +2055,8 @@ mod tests {
             "max_changed_pixels",
             "settle_secs",
             "region",
+            "screen_text",
+            "pattern",
         ] {
             assert!(text.contains(field), "{field} missing from {text}");
         }

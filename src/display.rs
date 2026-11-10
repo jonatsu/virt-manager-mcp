@@ -36,18 +36,10 @@ pub unsafe fn limit_ocr_threads() {
 
 /// Reads text lines from screen frames with the `ocrs` models in `display.ocr_models`. It is built once, and probe
 /// threads share it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
-)]
 pub struct Recognizer {
     engine: OcrEngine,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
-)]
 impl Recognizer {
     /// Loads both models from `dir`, which `Config::validate` has checked.
     pub fn load(dir: &Path) -> Result<Self> {
@@ -97,10 +89,6 @@ const _: () = {
 
 /// Returns `frame` ready for OCR: inverted when its mean luminance is below one half, because `ocrs` misreads light
 /// text on a dark background, as on a text console.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
-)]
 fn prepared(frame: &RgbImage) -> Cow<'_, RgbImage> {
     if is_dark(frame) {
         let mut inverted = frame.clone();
@@ -113,10 +101,6 @@ fn prepared(frame: &RgbImage) -> Cow<'_, RgbImage> {
 
 /// Whether the mean luminance of `image`, with the Rec. 709 weights on the encoded values, is below one half. The
 /// sum is exact integer arithmetic, so a frame at exactly one half is not dark. An empty image is not dark.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
-)]
 fn is_dark(image: &RgbImage) -> bool {
     // Rec. 709 luma weights in units of 1/10000; they sum to 10000.
     const WEIGHTS: [u64; 3] = [2126, 7152, 722];
@@ -346,6 +330,45 @@ pub fn encode_png(
     let mut png = Vec::new();
     img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)?;
     Ok((png, img.width(), img.height()))
+}
+
+/// A hash of `frame`'s size and of its pixels inside `area`, or over the whole frame, which the caller has mapped onto
+/// it. Equal pixels give equal hashes within one process, so a condition can tell an unchanged screen without keeping
+/// the frame.
+pub fn area_hash(frame: &RgbImage, area: Option<Rect>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    frame.dimensions().hash(&mut hasher);
+    match area {
+        None => frame.as_raw().hash(&mut hasher),
+        Some(r) => {
+            area_rows(frame, r).for_each(|row| row.hash(&mut hasher));
+            (r.x, r.y, r.width, r.height).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// The part of `frame` inside `area`, which the caller has mapped onto it, or the whole frame.
+pub fn area_image(frame: &RgbImage, area: Option<Rect>) -> Cow<'_, RgbImage> {
+    match area {
+        None => Cow::Borrowed(frame),
+        Some(r) => {
+            Cow::Owned(image::imageops::crop_imm(frame, r.x, r.y, r.width, r.height).to_image())
+        }
+    }
+}
+
+/// The raw bytes of each row of `frame` inside `r`.
+fn area_rows(frame: &RgbImage, r: Rect) -> impl Iterator<Item = &[u8]> {
+    let stride = frame.width() as usize * 3;
+    let (start, len) = (r.x as usize * 3, r.width as usize * 3);
+    frame
+        .as_raw()
+        .chunks_exact(stride)
+        .skip(r.y as usize)
+        .take(r.height as usize)
+        .map(move |row| &row[start..start + len])
 }
 
 /// The number of pixels in which `a` and `b` differ, compared exactly, inside `area` or over the whole frame. Returns
@@ -864,6 +887,35 @@ mod tests {
             changed_pixels(&a, &RgbImage::new(11, 10), Some(rect(0, 0, 1, 1))),
             None
         );
+    }
+
+    #[test]
+    fn area_hash_follows_only_the_pixels_of_the_area() {
+        let a = RgbImage::from_pixel(10, 10, image::Rgb([9, 9, 9]));
+        let mut b = a.clone();
+        b.put_pixel(0, 0, image::Rgb([0, 0, 0]));
+        let corner = Some(rect(0, 0, 2, 2));
+        let rest = Some(rect(2, 2, 8, 8));
+        assert_eq!(area_hash(&a, None), area_hash(&a.clone(), None));
+        assert_ne!(area_hash(&a, None), area_hash(&b, None));
+        assert_ne!(area_hash(&a, corner), area_hash(&b, corner));
+        assert_eq!(area_hash(&a, rest), area_hash(&b, rest));
+        // A frame of another size, or another area, is another screen.
+        assert_ne!(
+            area_hash(&a, None),
+            area_hash(&RgbImage::from_pixel(10, 11, image::Rgb([9, 9, 9])), None)
+        );
+        assert_ne!(area_hash(&a, corner), area_hash(&a, Some(rect(1, 1, 2, 2))));
+    }
+
+    #[test]
+    fn area_image_crops_at_full_resolution() {
+        let frame = RgbImage::from_fn(6, 4, |x, y| image::Rgb([x as u8, y as u8, 0]));
+        let part = area_image(&frame, Some(rect(2, 1, 3, 2)));
+        assert_eq!(part.dimensions(), (3, 2));
+        assert_eq!(part.get_pixel(0, 0).0, [2, 1, 0]);
+        assert_eq!(part.get_pixel(2, 1).0, [4, 2, 0]);
+        assert!(matches!(area_image(&frame, None), Cow::Borrowed(_)));
     }
 
     // Tests with the OCR models. They read the probe's screenshots in docs/research/2026-11-10-ocr-probe/. Run them
