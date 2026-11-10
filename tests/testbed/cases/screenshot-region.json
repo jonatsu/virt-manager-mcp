@@ -1,0 +1,83 @@
+[
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "matches": "<image saved to shot-\\d+\\.png>\\n\\d+x\\d+$"
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "trial-deb13",
+      "region": {
+        "x": 0,
+        "y": 0,
+        "width": 640,
+        "height": 400,
+        "image_width": 1280,
+        "image_height": 800
+      }
+    },
+    "expect": {
+      "contains": [
+        "640x400 image of the region 640x400 at (0, 0) of the 1280x800 full-screen image",
+        "not click coordinates"
+      ]
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "trial-deb13",
+      "region": {
+        "x": 0,
+        "y": 0,
+        "width": 640,
+        "height": 400
+      }
+    },
+    "expect": {
+      "error": true,
+      "contains": "need image_width and image_height"
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "trial-deb13",
+      "region": {
+        "x": 1000,
+        "y": 0,
+        "width": 640,
+        "height": 400,
+        "image_width": 1280,
+        "image_height": 800
+      }
+    },
+    "expect": {
+      "error": true,
+      "contains": "the region 640x400 at (1000, 0) does not fit inside the 1280x800 image"
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "trial-deb13",
+      "region": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 400,
+        "image_width": 1280,
+        "image_height": 800
+      }
+    },
+    "expect": {
+      "error": true,
+      "contains": "width and height must be at least 1"
+    }
+  }
+]

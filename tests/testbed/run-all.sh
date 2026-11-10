@@ -17,7 +17,7 @@ readonly BIN=${REPO}/target/release/virtmanager-mcp
 # Units run in this order; each lists the case files it runs, in order.
 readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode console-reopen console-stall
-  start-vm-waits-for-agent console-closed-on-power-off console-after-start
+  start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region
   templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
   templates-outside-disk console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing
 )
@@ -256,7 +256,7 @@ run_unit() {
     jobs) unit_jobs ;;
     owrt-*) unit_owrt "$1" ;;
     smoke | guest-agent-and-snapshots | lifecycle-guardrails | write-file-mode | console-reopen | \
-      start-vm-waits-for-agent | console-closed-on-power-off) unit_trial "$1" ;;
+      start-vm-waits-for-agent | console-closed-on-power-off | screenshot-region) unit_trial "$1" ;;
     *) run_case "$1" config-templates.toml ;;
   esac
 }
