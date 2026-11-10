@@ -853,7 +853,7 @@ impl VirtServer {
     #[tool(
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = false
         ),
         description = "Attach to the VM's serial/virtio text console (like `virsh console`). Output is buffered \
@@ -983,9 +983,9 @@ impl VirtServer {
 
     #[tool(
         annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
         ),
         description = "Wait until the first of several conditions holds on a VM, and return which one. Kinds: \
         `console` (the open console session's output matches a regex; ANSI-stripped by default), `agent` (the guest \
@@ -1411,7 +1411,7 @@ impl VirtServer {
     #[tool(
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true
         ),
         description = "Change the vCPU count and/or memory of a managed VM. Changes the persistent configuration, \
@@ -1477,7 +1477,7 @@ impl VirtServer {
     #[tool(
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true
         ),
         description = "Insert an ISO (from list_isos) into a managed VM's CD-ROM drive, or eject it by omitting iso. \
@@ -1818,21 +1818,49 @@ mod tests {
                 "{name} is read-only and destructive"
             );
             // Read-only mode also hides some reads, such as describe_vm, with their feature; it must hide every
-            // tool that changes something, apart from attaching to and detaching from the console.
-            if !read_only && !["console_open", "console_close"].contains(&name) {
+            // tool that changes something, apart from attaching to and detaching from the console, and wait_for,
+            // whose command condition read-only mode refuses.
+            if !read_only && !["console_open", "console_close", "wait_for"].contains(&name) {
                 assert!(
                     read_only_mode.contains(&name),
                     "{name} changes something but read_only mode shows it"
                 );
             }
         }
-        // Input to the guest can run anything, such as `rm -rf /`.
+        // A read-only hint lets a client run the tool without asking, so the list is fixed here: adding a tool to
+        // it is a deliberate change, made after checking that no argument lets the tool change anything.
+        let mut read_only: Vec<&str> = tools
+            .iter()
+            .filter(|t| t.annotations.as_ref().unwrap().read_only_hint == Some(true))
+            .map(|t| t.name.as_ref())
+            .collect();
+        read_only.sort_unstable();
+        assert_eq!(
+            read_only,
+            [
+                "console_read",
+                "describe_vm",
+                "guest_info",
+                "job_list",
+                "job_read",
+                "list_dir",
+                "list_isos",
+                "list_templates",
+                "list_vms",
+                "read_file",
+                "screenshot",
+                "snapshot_list",
+                "stat_path",
+            ]
+        );
+        // Input to the guest can run anything, such as `rm -rf /`; so can wait_for's command condition.
         for name in [
             "exec",
             "job_start",
             "console_write",
             "send_keys",
             "type_text",
+            "wait_for",
         ] {
             let tool = tools.iter().find(|t| t.name == name).unwrap();
             let a = tool.annotations.as_ref().unwrap();

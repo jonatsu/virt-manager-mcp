@@ -126,8 +126,9 @@ Reviews of earlier work found these. None blocks the server's use.
     span on each poll with new output, which costs little at the default 256 KiB scrollback but grows with
     `console_buffer_bytes` and the number of conditions. Strip once per poll and share the result.
 13. **Done: an expiry kept after a failed deletion keeps the boot disk.** The manual check for follow-up 7 showed the
-    sweep deleting the overlay and seed before it reached the locked disk, so the VM it kept could not boot. The
-    sweep now deletes disks in reverse document order, boot disk last, and stops at the first failure. In the manual
+    sweep deleting the overlay and seed before it reached the locked disk, so the VM it kept had lost its boot disk.
+    The sweep now deletes disks in reverse document order, boot disk last, and stops at the first failure, so the boot
+    disk and its data survive; a disk attached after the one that failed may already be gone. In the manual
     check, now with a step for this, the failed sweep kept `t-exp2-g1.qcow2` and its seed, and the next sweep deleted
     all three volumes.
 
@@ -175,8 +176,11 @@ Two items stand outside the outcomes, because their result is already clear. Eit
 - **Done: MCP tool annotations.** Every tool sets `readOnlyHint`, `destructiveHint` and `idempotentHint`, so that
   clients and permission layers can gate `delete_vm`, `snapshot_revert`, `detach_disk` and similar tools apart from
   reads. Tools that send input to the guest (`exec`, `job_start`, `console_write`, `send_keys`, `type_text`) count as
-  destructive, because the input can run anything. A unit test checks that every tool states all three hints, and
-  that read-only mode hides every tool not marked read-only, apart from `console_open` and `console_close`.
+  destructive, because the input can run anything, and so does `wait_for`, whose command condition runs a shell
+  command. Tools that replace existing state, such as `set_cdrom`, `configure_vm` and a forced `console_open`, count
+  as destructive too, since the MCP spec calls only additive updates non-destructive. A unit test checks that every
+  tool states all three hints, fixes the list of read-only tools, and checks that read-only mode hides every other
+  tool, apart from `console_open`, `console_close` and `wait_for`, whose command condition it refuses instead.
 - **Integration tests against real libvirt.** Turn the test-bed call lists into automated tests that run only when
   the test bed is present, and skip otherwise.
 
