@@ -247,6 +247,16 @@ pub struct Read {
     pub state: State,
     pub data: Vec<u8>,
     pub next: u64,
+    /// The read stopped at `max_bytes`, so more output may follow; `data` can be a few bytes shorter, when a UTF-8
+    /// character was cut.
+    pub cut: bool,
+}
+
+/// Cuts a read that reached `max_bytes` back to whole UTF-8 characters, and says whether it was cut.
+pub fn trim_read(data: &mut Vec<u8>, max_bytes: usize) -> bool {
+    let cut = data.len() >= max_bytes;
+    data.truncate(whole_chars(data, cut));
+    cut
 }
 
 /// Reads job `id`'s output from `since`, at most `max_bytes`, and its state, through the agent's file calls.
@@ -280,11 +290,12 @@ pub fn read(agent: &Agent, id: &Uuid, since: u64, max_bytes: usize) -> Result<Op
         Err(e) if is_missing(&e) => Vec::new(),
         Err(e) => return Err(e),
     };
-    data.truncate(whole_chars(&data, data.len() >= max_bytes));
+    let cut = trim_read(&mut data, max_bytes);
     Ok(Some(Read {
         state,
         next: since + data.len() as u64,
         data,
+        cut,
     }))
 }
 

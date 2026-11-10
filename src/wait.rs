@@ -627,6 +627,7 @@ enum JobStep {
         state: jobs::State,
         data: Vec<u8>,
         from: u64,
+        cut: bool,
     },
 }
 
@@ -654,14 +655,19 @@ impl JobState {
         let Some(step) = self.probe.take() else {
             return Ok(None);
         };
-        let (state, data, from) = match step {
+        let (state, data, from, cut) = match step {
             JobStep::Windows => bail!(
                 "job conditions are not available for Windows guests yet; they come with Windows job support \
                  (live-interaction run 3)"
             ),
             JobStep::Missing => bail!("no job {} in this guest", self.job),
             JobStep::Unavailable => return Ok(None),
-            JobStep::Read { state, data, from } => (state, data, from),
+            JobStep::Read {
+                state,
+                data,
+                from,
+                cut,
+            } => (state, data, from, cut),
         };
         self.os_checked = true;
         let Some(regex) = &self.output else {
@@ -678,11 +684,11 @@ impl JobState {
                 generation: None,
             }));
         }
-        // Read on from the last unfinished line, so a match split across reads is found. A full read with no line
-        // end moves past it, so one long line cannot hold the reads in place.
+        // Read on from the last unfinished line, so a match split across reads is found. A cut read with no line end
+        // moves past it, so one long line cannot hold the reads in place.
         self.from = match data.iter().rposition(|&b| b == b'\n') {
             Some(p) => from + p as u64 + 1,
-            None if data.len() >= MAX_JOB_READ => from + data.len() as u64,
+            None if cut => from + data.len() as u64,
             None => from,
         };
         Ok(None)
@@ -728,6 +734,7 @@ fn job_step(
             state: r.state,
             data: r.data,
             from,
+            cut: r.cut,
         },
         Ok(None) => JobStep::Missing,
         Err(_) => JobStep::Unavailable,
@@ -1173,11 +1180,14 @@ mod tests {
                 job.remove(0);
             }
             let from = (since as usize).min(output.len());
-            let data = output[from..(from + max_bytes).min(output.len())].to_vec();
+            // Trimmed like the real read, so a cut UTF-8 character shortens it.
+            let mut data = output[from..(from + max_bytes).min(output.len())].to_vec();
+            let cut = jobs::trim_read(&mut data, max_bytes);
             Ok(Some(jobs::Read {
                 state,
                 next: since + data.len() as u64,
                 data,
+                cut,
             }))
         }
     }
@@ -1341,6 +1351,61 @@ mod tests {
         let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
         assert_eq!(matched(&o), (0, "step 3 is done", Some(21)));
         assert_eq!(*guest.job_reads.lock().unwrap(), [0, 7]);
+    }
+
+    #[test]
+    fn a_long_line_cut_inside_a_character_does_not_hold_the_reads() {
+        // One ASCII byte, then two-byte characters: a 1 MiB read ends inside a character and is trimmed by a byte.
+        let mut output = b"a".to_vec();
+        output.extend("é".repeat(MAX_JOB_READ / 2 + 1000).bytes());
+        output.extend(b"\nstep 3\n");
+        let output: &'static [u8] = Box::leak(output.into_boxed_slice());
+        let guest = Arc::new(FakeGuest {
+            job: Mutex::new(vec![(jobs::State::Running, output)]),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let cond = Condition::JobOutput {
+            job: job(&Uuid::new_v4()),
+            pattern: "step 3".into(),
+            since: None,
+        };
+        let checks = validate_conditions(&Config::default(), &[cond]).unwrap();
+        let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o).0, 0);
+        let reads = guest.job_reads.lock().unwrap().clone();
+        assert_eq!(
+            reads,
+            [0, MAX_JOB_READ as u64 - 1],
+            "the second read starts past the cut"
+        );
+        let json = o.to_json(Duration::ZERO);
+        assert!(
+            json.get("generation").is_none() && json["next"].is_u64(),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn job_conditions_refuse_a_zero_timeout_and_a_windows_guest() {
+        let env = FakeEnv::new(vec![]);
+        let done = Condition::JobDone {
+            job: job(&Uuid::new_v4()),
+        };
+        let checks = validate_conditions(&Config::default(), std::slice::from_ref(&done)).unwrap();
+        let err = run(&env, Arc::new(FakeGuest::new()), checks, Duration::ZERO)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least 1 s"), "{err}");
+        let windows = FakeGuest {
+            os: GuestOs::Windows,
+            ..FakeGuest::new()
+        };
+        let checks = validate_conditions(&Config::default(), &[done]).unwrap();
+        let err = run(&env, Arc::new(windows), checks, Duration::from_secs(5))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Windows"), "{err}");
     }
 
     #[test]

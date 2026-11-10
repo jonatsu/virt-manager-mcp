@@ -69,6 +69,29 @@
     }
   },
   {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
+      "command": "printf a; yes \u00e9 | tr -d \"\\n\" | head -c 1200000; printf \"\\nstep 3\\n\""
+    },
+    "save": {
+      "long": "job"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${long}",
+          "pattern": "step 3"
+        }
+      ]
+    }
+  },
+  {
     "tool": "wait_for",
     "args": {
       "vm": "t-w",
