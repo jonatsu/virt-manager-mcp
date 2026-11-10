@@ -63,6 +63,7 @@ probe. The call returns one of four results:
   running to the timeout.
 - **timed out:** the result returns each console and job condition's resume point, the start of the last unfinished
   line, so the next call still matches output that arrived in between, including a prompt split across the two calls.
+  It also returns each `screen_text` condition's last OCR text, so an agent can loosen its pattern.
 - **cancelled:** the client cancelled the request; the wait stops at its next poll.
 
 Condition kinds, by run:
@@ -75,11 +76,12 @@ Condition kinds, by run:
 | `job_done` | a job has exited, or has ended without writing its status | 1 (Linux), 3 (Windows) |
 | `job_output` | a job's output from `since` matches a pattern | 1 (Linux), 3 (Windows) |
 | `screen_text` | OCR of the screen, or of a region, matches a pattern | 2 |
-| `screen_settled` | fewer than a threshold of pixels change between frames for a given time | 2 |
+| `screen_settled` | at most a threshold of pixels change between consecutive frames for a given time | 2 |
 
 Read-only mode refuses `command`, `screen_text`, `screen_settled` and the screenshot attachment, because it disables
 command execution and screenshots today. `wait_for` checks the client's cancellation on every poll, so a cancelled
-wait stops its polling and its OCR. It sends progress notifications when the client sends a progress token.
+wait stops its polling and drops a running OCR's result. It sends progress notifications when the client sends a
+progress token.
 
 Each agent probe is bounded by the time left, at most 2 s, and runs on its own thread, so a hung guest agent, as after
 a kernel panic, neither delays the console check nor stretches the call. A call therefore returns within
@@ -105,29 +107,65 @@ write whose paced duration would exceed `limits.max_wait_secs`. `type_text` keep
 
 ### Screen and mouse (run 2)
 
-Screen coordinates are pixels of an image the agent got from `screenshot`, whose result states that image's width and
-height. `mouse`, a `region` on `screenshot`, and the region of `screen_text` and `screen_settled` take `x` and `y`
-with that `image_width` and `image_height`, and `screen` for the display head. The server maps them proportionally:
-to QEMU's absolute axis range of 0 to 32767 for the mouse, and to the current framebuffer for a region, which it crops
-at full resolution before any downscaling. A resolution change between the screenshot and the call therefore keeps the
-click at the same relative place, and the agent takes a new screenshot when the layout changed.
+Screen coordinates are pixels of a full-screen image the agent got from `screenshot` without a region, or from a
+wait's attachment. `mouse`, a `region` on `screenshot`, and the region of `screen_text` and `screen_settled` take `x`
+and `y`, plus `width` and `height` for a region, with that image's `image_width` and `image_height`, and `screen` for
+the display head (default 0). A region without the image's size, of zero size, or outside the image is refused. The
+server maps coordinates proportionally: to QEMU's absolute axis range of 0 to 32767 for the mouse, and to the current
+framebuffer for a region. A region's start rounds down and its end up, so a crop is never empty and never leaves the
+frame. The server crops at full resolution before any downscaling. A resolution change between the screenshot and the
+call therefore keeps the point at the same relative place, and the agent takes a new screenshot when the layout
+changed. A region screenshot's reply gives the region's origin and size in the full-screen image, and states that its
+pixels are not click coordinates.
 
 `mouse` moves, clicks (left, right, middle), double-clicks, drags and scrolls, through `input-send-event` on the
-domain's USB tablet. A VM without a tablet is refused with that reason; VMs made by `create_vm` and
-`create_vm_from_template` have one. libvirt marks a domain that receives monitor commands as tainted
-(`custom-monitor`), and the tool description and the README say so.
+domain's USB tablet. Each action is a sequence of separate commands with pauses: a move, a press and its release go
+about 50 ms apart, because the tablet merges the events of one command, and a press and release sent together only
+move the pointer ([`2026-11-10-qmp-click-probe.md`](../research/2026-11-10-qmp-click-probe.md)). A double-click
+spaces its two clicks within a guest's double-click interval, and a drag presses, moves in steps, then releases. After
+a failed step, the tool tries once to release a held button. `send_one`, which sends every command, refuses anything
+but `input-send-event`. The tool reads the live XML for a tablet, and refuses a VM without one with that reason; VMs
+made by `create_vm` and `create_vm_from_template` have one. Only display head 0 is supported, and another head is
+refused, because addressing it needs the video device's identifier. libvirt marks a domain that receives monitor
+commands as tainted (`custom-monitor`), and the tool description and the README say so.
 
-OCR runs only when the frame's hash has changed, on the region when one is given. A frame whose mean luminance is
-below one half is inverted first, because `ocrs` misreads light text on black, as on a text console. One capture per
-VM and poll serves every wait on that VM. The models are the `ocrs` project's ONNX detection and recognition models.
-They live at `display.ocr_models`, and `scripts/fetch-ocr-models.sh` downloads them and checks SHA-256 sums pinned in
-the script, since upstream publishes none. Without models, `screen_text` is refused with that reason.
+A wait with screen conditions captures their display head on a probe thread, once per 500 ms poll, and every screen
+condition of that wait reads the same frame. All screen conditions of one wait name the same head. Two waits on one
+VM capture separately, since sharing frames across calls would need a cache. A failed capture, for example on a VM
+without graphics, ends the wait with an error naming the cause, and captures stop after it. A VM check that starts
+after the failure decides the outcome: a stopped VM ends the wait as `closed`. A match in the same poll, or found at
+the deadline, still wins over the error.
 
-`screen_settled` holds when fewer than a threshold of pixels differ between consecutive frames, compared exactly, for
-a settle time: by default 600 pixels for 3 s. The threshold counts pixels, not a share, because idle noise is fixed in
-pixels whatever the frame or region size: in the probe a blinking cursor changed 16 pixels and a firmware spinner up
-to 415, while a progress-bar step changed over 1100 and a page change far more. One typed character changes about 70,
-so typing does not count as change.
+`screen_settled` holds once no pair of consecutive frames over `settle_secs` differs in more than
+`max_changed_pixels` pixels, compared exactly: by default 600 pixels for 3 s. A change of frame size counts as a
+change. `settle_secs` is at least 0.5 s, one frame interval, and at most the call's timeout less 0.5 s. The threshold
+counts pixels, not a share, because idle noise is fixed in pixels whatever the frame or region size: in the probe a
+blinking cursor changed 16 pixels and a firmware spinner up to 415, while a progress-bar step changed over 1100 and a
+page change far more. One typed character changes about 70, so typing does not count as change.
+
+`screen_text` takes a `pattern` in Rust `regex` syntax, and matches it against the OCR lines joined by newlines; the
+result returns the matched text. A time-out returns each `screen_text` condition's `last_text`, cut at a character
+boundary to 4096 bytes. Each condition hashes the frame, or its region, and runs OCR only when the hash changed since
+its last read. OCR runs on a probe thread bounded by the time left. A read never starts at or after the deadline. One
+still running at the deadline or on cancellation is dropped, because `ocrs` cannot interrupt a run in progress; one
+that finished after the last poll still counts. Each `screen_text` condition runs its own OCR, so one pattern with
+alternatives costs less than several conditions on the same area. A frame whose mean luminance is below one half is
+inverted first, because `ocrs` misreads light text on black, as on a text console.
+
+The models are the `ocrs` project's ONNX detection and recognition models, at `display.ocr_models`.
+`scripts/fetch-ocr-models.sh` downloads them and checks SHA-256 sums pinned in the script, since upstream publishes
+none. The setting is optional. When it is set, it must be an absolute path to a directory that holds both model
+files, or the server refuses to start. When it is unset, `screen_text` is refused with that reason before the wait
+starts; `screen_settled` needs no models. The recogniser loads on the first `screen_text` wait, and every later wait
+shares it; a failed load is not kept, so the next call tries again. `ocrs` runs in `rten`'s process-wide thread pool.
+`main` sizes that pool to 4 threads by setting `RTEN_NUM_THREADS` before any other thread starts, so a wait on a busy
+screen leaves the host's other cores to its VMs.
+
+`wait_for` gains `screenshot: true`. On a match of any condition, the result attaches a PNG downscaled to 1280 pixels
+wide, as `screenshot` does, with its size in the result's JSON. A screen match attaches the frame it matched on; any
+other match captures display head 0 then. The capture and the encoding run on a probe thread inside the call's 2 s
+margin. A failed or late capture keeps the match and adds a note. Read-only mode refuses the attachment, and
+`wait_for` checks this itself, since the condition checks see only the conditions.
 
 ### Jobs
 
@@ -156,7 +194,7 @@ they outlive a server restart, and a reset or deletion of the VM removes them.
 
 - Every new tool obeys `allowed_vms`. `job_start`, `job_stop` and `mouse` are hidden in read-only mode with the other
   mutating tools, and `wait_for` refuses there the conditions that run commands or take screenshots.
-- The server sends the QEMU monitor nothing but `input-send-event` commands it builds.
+- The server sends the QEMU monitor nothing but `input-send-event` commands it builds, and `send_one` checks this.
 - The server makes no network request. OCR models come from the operator.
 - A `wait_for` call returns within `max_wait_secs` plus 2 s. Calls that existed before, such as `start_vm` and
   `exec`, keep their own limits.
@@ -168,7 +206,9 @@ they outlive a server restart, and a reset or deletion of the VM removes them.
   reported to waits.
 - `src/server.rs`: `wait_for`, the job tools and `mouse`, with `RequestContext` passed to `wait_for` for cancellation
   and progress; `screenshot` with `region`; gating in `MUTATING_TOOLS` and the read-only refusals.
-- `src/display.rs`: frame capture shared by waits, coordinate mapping, OCR, and the monitor command.
+- `src/display.rs`: frame capture, regions and their mapping, the PNG encoder, the frame hash and the OCR
+  recogniser. `src/wait.rs` gains the frame probe and the screen conditions, and `src/main.rs` sizes OCR's pool.
+- A new `src/mouse.rs` for the `input-send-event` builder, the axis mapping, the tablet check and the sender.
 - A new `src/jobs.rs` for the Linux and Windows launchers and the job file layout; `src/config.rs` gains
   `limits.max_wait_secs` and `display.ocr_models`.
 
@@ -219,11 +259,22 @@ published.
 ## Risks
 
 1. OCR misreads some text-mode fonts: in the probe, `ocrs` read "SeaBIOS" as "seaBinS" and dropped trailing dots.
-   Inverting dark frames fixes most of it, and patterns for screen text should be loose. `ocrs` 0.14 was not in the
-   probe, so run 2 checks it on the probe's screenshots before relying on it.
+   On `trial-deb13`'s console, a full-screen read gave "log in:" for "login:", while a region read matched exactly.
+   Inverting dark frames fixes most of it, and regions or tolerant patterns such as `log ?in:` help. `ocrs` 0.14 read
+   as many of the probe's key strings exactly as 0.12 did.
 2. Hardened hosts may deny monitor access. The mouse then fails with libvirt's reason; keyboard input still works.
 3. The Windows guest agent depends on drivers no setup on this host has tried. Run 3 may need a design change there.
 4. A guest that fills its disk can lose job output. Job logs are not capped in the guest.
+5. OCR on a busy screen loads the host, which also runs other VMs. The 4-thread pool bounds it. Several `screen_text`
+   conditions each run OCR on the same frame, so one pattern with alternatives is cheaper.
+6. Inverting dark frames damages the small text of the Windows setup screen: "Next" read as "Nex". Run 3 drives that
+   screen and has to work around it.
+7. The Debian installer drops input sent within about 2 s of a new screen. An agent waits for the screen's text, then
+   for `screen_settled`, before it types.
+
+The run-2 evidence for risks 1, 6 and 7 is in the execution record of
+[`live-interaction-run-2-implementation-plan.md`](live-interaction-run-2-implementation-plan.md), and the OCR probe is
+[`2026-11-10-ocr-probe.md`](../research/2026-11-10-ocr-probe.md).
 
 ## Open questions
 
