@@ -12,6 +12,8 @@ This repository is a Rust MCP server that gives AI agents guarded access to libv
 - Use Conventional Commits, one logical change per commit.
 - Keep designs in `docs/plans/<name>-design.md` short and plain: summary, decisions, behaviour, invariants, risks,
   open questions. Do not use arc42 or other heavy templates.
+- Write plans and designs in the project's own voice. State what holds and what was decided, not who decided it or
+  when, and never refer to the maintainer in the third person.
 
 ## Build gate
 

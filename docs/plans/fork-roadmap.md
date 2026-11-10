@@ -98,9 +98,9 @@ The conformance reviews of the second and third autopilot runs found these. None
    data, and the clean-up after a failed `chmod`, rest on the test bed. A seam over the agent calls would allow it.
 5. **`console_read` with `wait_ms: 0` right after `stop_vm`** can return `closed: null`, because the reader records
    the stream's end a moment later. A non-zero wait reports it.
-6. **Convert the existing documents to the short, plain style.** `AGENTS.md` now asks for short, plain designs. The
-   user wants this roadmap, the brainstorm draft, the test-bed README and the research notes brought into the same
-   style; the research copies keep their copied text and change only their own notes.
+6. **Convert the existing documents to the short, plain style.** `AGENTS.md` asks for short, plain designs. Bring this
+   roadmap, the brainstorm draft, the test-bed README and the research notes into the same style; the research copies
+   keep their copied text and change only their own notes.
 7. **An expiry hides a failed volume deletion.** `expire` in `src/manage.rs` puts a failed volume deletion only in its
    "deleted" log line, still undefines the VM and counts it as deleted, so `virtmanager-mcp sweep` exits 0 and no later
    sweep retries the orphaned volume. Count it as a failure and keep the domain, so the next sweep retries.
@@ -113,15 +113,14 @@ The conformance reviews of the second and third autopilot runs found these. None
 
 ## Outcomes
 
-A brainstorm on 2026-11-09 grouped the planned features by what they let an agent do. The user set the order below.
-Each outcome needs a design agreed with the user before it is built, and each feature from the earlier list now sits
-under one of them.
+Planned features are grouped by what they let an agent do, in the order below. Each outcome needs an approved design
+before it is built, and each feature from the earlier list sits under one of them.
 
 1. **Done: a clean VM in seconds, not minutes.** `create_vm_from_template` gives an agent a disposable VM from an
    operator-prepared template, as a qcow2 overlay with a NoCloud seed, and its guest agent answered 11.9 s after the
    call on the test bed. `reset_vm` returns it to the template's state, and VMs with a lifetime expire through a
    sweep in every server process or the `virtmanager-mcp sweep` command. `scripts/make-template.sh` builds a Debian 13
-   template. The VMs live on `qemu:///system`, by the user's decision. Evidence:
+   template. The VMs live on `qemu:///system`. Evidence:
    [`disposable-vms-implementation-plan.md`](disposable-vms-implementation-plan.md), whose execution record holds
    each unit's commits, test-bed results and reviews, built from
    [`disposable-vms-design.md`](disposable-vms-design.md) and
@@ -156,9 +155,8 @@ Open questions for the designs:
 
 ## Current goal
 
-The user armed an autopilot run on 2026-11-10 over outcome 1. It landed outcome 1 in `aacafce` to `b738fee`, with
-the evidence for each criterion in the plan's execution record, and was re-verified in full at `aa44f14`. The
-earlier runs, over the baseline and the defects, are done.
+Outcome 1 landed in `aacafce` to `b738fee` and was re-verified in full at `aa44f14`; the plan's execution record
+holds the evidence for each criterion. The baseline and the defects are done.
 
 - **Objective:** disposable VMs from operator templates work as
   [`disposable-vms-design.md`](disposable-vms-design.md) describes, built in the order of

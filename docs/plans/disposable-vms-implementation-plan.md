@@ -36,7 +36,7 @@ These apply to every unit, which names only its additions.
 - **Test bed.** Run cases as `tests/testbed/README.md` describes. The client has no assertions, so a case passes when
   a reader of its replies sees each expected result; record what was seen in the execution record. Touch only
   `trial-deb13` and VMs and volumes named `t-*` or `tpl-*` in the `agent-vms` pool on `qemu:///system`.
-- **Memory.** The host shares its RAM with the user's work and once crashed when memory ran out. Give each test VM at
+- **Memory.** The host shares its RAM with other work and once crashed when memory ran out. Give each test VM at
   most 1 GiB, run at most three throwaway VMs at once, check `free -m` before starting several, and shut a VM down as
   soon as its check is done. No test asks for more memory than the host has free.
 - **Template config.** Template cases use `tests/testbed/config-templates.toml`, so the existing cases keep their
@@ -75,7 +75,7 @@ hostname and installs `qemu-guest-agent`. Expected: `cloud-init status --long` r
 `DataSourceNoCloud` and no errors, and `hostname` prints `t-seed`. Delete `t-seed` and the three volumes afterwards.
 
 **Recovery.** If cloud-init does not read the image, stop: the design's fallback is an ISO writer, and the switch is
-a design change for the user to approve.
+a design change that needs approval.
 
 ### 2. Template script (self-reviewed)
 

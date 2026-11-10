@@ -1,8 +1,8 @@
 # Disposable VMs from templates: design
 
-Status: accepted by the user on 2026-11-09, with the recommended lifetime policy and Debian 13 as the first
-template. Revised for two plan-critic reviews; the user accepted the reset, expiry-order and lifetime-cap choices on
-2026-11-10. Once built, the code wins and this design follows it.
+Status: accepted, with the recommended lifetime policy and Debian 13 as the first template, and revised for two
+plan-critic reviews, which settled the reset, expiry-order and lifetime-cap choices. Once built, the code wins and this
+design follows it.
 Basis: roadmap outcome 1 in [`fork-roadmap.md`](fork-roadmap.md), shaped by the confirmed draft
 [`disposable-vms-draft.md`](disposable-vms-draft.md), with evidence in
 [`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md).
@@ -16,8 +16,8 @@ have a lifetime, after which the server deletes it. The ISO-based `create_vm` st
 
 ## Decisions
 
-The user decided that templates are operator-prepared and that VMs live on `qemu:///system`, with the URI kept
-configurable. The rest are recommendations:
+Two are settled: templates are operator-prepared, and VMs live on `qemu:///system`, with the URI kept configurable.
+The rest are recommendations:
 
 - **Overlays, not clones.** An overlay costs no copy, and the probe booted one to a responding guest agent in 7.6 s.
 - **A FAT seed built in memory with the `fatfs` crate** (0.3.6, MIT). NoCloud reads a `vfat` or `iso9660` filesystem
@@ -164,8 +164,8 @@ These follow from the design and the code as it stands:
 
 | Question | Kind | Recommendation |
 | -- | -- | -- |
-| Default and maximum lifetime | Decided by the user | No default; a maximum of 1440 minutes when an agent sets one. |
-| Which templates first | Decided by the user | Debian 13 only. |
+| Default and maximum lifetime | Decided | No default; a maximum of 1440 minutes when an agent sets one. |
+| Which templates first | Decided | Debian 13 only. |
 | Can agents extend a lifetime? | Deferred | Not in this version; revisit if agents lose work to expiry. |
 
 ## Checks
