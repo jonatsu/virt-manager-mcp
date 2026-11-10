@@ -1,0 +1,753 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-inst",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-inst': started"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "screenshot": true,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Graphical install"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"Graphical install\""
+      ],
+      "matches": "\"screenshot\":\\{(?=[^}]*\"width\":\\d+)(?=[^}]*\"height\":\\d+)[^}]*\\}.*\\n<image saved to shot-\\d+\\.png>$"
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 120,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Select a language"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Select a language\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 3,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Italian"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"timed_out\"",
+        "Select a language"
+      ],
+      "absent": "Italian"
+    }
+  },
+  {
+    "tool": "mouse",
+    "args": {
+      "vm": "t-inst",
+      "action": "scroll",
+      "x": 640,
+      "y": 450,
+      "direction": "down",
+      "image_width": 1280,
+      "image_height": 800
+    },
+    "expect": {
+      "contains": "sent the scroll at (640, 450)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 10,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Italian"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Italian\""
+      ]
+    }
+  },
+  {
+    "tool": "mouse",
+    "args": {
+      "vm": "t-inst",
+      "action": "click",
+      "x": 1218,
+      "y": 774,
+      "image_width": 1280,
+      "image_height": 800
+    },
+    "expect": {
+      "contains": "sent the click at (1218, 774) as 3 input-send-event command(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Select your location"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Select your location\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Configure the keyboard"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Configure the keyboard\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "__time__",
+    "args": {}
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 8,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "never on this screen"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"timed_out\"",
+        "\"last_text\":\""
+      ],
+      "matches": "\"waited_ms\":8\\d{3}\\b"
+    }
+  },
+  {
+    "tool": "__time__",
+    "args": {}
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 120,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Detect network hardware"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Detect network hardware\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "No network interfaces detected"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"No network interfaces detected\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Please enter the hostname"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Please enter the hostname\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "set the password for that account"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"set the password for that account\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "real name of this user"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"real name of this user\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "type_text",
+    "args": {
+      "vm": "t-inst",
+      "text": "Test User\n"
+    },
+    "expect": {
+      "error": false
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Username for your account"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Username for your account\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Choose a password for the new user"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Choose a password for the new user\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "type_text",
+    "args": {
+      "vm": "t-inst",
+      "text": "trial-pass\t\ttrial-pass\n"
+    },
+    "expect": {
+      "error": false
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Select your time zone"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Select your time zone\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-inst",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 120,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Partition disks"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_text\"",
+        "\"text\":\"Partition disks\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-inst",
+      "timeout_secs": 10,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "^Partition disks$",
+          "region": {
+            "x": 0,
+            "y": 80,
+            "width": 640,
+            "height": 30,
+            "image_width": 1280,
+            "image_height": 800
+          }
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"Partition disks\""
+      ]
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "t-inst",
+      "region": {
+        "x": 0,
+        "y": 80,
+        "width": 640,
+        "height": 30,
+        "image_width": 1280,
+        "image_height": 800
+      }
+    },
+    "expect": {
+      "contains": [
+        "640x30 image of the region 640x30 at (0, 80) of the 1280x800 full-screen image",
+        "not click coordinates"
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-inst",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-inst' is shut off"
+    }
+  }
+]

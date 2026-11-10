@@ -1,0 +1,59 @@
+[
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "timeout_secs": 10,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "login"
+        }
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "condition 0: screen_text needs the OCR models: set display.ocr_models"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "timeout_secs": 10,
+      "conditions": [
+        {
+          "kind": "screen_settled",
+          "settle_secs": 1
+        },
+        {
+          "kind": "screen_text",
+          "pattern": "login"
+        }
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "condition 1: screen_text needs the OCR models"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled",
+          "settle_secs": 1
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\""
+      ]
+    }
+  }
+]

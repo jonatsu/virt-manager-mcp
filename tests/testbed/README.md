@@ -12,6 +12,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `config.toml` | Server config that allows only `trial-deb13`, caps created VMs at one, and uses `agent-vms`. |
 | `config-templates.toml` | Server config for VMs made from templates: no `trial-deb13`, at most three 1 GiB VMs, four templates. |
 | `preseed.cfg` | Unattended Debian 13 install with `qemu-guest-agent` and a serial getty on `ttyS0`. |
+| `t-inst.xml`, `t-win.xml` | Installer guests for the screen cases; see "The installer guests". |
 | `cases/*.json` | Call lists from the trial, one per area. |
 
 ## Cases
@@ -29,6 +30,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `console-closed-on-power-off.json` | Powers the VM off under an open console, once from inside the guest and once with a forced `stop_vm`; each next read reports the console closed, the one after `stop_vm` with `wait_ms: 0`. The case starts the VM again. |
 | `screenshot-region.json` | `WxH` for a full `screenshot`; a quarter region's size and origin; bad regions refused. |
 | `screen-settled.json` | `screen_settled` matches the idle login screen and attaches a screenshot; 0.1 s is refused. |
+| `screen-no-models.json` | Without `display.ocr_models`, `screen_text` is refused, alone and next to `screen_settled`, before the wait starts; `screen_settled` alone still matches. |
 
 The template cases below run with `config-templates.toml`. They need the template volume `tpl-debian13.qcow2`, which
 `scripts/make-template.sh` builds ([`docs/templates.md`](../../docs/templates.md)).
@@ -48,8 +50,18 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `jobs.json`, then `jobs-reopen.json` | Run both from the same directory: the first saves job IDs to `vars.json` and leaves `t-w` running for the second, which a new server process runs. `jobs.json` creates `t-w`; a job printing a line a second reads `running` with output and `next` growing over two reads; after `systemctl restart qemu-guest-agent` it still reads `running` with more output; a command holding `'$HOME'`, quotes and `${NOT_SET:-literal braces}` prints `$HOME\|it's "quoted"` and `literal braces` and reads `exited` with code 0; `yes \| head -c 10` reads `exited` with code 0 and exactly 10 bytes of output, because jobs keep the default SIGPIPE action; a `sleep 300` job whose wrapper `exec` kills with `kill -9` reads `ended without status`; `job_list` lists the four. `jobs-reopen.json` lists them again; reads the first job; `job_stop` sends TERM, and the next read shows `exited` with code 143; a second `job_stop` is refused as not running; the ID `../../../etc` is refused; with `/var/lib/virtmanager-mcp` replaced by a link to `/tmp`, `job_start` is refused naming the link, and `ls -A /tmp` lists the same entries before and after; `job_start`, `job_read`, `job_stop` and `job_list` on `trial-deb13` are each refused as outside `allowed_vms`; `t-w` is deleted. |
 | `job-wait.json` | Creates `t-w` and opens its console. With a job printing `step N` once a second, `[job_output "step 3", console "Kernel panic"]` matches index 0 after about 3 s with `next`; `[job_done]` on `sleep 3; exit 5` matches with "exited with code 5"; a job printing more than 1 MiB of two-byte characters on one line, then `step 3`, matches `[job_output "step 3"]`, which shows a read cut inside a character still moves on; a 3 s `job_output` wait for text never printed times out with a resume point and no generation; `job_done` on a job ID the guest does not have is refused; `t-w` is deleted. |
 | `owrt-wait.json` | Boots `t-owrt`; `wait_for` matches "Please press Enter to activate this console", and after Enter matches the root prompt, which reads `root@(none):~#` this early in boot. |
+| `mouse-refusals.json` | Starts `t-owrt`, which has no display or tablet: `mouse` is refused for want of a USB tablet, and `mouse` on `trial-deb13` is refused as outside `allowed_vms`; then `t-owrt` is powered off. |
 | `wait-for.json` | Creates `t-w` without waiting for its agent. In order: `[agent]` matches once the agent answers; after Enter, `[console "login:"]` matches with `next` and `generation`, and `console_read` still returns that output; the same wait again times out, because the cursor moved past the match; `[console "marker-42", command "test -e /tmp/ready"]` times out after 5 s with a resume point and `last_exit_code` 1; after `exec` creates the file and writes the marker to `/dev/ttyS0`, the command wait matches with its output `ready`, and a console wait matches `marker-42`, written between the calls; with a sysrq crash 3 s away, `[console "login:", console "Kernel panic", command "false"]` matches index 1 within about 3 s while the agent hangs (the `__time__` lines measure it); after a restart and a `poweroff` 5 s away, a wait for text that never appears ends as `closed` because the console stream ended; after another restart and `poweroff`, `[command "false"]` ends as `closed` with "the VM is not running"; `trial-deb13` is refused as outside `allowed_vms`, and a bad pattern is refused; `t-w` is deleted. |
 | `templates-outside-disk-setup.json`, `templates-outside-disk.json` | A reset and an expiry leave a disk file outside every pool in place; run with the steps below. |
+
+The screen cases below need the OCR models and the installer guests in "The installer guests". They run with a screen
+config: `config-templates.toml` with `t-inst` and `t-win` added to `allowed_vms` and `power_vms`, and
+`display.ocr_models` set. `run-all.sh` writes it.
+
+| Case | What it exercises |
+| -- | -- |
+| `screen-installer.json` | Boots `t-inst` from the Debian netinst ISO. `screen_text` matches "Graphical install" on the UEFI GRUB menu and attaches a screenshot; after Enter it matches "Select a language", and `screen_settled` matches. "Italian" is not on screen until a `mouse` scroll of the language list, then it matches. A `mouse` click on "Continue" at (1218, 774) leads to "Select your location". Keys go on through the keyboard, network, hostname, user and time-zone screens to "Partition disks", each one sent once its screen's text matched and the screen held still for 3 s, because the installer drops input that arrives in the first 2 s or so of a new screen. On the changing screen that loads installer components, a `screen_text` wait for text never shown times out after 8 s with its last OCR text (the `__time__` lines measure it). A `screen_text` wait on the title region matches `^Partition disks$`, and a region screenshot of the title reports its size and origin. The VM is then powered off. |
+| `screen-windows.json` | Boots `t-win` from the Windows 11 ISO. `screen_text` matches "Press any key to boot from CD", Enter goes three times a second apart, and `screen_text` matches "Windows 11 Setup" with a screenshot attached. The VM is then powered off. |
 
 `templates-reset.json` and `templates-expiry.json` need `t-listed`, a VM defined with `virsh` and never started.
 `templates-reset.json` also needs `tpl-scratch.qcow2`, made with
@@ -139,8 +151,20 @@ removes the `t-*` VMs and volumes it created, leaves `trial-deb13` running, prin
 failed.
 
 It prints `skipped: <reason>` and exits 0 when `virsh` cannot reach `qemu:///system`, or when pool `agent-vms`,
-`trial-deb13` or `tpl-debian13.qcow2` is missing. Without `t-owrt`, it skips the OpenWrt cases. The check that needs
-root, "A failed volume deletion during expiry", stays manual. A full run takes about 11 minutes.
+`trial-deb13` or `tpl-debian13.qcow2` is missing. Without `t-owrt`, it skips the OpenWrt cases and
+`mouse-refusals.json`. The check that needs root, "A failed volume deletion during expiry", stays manual. A full run
+takes about 11 minutes, and about 13 with the screen cases.
+
+The screen cases run only when `VIRTMANAGER_OCR_MODELS` holds the absolute path of the directory that
+`scripts/fetch-ocr-models.sh` fills; otherwise the summary lists them as skipped with that reason. With it set, the
+script writes the screen config into its `/tmp` directory as `config-screen.toml`, defines `t-inst` and `t-win` from
+their XML files unless they exist, and creates `t-inst.qcow2` unless it exists. It runs one of the two VMs at a time,
+after checking that the host has the VM's memory plus 1 GiB available, and at the end removes the VMs and the disk it
+created:
+
+```sh
+VIRTMANAGER_OCR_MODELS=~/.local/share/virtmanager-mcp/ocr-models tests/testbed/run-all.sh screen-installer
+```
 
 ## Recreate the guest
 
@@ -193,6 +217,29 @@ virsh -c qemu:///system define "$REPO/tests/testbed/t-owrt.xml"
 
 `owrt-boot.json` starts it, opens the console during boot, and shows the boot log ending in a `root@OpenWrt:~#`
 prompt after Enter; then it powers the VM off. This ran with OpenWrt 25.12.6, which booted on the q35 machine type.
+
+## The installer guests
+
+`t-inst` and `t-win` boot installer ISOs for the screen cases. Their XML files came from
+`/usr/bin/python3 /usr/bin/virt-install ... --print-xml` and are kept as generated.
+
+- `t-inst.xml`: 1 GiB, 2 vCPUs, UEFI on q35, no network, a USB tablet, SPICE with virtio video, the Debian 13 netinst
+  ISO `tpl-debian13-netinst.iso` as its CD-ROM, and the 8 GiB disk `t-inst.qcow2`.
+- `t-win.xml`: 4 GiB, 2 vCPUs, UEFI with Secure Boot and SMM, an emulated TPM 2.0, a USB tablet, SPICE with virtio
+  video, the Windows 11 ISO `tpl-win11-26h2.iso` as its CD-ROM, and no disk. The TPM needs `swtpm` on the host.
+
+Both ISOs are volumes in `agent-vms`. Define the guests by hand as follows; `run-all.sh` does the same when they are
+missing:
+
+```sh
+virsh -c qemu:///system vol-create-as agent-vms t-inst.qcow2 8G --format qcow2
+virsh -c qemu:///system define "$REPO/tests/testbed/t-inst.xml"
+virsh -c qemu:///system define "$REPO/tests/testbed/t-win.xml"
+```
+
+Run a screen case with a config that allows them and sets `display.ocr_models`, such as the one `run-all.sh` writes.
+Remove them with `virsh -c qemu:///system undefine --nvram t-inst`, the same for `t-win`, and
+`virsh -c qemu:///system vol-delete --pool agent-vms t-inst.qcow2`.
 
 ## Credentials
 

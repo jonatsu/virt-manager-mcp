@@ -3,7 +3,8 @@
 # summary. Usage: tests/testbed/run-all.sh [case ...]; a case name may carry .json. With no arguments it runs every
 # case except the manual root-only check. Exits 0 when every case passed or the test bed is absent, 1 when a case
 # failed, 2 on bad arguments. It touches only trial-deb13, t-owrt, and the t-* VMs and t-*/tpl-scratch volumes it
-# creates in pool agent-vms on qemu:///system.
+# creates in pool agent-vms on qemu:///system. The OCR cases run only when VIRTMANAGER_OCR_MODELS names the directory
+# scripts/fetch-ocr-models.sh fills; they define t-inst and t-win from the XML files here.
 set -uo pipefail
 
 readonly URI=qemu:///system
@@ -13,14 +14,18 @@ REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd) || exit 1
 readonly REPO
 readonly TESTBED=${REPO}/tests/testbed
 readonly BIN=${REPO}/target/release/virtmanager-mcp
+readonly OCR_MODELS=${VIRTMANAGER_OCR_MODELS:-}
 
 # Units run in this order; each lists the case files it runs, in order.
 readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
-  templates-outside-disk console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing
+  screen-no-models templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
+  templates-outside-disk console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
+  screen-installer screen-windows
 )
+# Memory the host must have available before an OCR case starts its VM, in MiB: the VM's own plus 1 GiB.
+declare -A SCREEN_VM_MIB=(["t-inst"]=2048 ["t-win"]=5120)
 declare -A MEMBERS=(
   ["templates-reset"]="templates-reset templates-reset-missing"
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
@@ -65,12 +70,13 @@ record() { # case status [reason]
   return 0
 }
 
-# Runs one case file under --check, logging to $WORK/logs/<case>.{out,err}.
+# Runs one case file under --check, logging to $WORK/logs/<case>.{out,err}. A relative config is in tests/testbed.
 run_case() { # case config
   local name=$1 config=$2
+  [[ ${config} == /* ]] || config=${TESTBED}/${config}
   echo "== ${name}"
   if python3 -I "${TESTBED}/mcp_call.py" --check "${TESTBED}/cases/${name}.json" -- \
-    "${BIN}" --config "${TESTBED}/${config}" > "${WORK}/logs/${name}.out" 2> "${WORK}/logs/${name}.err"; then
+    "${BIN}" --config "${config}" > "${WORK}/logs/${name}.out" 2> "${WORK}/logs/${name}.err"; then
     record "${name}" passed
   else
     record "${name}" failed "$(grep -c '^CHECK FAILED: call' "${WORK}/logs/${name}.out") failed check(s), see ${WORK}/logs/${name}.out"
@@ -244,6 +250,51 @@ unit_owrt() { # case
   fi
 }
 
+# Writes $WORK/config-screen.toml: config-templates.toml with t-inst and t-win allowed and powered, and the OCR models.
+write_screen_config() {
+  local file=${WORK}/config-screen.toml dir=${OCR_MODELS//\\/\\\\}
+  dir=${dir//\"/\\\"}
+  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-inst", "t-win", /' -e 's/^power_vms = \[/power_vms = ["t-inst", "t-win", /' \
+    "${TESTBED}/config-templates.toml" > "${file}" || return 1
+  [[ $(grep -c '^\(allowed\|power\)_vms = \["t-inst", "t-win", ' "${file}") == 2 ]] || return 1
+  printf '\n[display]\nocr_models = "%s"\n' "${dir}" >> "${file}"
+}
+
+avail_mib() { awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo; }
+
+# Defines VM $1 from its XML here unless it exists, with t-inst's empty 8 GiB disk, and leaves it shut off.
+screen_vm_ready() {
+  if [[ $1 == t-inst ]] && ! has_vol t-inst.qcow2; then
+    vsh vol-create-as "${POOL}" t-inst.qcow2 8G --format qcow2 > /dev/null || return 1
+  fi
+  vsh dominfo "$1" > /dev/null 2>&1 || vsh define "${TESTBED}/$1.xml" > /dev/null || return 1
+  is_state "$1" running && vsh destroy "$1" > /dev/null
+  wait_until 30 is_state "$1" "shut off"
+}
+
+unit_screen() { # case vm
+  local need=${SCREEN_VM_MIB[$2]} avail
+  if [[ -z ${OCR_MODELS} ]]; then
+    record "$1" skipped "VIRTMANAGER_OCR_MODELS is not set, so the server has no OCR models"
+    return
+  fi
+  [[ -f ${WORK}/config-screen.toml ]] || {
+    record "$1" failed "could not write ${WORK}/config-screen.toml"
+    return
+  }
+  screen_vm_ready "$2" || {
+    record "$1" failed "could not define $2 or shut it off"
+    return
+  }
+  avail=$(avail_mib)
+  ((avail >= need)) || {
+    record "$1" failed "$2 needs ${need} MiB of available memory; the host has ${avail} MiB"
+    return
+  }
+  run_case "$1" "${WORK}/config-screen.toml"
+  is_state "$2" "shut off" || vsh destroy "$2" > /dev/null || record "$1" failed "could not shut $2 off"
+}
+
 run_unit() {
   case $1 in
     console-stall) unit_console_stall ;;
@@ -254,9 +305,12 @@ run_unit() {
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;
     jobs) unit_jobs ;;
-    owrt-*) unit_owrt "$1" ;;
+    owrt-* | mouse-refusals) unit_owrt "$1" ;;
+    screen-installer) unit_screen "$1" t-inst ;;
+    screen-windows) unit_screen "$1" t-win ;;
     smoke | guest-agent-and-snapshots | lifecycle-guardrails | write-file-mode | console-reopen | \
-      start-vm-waits-for-agent | console-closed-on-power-off | screenshot-region | screen-settled) unit_trial "$1" ;;
+      start-vm-waits-for-agent | console-closed-on-power-off | screenshot-region | screen-settled | \
+      screen-no-models) unit_trial "$1" ;;
     *) run_case "$1" config-templates.toml ;;
   esac
 }
@@ -319,6 +373,11 @@ main() {
   trap 'exit 130' INT TERM
   cd -- "${WORK}" || exit 1
   echo "logs: ${WORK}/logs"
+  if [[ -n ${OCR_MODELS} ]]; then
+    write_screen_config || rm -f -- "${WORK:?}/config-screen.toml"
+  else
+    echo "VIRTMANAGER_OCR_MODELS is not set: the OCR cases are skipped"
+  fi
 
   for unit in "${units[@]}"; do
     run_unit "${unit}"

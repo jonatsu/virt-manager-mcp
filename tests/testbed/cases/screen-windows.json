@@ -1,0 +1,110 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-win",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-win': started"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Press any key to boot from CD"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"Press any key to boot from CD\""
+      ]
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-win",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 1
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-win",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 1
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-win",
+      "keys": [
+        "enter"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win",
+      "timeout_secs": 120,
+      "screenshot": true,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Windows 11 Setup"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"Windows 11 Setup\""
+      ],
+      "matches": "\"screenshot\":\\{(?=[^}]*\"width\":\\d+)(?=[^}]*\"height\":\\d+)[^}]*\\}.*\\n<image saved to shot-\\d+\\.png>$"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-win",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-win' is shut off"
+    }
+  }
+]
