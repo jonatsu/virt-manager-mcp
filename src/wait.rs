@@ -55,8 +55,9 @@ pub enum Condition {
     },
     /// The QEMU guest agent answers.
     Agent,
-    /// A shell command run through the guest agent exits 0. It runs once, and runs again after a non-zero exit; it
-    /// is never killed. Linux guests only. Refused in read-only mode.
+    /// A shell command run through the guest agent exits 0. It runs again after a non-zero exit, and may also run
+    /// again when a slow agent's reply to the start is lost; it is never killed. Linux guests only. Refused in
+    /// read-only mode.
     Command { command: String },
     /// A job has exited, or has ended without writing its status. Linux guests only.
     JobDone {
@@ -402,21 +403,25 @@ pub fn run(
         if env.cancelled() {
             return Ok(Outcome::Cancelled);
         }
-        match vm.take() {
-            Some(Ok(None)) => {
-                return Ok(Outcome::Closed {
-                    index: None,
-                    reason: "the VM is not running".into(),
-                });
+        let stopped = match vm.take() {
+            Some(Ok(None)) => true,
+            Some(Ok(id)) => {
+                domain_id = id;
+                false
             }
-            Some(Ok(id)) => domain_id = id,
-            Some(Err(_)) | None => {}
+            Some(Err(_)) | None => false,
+        };
+        if !stopped {
+            vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id());
         }
-        vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id());
         // One scan serves every console condition, so all of them see the same output in a poll.
         let scan = console_scan(env, &states);
         let mut closed = None;
         for (index, state) in states.iter_mut().enumerate() {
+            // After a stop, console conditions still get one look at the output stored before it.
+            if stopped && !matches!(state, State::Console(_)) {
+                continue;
+            }
             match state.poll(scan.as_ref(), &guest, now, deadline, domain_id)? {
                 Poll::Pending => {}
                 Poll::Hit {
@@ -439,6 +444,12 @@ pub fn run(
                     closed.get_or_insert((index, reason));
                 }
             }
+        }
+        if stopped {
+            return Ok(Outcome::Closed {
+                index: None,
+                reason: "the VM is not running".into(),
+            });
         }
         if let Some((index, reason)) = closed {
             return Ok(Outcome::Closed {
@@ -757,16 +768,31 @@ struct ConsoleState {
 impl ConsoleState {
     /// Matches this condition against `scan`, a scan that starts at or before `self.from`.
     fn poll(&mut self, scan: &Result<SessionScan>, domain_id: Option<u32>) -> Poll {
-        if domain_id.is_some() && self.domain_id != domain_id {
+        // The scan names the pinned generation, so a console reopened during the wait fails it too.
+        let scan = match scan {
+            Ok(s) => s,
+            Err(e) => {
+                return Poll::Closed(format!("the console session ended or was reopened: {e:#}"));
+            }
+        };
+        // Output stored before a restart still counts, so match first.
+        let restarted = domain_id.is_some() && self.domain_id != domain_id;
+        if let Some(hit) = self.find_new(scan) {
+            return hit;
+        }
+        if restarted {
             return Poll::Closed(
                 "the VM restarted after console_open; open the console again".into(),
             );
         }
-        let scan = match scan {
-            Ok(s) if s.generation == self.generation => s,
-            Ok(_) => return Poll::Closed("the console was reopened during the wait".into()),
-            Err(e) => return Poll::Closed(format!("the console session ended: {e:#}")),
-        };
+        match &scan.scan.closed {
+            Some(reason) => Poll::Closed(format!("the console session closed: {reason}")),
+            None => Poll::Pending,
+        }
+    }
+
+    /// Matches the output that arrived since the last scan, and moves the resume point.
+    fn find_new(&mut self, scan: &SessionScan) -> Option<Poll> {
         // When the scrollback dropped output, match from what it still holds.
         self.from = self.from.max(scan.scan.from);
         let skip = usize::try_from(self.from - scan.scan.from).unwrap_or(usize::MAX);
@@ -780,17 +806,14 @@ impl ConsoleState {
                     .rposition(|&b| b == b'\n')
                     .map_or(0, |p| p as u64 + 1);
             if let Some((next, text)) = find(&self.regex, self.strip_ansi, self.from, data) {
-                return Poll::Hit {
+                return Some(Poll::Hit {
                     text,
                     next: Some(next),
                     generation: Some(self.generation),
-                };
+                });
             }
         }
-        match &scan.scan.closed {
-            Some(reason) => Poll::Closed(format!("the console session closed: {reason}")),
-            None => Poll::Pending,
-        }
+        None
     }
 }
 
@@ -988,6 +1011,8 @@ mod tests {
         generation: u64,
         session_domain: Option<u32>,
         closed_at: Option<Duration>,
+        /// When set, the console is reopened at this time and takes the next generation.
+        reopened_at: Option<Duration>,
         cancel_at: Option<Duration>,
         progress: Mutex<Vec<Duration>>,
     }
@@ -1003,6 +1028,7 @@ mod tests {
                 generation: 7,
                 session_domain: Some(1),
                 closed_at: None,
+                reopened_at: None,
                 cancel_at: None,
                 progress: Mutex::default(),
             }
@@ -1034,7 +1060,12 @@ mod tests {
         }
 
         fn scan(&self, since: Option<u64>, generation: Option<u64>) -> Result<SessionScan> {
-            if generation.is_some_and(|g| g != self.generation) {
+            let current = if self.reopened_at.is_some_and(|at| at <= self.elapsed()) {
+                self.generation + 1
+            } else {
+                self.generation
+            };
+            if generation.is_some_and(|g| g != current) {
                 bail!("offset from an earlier console session");
             }
             let data = self.buffer();
@@ -1051,7 +1082,7 @@ mod tests {
                     from,
                     closed,
                 },
-                generation: self.generation,
+                generation: current,
                 domain_id: self.session_domain,
             })
         }
@@ -1309,6 +1340,34 @@ mod tests {
         let (o, waited) = waiter.join().unwrap();
         assert!(matches!(o, Outcome::Closed { index: None, .. }), "{o:?}");
         assert!(waited < Duration::from_secs(30), "{waited:?}");
+    }
+
+    #[test]
+    fn output_stored_before_a_stop_or_restart_still_matches() {
+        // The stop and the last line reach the wait in the same poll.
+        let env = FakeEnv::new(vec![(ms(10), b"reboot: Power down\n")]);
+        let stopped = FakeGuest::new();
+        stopped.domain.store(0, Ordering::Relaxed);
+        let o = wait(&env, stopped, &[console("Power down")], 5);
+        assert_eq!(matched(&o).1, "Power down");
+        // The same holds for a restart.
+        let env = FakeEnv::new(vec![(ms(0), b"bye\n")]);
+        let restarted = FakeGuest::new();
+        restarted.domain.store(2, Ordering::Relaxed);
+        let o = wait(&env, restarted, &[console("bye")], 5);
+        assert_eq!(matched(&o).1, "bye");
+    }
+
+    #[test]
+    fn a_console_reopened_during_the_wait_ends_it() {
+        let mut env = FakeEnv::new(vec![]);
+        env.reopened_at = Some(ms(100));
+        let o = wait(&env, FakeGuest::new(), &[console("login:")], 5);
+        assert!(
+            matches!(o, Outcome::Closed { index: Some(0), ref reason } if reason.contains("reopened")),
+            "{o:?}"
+        );
+        assert!(env.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

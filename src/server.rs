@@ -264,7 +264,7 @@ pub struct JobStopParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct WaitForParams {
     pub vm: String,
-    /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks console conditions once and is refused with agent or command conditions.
+    /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks console conditions once and is refused with agent, command and job conditions.
     pub timeout_secs: Option<u64>,
     /// What to wait for, at most 16; the call returns on the first that holds.
     pub conditions: Vec<wait::Condition>,
@@ -1590,6 +1590,40 @@ mod tests {
         let writable = hidden_tools(&Config::default());
         for tool in ["job_start", "job_stop", "job_read", "job_list", "wait_for"] {
             assert!(!writable.contains(&tool), "{tool} is hidden");
+        }
+    }
+
+    #[test]
+    fn read_only_hides_management_tools_even_when_enabled() {
+        let mut config: Config = toml::from_str(
+            r#"
+            [manage]
+            create = true
+            delete = true
+            reconfigure = true
+            snapshots = true
+            [manage.templates.debian]
+            volume = "tpl.qcow2"
+            "#,
+        )
+        .unwrap();
+        let managed = [
+            "create_vm",
+            "create_vm_from_template",
+            "reset_vm",
+            "delete_vm",
+            "configure_vm",
+            "snapshot_create",
+            "snapshot_revert",
+        ];
+        let writable = hidden_tools(&config);
+        for tool in managed {
+            assert!(!writable.contains(&tool), "{tool} is hidden");
+        }
+        config.read_only = true;
+        let hidden = hidden_tools(&config);
+        for tool in managed {
+            assert!(hidden.contains(&tool), "{tool} stays visible");
         }
     }
 }

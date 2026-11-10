@@ -39,7 +39,11 @@ fn job_dir(id: &Uuid) -> String {
 
 /// Refuses guests other than Linux; Windows jobs come later.
 pub fn require_linux(agent: &Agent) -> Result<()> {
-    match agent.os()? {
+    linux_only(agent.os()?)
+}
+
+fn linux_only(os: GuestOs) -> Result<()> {
+    match os {
         GuestOs::Linux => Ok(()),
         GuestOs::Windows => bail!(
             "jobs are not available for Windows guests yet; they come with Windows job support (live-interaction \
@@ -432,6 +436,26 @@ mod tests {
         assert_eq!((listed[0].state, listed[0].exit_code), ("exited", Some(0)));
         assert_eq!(listed[1].state, "running");
         assert_eq!(listed[2].state, "ended without status");
+    }
+
+    #[test]
+    fn jobs_refuse_a_windows_guest_naming_run_3() {
+        assert!(linux_only(GuestOs::Linux).is_ok());
+        let error = linux_only(GuestOs::Windows).unwrap_err().to_string();
+        assert!(error.contains("run 3"), "{error}");
+    }
+
+    #[test]
+    fn the_launcher_falls_back_to_setsid_and_discards_a_job_it_cannot_start() {
+        let systemd = LAUNCHER.find("systemd-run --quiet").unwrap();
+        let setsid = LAUNCHER
+            .find("setsid /bin/sh \"${dir}/run\" \"${dir}\"")
+            .unwrap();
+        let failed = LAUNCHER.find("failed: neither").unwrap();
+        assert!(systemd < setsid && setsid < failed);
+        // The fallback runs only when systemd is absent or systemd-run fails, and a failed start leaves no directory.
+        assert!(LAUNCHER.contains("if [ -d /run/systemd/system ] && command -v systemd-run"));
+        assert!(LAUNCHER[setsid..failed].contains("discard"));
     }
 
     #[test]
