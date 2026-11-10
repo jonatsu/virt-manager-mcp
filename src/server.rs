@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::agent::{self, Agent, ExecSpec, GuestOs, powershell};
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{display, fsops, manage};
+use crate::{ansi, display, fsops, manage};
 
 /// Tools hidden in read-only mode.
 const MUTATING_TOOLS: &[&str] = &[
@@ -783,10 +783,11 @@ impl VirtServer {
                 p.max_bytes.unwrap_or(64 * 1024),
                 wait,
             )?;
-            let mut text = String::from_utf8_lossy(&r.data).into_owned();
-            if p.strip_ansi.unwrap_or(true) {
-                text = strip_ansi(&text);
-            }
+            let text = if p.strip_ansi.unwrap_or(true) {
+                String::from_utf8_lossy(&ansi::strip_final(&r.data)).into_owned()
+            } else {
+                String::from_utf8_lossy(&r.data).into_owned()
+            };
             let meta = json!({
                 "next": r.next,
                 "generation": r.generation,
@@ -1358,52 +1359,4 @@ fn shell_spec(os: GuestOs, shell: Shell, cmd: &str) -> Result<ExecSpec> {
 
 fn json_block<T: serde::Serialize>(v: &T) -> Result<ContentBlock> {
     Ok(ContentBlock::text(serde_json::to_string_pretty(v)?))
-}
-
-/// Removes ANSI/VT100 escape sequences and stray carriage returns.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => match chars.next() {
-                // CSI: ESC [ params... final byte in @..~
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('@'..='~').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                // OSC: ESC ] ... BEL or ESC \
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
-                            break;
-                        }
-                    }
-                }
-                // Charset selection etc.: ESC ( X
-                Some('(' | ')') => {
-                    chars.next();
-                }
-                _ => {}
-            },
-            '\r' if chars.peek() == Some(&'\n') => {}
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strips_ansi() {
-        assert_eq!(strip_ansi("\x1b[1;32mok\x1b[0m\r\n"), "ok\n");
-        assert_eq!(strip_ansi("\x1b]0;title\x07$ "), "$ ");
-        assert_eq!(strip_ansi("\x1b(Bplain"), "plain");
-    }
 }

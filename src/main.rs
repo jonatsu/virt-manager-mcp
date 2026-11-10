@@ -1,4 +1,5 @@
 mod agent;
+mod ansi;
 mod config;
 mod console;
 mod display;
