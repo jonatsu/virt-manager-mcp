@@ -126,8 +126,9 @@ max_disk_gib = 32
   running server checks once a minute, and `virtmanager-mcp sweep` does one check, for a systemd timer
   when no server runs. `reset_vm` returns such a VM to the template's state: new disks, no snapshots,
   same name, MAC address, hardware and expiry. `list_templates` shows the usable templates; one whose
-  volume is missing, not qcow2, attached to any VM, or whose user data is unreadable, is hidden, and
-  the server log says why. Never change or delete a template volume while VMs use it.
+  volume is missing, not qcow2 or attached to any VM, or whose user data is unreadable, does not start
+  with a `#cloud-config` line or exceeds 1 MiB, is hidden, and the server log says why. Never change
+  or delete a template volume while VMs use it.
 
   ```toml
   [manage]

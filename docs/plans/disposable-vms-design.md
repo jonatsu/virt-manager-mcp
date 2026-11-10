@@ -31,8 +31,9 @@ configurable. The rest are recommendations:
 - **Reset replaces the disks and keeps the domain,** so the VM's name, UUID and MAC address survive. Volumes carry
   the generation in their names (`<name>-g<N>.qcow2`, `<name>-g<N>-seed.img`), so a reset builds the new disks before
   it removes the old ones.
-- **Names of VMs from templates are hostnames:** lowercase letters, digits and hyphens, starting with a letter, at most
-  63 characters. The name becomes the guest's hostname unchanged.
+- **Names of VMs from templates are hostnames:** lowercase letters, digits and hyphens, starting with a letter, not
+  ending with a hyphen, at most 63 characters. The name becomes the guest's hostname unchanged. Template names follow
+  the same rule.
 - **Expiry by a sweep in every server process,** at start and once a minute, plus a `virtmanager-mcp sweep` command for
   an optional systemd timer. No new daemon. `expires` holds UTC epoch seconds, and `manage.max_lifetime_minutes`
   (default 1440) caps what an agent may ask for; a longer lifetime is refused.

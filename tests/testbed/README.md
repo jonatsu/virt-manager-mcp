@@ -40,7 +40,8 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-expiry.json` | `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without one; after 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
 | `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
 
-`templates-reset.json` needs `t-listed`, a VM defined with `virsh` and never started, and `tpl-scratch.qcow2`, made with
+`templates-reset.json` and `templates-expiry.json` need `t-listed`, a VM defined with `virsh` and never started.
+`templates-reset.json` also needs `tpl-scratch.qcow2`, made with
 `virsh vol-clone --pool agent-vms tpl-debian13.qcow2 tpl-scratch.qcow2`.
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the

@@ -83,7 +83,7 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
 
 ## Follow-ups
 
-The conformance reviews of the second autopilot run found these. None blocks the server's use.
+The conformance reviews of the second and third autopilot runs found these. None blocks the server's use.
 
 1. **Done: a stale console session could not be replaced.** After `stop_vm` keeps a session, a stream that never
    reports its end left `console_open` answering "already open". `force: true` now replaces this server's own
@@ -101,6 +101,15 @@ The conformance reviews of the second autopilot run found these. None blocks the
 6. **Convert the existing documents to the short, plain style.** `AGENTS.md` now asks for short, plain designs. The
    user wants this roadmap, the brainstorm draft, the test-bed README and the research notes brought into the same
    style; the research copies keep their copied text and change only their own notes.
+7. **An expiry hides a failed volume deletion.** `expire` in `src/manage.rs` puts a failed volume deletion only in its
+   "deleted" log line, still undefines the VM and counts it as deleted, so `virtmanager-mcp sweep` exits 0 and no later
+   sweep retries the orphaned volume. Count it as a failure and keep the domain, so the next sweep retries.
+8. **A refused `reset_vm` still closes the console.** `reset_vm` in `src/server.rs` closes the console session before
+   `manage::reset` runs its checks, although a failed check should change nothing. Close it only once the reset has
+   passed its checks.
+9. **No test shows reset and expiry leaving a disk outside `disk_pool`.** Both reuse `pool_volume`, so the guardrail
+   holds on reading the code. A test-bed step that attaches an out-of-pool file with `virsh`, then resets or expires
+   the VM, would show it.
 
 ## Outcomes
 
@@ -148,8 +157,8 @@ Open questions for the designs:
 ## Current goal
 
 The user armed an autopilot run on 2026-11-10 over outcome 1. It landed outcome 1 in `aacafce` to `b738fee`, with
-the evidence for each criterion in the plan's execution record. The earlier runs, over the baseline and the defects,
-are done.
+the evidence for each criterion in the plan's execution record, and was re-verified in full at `aa44f14`. The
+earlier runs, over the baseline and the defects, are done.
 
 - **Objective:** disposable VMs from operator templates work as
   [`disposable-vms-design.md`](disposable-vms-design.md) describes, built in the order of
