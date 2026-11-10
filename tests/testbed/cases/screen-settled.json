@@ -1,0 +1,57 @@
+[
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"screen_settled\"",
+        "\"screen\":0"
+      ],
+      "absent": "screenshot"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "timeout_secs": 20,
+      "screenshot": true,
+      "conditions": [
+        {
+          "kind": "screen_settled",
+          "settle_secs": 1
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\"",
+      "matches": "\"screenshot\":\\{(?=[^}]*\"width\":\\d+)(?=[^}]*\"height\":\\d+)[^}]*\\}.*\\n<image saved to shot-\\d+\\.png>$"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "timeout_secs": 20,
+      "conditions": [
+        {
+          "kind": "screen_settled",
+          "settle_secs": 0.1
+        }
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "settle_secs must be at least 0.5"
+    }
+  }
+]
