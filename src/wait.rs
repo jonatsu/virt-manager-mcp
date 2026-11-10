@@ -1506,6 +1506,8 @@ mod tests {
         reopened_at: Option<Duration>,
         cancel_at: Option<Duration>,
         progress: Mutex<Vec<Duration>>,
+        /// When set, each sleep also lasts as long in real time, for probes that do real work, such as encoding.
+        real_sleep: bool,
     }
 
     impl FakeEnv {
@@ -1522,6 +1524,7 @@ mod tests {
                 reopened_at: None,
                 cancel_at: None,
                 progress: Mutex::default(),
+                real_sleep: false,
             }
         }
 
@@ -1547,7 +1550,11 @@ mod tests {
         fn sleep(&self, d: Duration) {
             *self.clock.lock().unwrap() += d;
             // Lets probe threads, which return at once, finish within one poll.
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(if self.real_sleep {
+                d
+            } else {
+                Duration::from_millis(1)
+            });
         }
 
         fn scan(&self, since: Option<u64>, generation: Option<u64>) -> Result<SessionScan> {
@@ -2102,10 +2109,13 @@ mod tests {
 
     #[test]
     fn a_console_match_attaches_a_downscaled_screenshot_of_head_0() {
-        // A thin frame: the fake clock runs about 30 times faster than real time, so a full one would take longer than
-        // 2 s of it to encode in a debug build.
+        // The clock runs in real time, because the encoding on the probe thread takes real time, which under a loaded
+        // test run can exceed 2 s of the usual fast clock. A thin frame keeps that time short.
         let guest = Arc::new(FakeGuest::showing(vec![solid(1600, 90, 3)]));
-        let env = FakeEnv::new(vec![(ms(200), b"login: ")]);
+        let env = FakeEnv {
+            real_sleep: true,
+            ..FakeEnv::new(vec![(ms(200), b"login: ")])
+        };
         let (o, attachment) = wait_and_attach(&env, &guest, &[console("login:")]);
         assert_eq!(matched(&o).0, 0);
         let Some(Attachment::Image {
