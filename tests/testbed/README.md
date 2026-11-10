@@ -47,6 +47,20 @@ The template cases below run with `config-templates.toml`. They need the templat
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
 `Password:` prompt and a root shell prompt. It leaves root logged in on `ttyS0`; send `exit` to log out.
 
+### A failed volume deletion during expiry (needs root)
+
+The sweep keeps a VM whose volume it cannot delete, so the next sweep retries it. Producing that failure needs root,
+so run this check by hand, from the repository root:
+
+1. Run `templates-expiry-command.json`. It creates `t-exp2` with a 1-minute lifetime and an attached disk.
+2. Make the attached disk undeletable: `sudo chattr +i /var/lib/libvirt/images/agent-vms/t-exp2-vdc.qcow2`.
+3. Wait 70 s, then run `target/release/virtmanager-mcp --config tests/testbed/config-templates.toml sweep`. It exits 1,
+   and its log says it could not delete `t-exp2-vdc.qcow2` and keeps `t-exp2`.
+4. Check that `virsh -c qemu:///system dominfo t-exp2` still finds the VM.
+5. Make the disk deletable again: `sudo chattr -i /var/lib/libvirt/images/agent-vms/t-exp2-vdc.qcow2`.
+6. Run the sweep command again. It deletes `t-exp2` and exits 0, and `virsh -c qemu:///system vol-list agent-vms` lists
+   no `t-exp2` volume.
+
 ## Run a case
 
 Build the server, then run a case from a scratch directory, because the client saves screenshots as

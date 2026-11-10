@@ -732,29 +732,68 @@ pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
             .filter(|d| d.device == "disk")
             .collect();
         let pool = disk_pool(conn, m)?;
-        let mut msg = format!("expired VM '{name}' ({uuid}) deleted");
-        for d in &disks {
-            match pool_volume(conn, &pool, &m.disk_pool, d) {
-                Some(vol) => match vol.delete(0) {
-                    Ok(()) => msg.push_str(&format!("; deleted disk {}", d.source())),
-                    Err(e) => msg.push_str(&format!(
-                        "; could not delete disk {}: {}",
-                        d.source(),
-                        e.message()
-                    )),
-                },
-                None => msg.push_str(&format!(
-                    "; disk {} is not a volume in manage.disk_pool (already deleted, or outside it)",
-                    d.source()
-                )),
-            }
-        }
+        let outcomes: Vec<(String, DiskDeletion)> = disks
+            .iter()
+            .map(|d| {
+                let outcome = match pool_volume(conn, &pool, &m.disk_pool, d) {
+                    Some(vol) => match vol.delete(0) {
+                        Ok(()) => DiskDeletion::Deleted,
+                        Err(e) => DiskDeletion::Failed(e.message().to_string()),
+                    },
+                    None => DiskDeletion::NotInPool,
+                };
+                (d.source(), outcome)
+            })
+            .collect();
+        // A volume left behind keeps the domain, so the next sweep finds the VM again and retries it.
+        let msg = expiry_report(&name, uuid, &outcomes)?;
         match dom.undefine_flags(UNDEFINE_FLAGS) {
             Ok(_) => Ok(Some(msg)),
             Err(e) if gone(&e) => Ok(None),
             Err(e) => bail!("cannot undefine '{name}': {}", e.message()),
         }
     })
+}
+
+/// What happened to one disk of an expiring VM.
+#[derive(Debug, PartialEq, Eq)]
+enum DiskDeletion {
+    Deleted,
+    /// Not a volume in `manage.disk_pool`: already deleted, or outside it. It is left in place.
+    NotInPool,
+    Failed(String),
+}
+
+/// The log line for an expiry whose disks fared as `outcomes`, given as (source path, outcome) pairs.
+///
+/// # Errors
+///
+/// Fails when any pool volume could not be deleted, so the caller keeps the domain for the next sweep to retry.
+fn expiry_report(name: &str, uuid: &str, outcomes: &[(String, DiskDeletion)]) -> Result<String> {
+    let failed: Vec<String> = outcomes
+        .iter()
+        .filter_map(|(source, o)| match o {
+            DiskDeletion::Failed(why) => Some(format!("{source}: {why}")),
+            _ => None,
+        })
+        .collect();
+    if !failed.is_empty() {
+        bail!(
+            "could not delete disk {}; VM '{name}' is kept so the next sweep retries it",
+            failed.join(", disk ")
+        );
+    }
+    let mut msg = format!("expired VM '{name}' ({uuid}) deleted");
+    for (source, o) in outcomes {
+        match o {
+            DiskDeletion::Deleted => msg.push_str(&format!("; deleted disk {source}")),
+            DiskDeletion::NotInPool => msg.push_str(&format!(
+                "; disk {source} is not a volume in manage.disk_pool (already deleted, or outside it) and was left in place"
+            )),
+            DiskDeletion::Failed(_) => {}
+        }
+    }
+    Ok(msg)
 }
 
 /// Whether the sweep acts on a VM with this owner element: only a VM this server made, with an expiry that has
@@ -1925,6 +1964,40 @@ mod tests {
             !should_expire(Some(&owned(Some(1000))), 100),
             "a VM recreated with a later expiry"
         );
+    }
+
+    #[test]
+    fn expiry_with_a_failed_volume_deletion_keeps_the_vm() {
+        let outcomes = [
+            ("/pool/t-g1.qcow2".to_string(), DiskDeletion::Deleted),
+            (
+                "/pool/t-vdc.qcow2".to_string(),
+                DiskDeletion::Failed("Permission denied".into()),
+            ),
+        ];
+        let err = expiry_report("t", "u-1", &outcomes)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("/pool/t-vdc.qcow2: Permission denied"),
+            "{err}"
+        );
+        assert!(
+            err.contains("is kept so the next sweep retries it"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn expiry_report_names_deleted_and_outside_disks() {
+        let outcomes = [
+            ("/pool/t-g1.qcow2".to_string(), DiskDeletion::Deleted),
+            ("/home/u/extra.img".to_string(), DiskDeletion::NotInPool),
+        ];
+        let msg = expiry_report("t", "u-1", &outcomes).unwrap();
+        assert!(msg.starts_with("expired VM 't' (u-1) deleted; deleted disk /pool/t-g1.qcow2"));
+        assert!(msg.contains("disk /home/u/extra.img is not a volume in manage.disk_pool"));
+        assert!(msg.ends_with("left in place"));
     }
 
     #[test]

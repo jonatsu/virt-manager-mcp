@@ -101,9 +101,9 @@ The conformance reviews of the second and third autopilot runs found these. None
 6. **Convert the existing documents to the short, plain style.** `AGENTS.md` asks for short, plain designs. Bring this
    roadmap, the brainstorm draft, the test-bed README and the research notes into the same style; the research copies
    keep their copied text and change only their own notes.
-7. **An expiry hides a failed volume deletion.** `expire` in `src/manage.rs` puts a failed volume deletion only in its
-   "deleted" log line, still undefines the VM and counts it as deleted, so `virtmanager-mcp sweep` exits 0 and no later
-   sweep retries the orphaned volume. Count it as a failure and keep the domain, so the next sweep retries.
+7. **Done: an expiry no longer hides a failed volume deletion.** A volume that cannot be deleted keeps the domain, the
+   expiry counts as failed so `virtmanager-mcp sweep` exits non-zero, and the next sweep retries it. Unit tests cover
+   the decision; producing the failure needs root, so the test-bed README lists the manual check.
 8. **A refused `reset_vm` still closes the console.** `reset_vm` in `src/server.rs` closes the console session before
    `manage::reset` runs its checks, although a failed check should change nothing. Close it only once the reset has
    passed its checks.
