@@ -4,12 +4,18 @@
     "args": {
       "vm": "t-owrt",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-owrt': started"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "t-owrt"
+    },
+    "expect": {
+      "matches": "console for 't-owrt' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -23,6 +29,9 @@
     "args": {
       "vm": "t-owrt",
       "text": ""
+    },
+    "expect": {
+      "contains": "sent 1 bytes"
     }
   },
   {
@@ -32,12 +41,21 @@
       "since": 0,
       "wait_ms": 3000,
       "max_bytes": 300000
+    },
+    "expect": {
+      "contains": [
+        "Please press Enter to activate this console",
+        "root@OpenWrt:~#"
+      ]
     }
   },
   {
     "tool": "console_close",
     "args": {
       "vm": "t-owrt"
+    },
+    "expect": {
+      "contains": "console closed"
     }
   },
   {
@@ -45,6 +63,9 @@
     "args": {
       "vm": "t-owrt",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-owrt' is shut off"
     }
   }
 ]

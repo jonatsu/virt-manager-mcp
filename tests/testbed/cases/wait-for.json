@@ -5,12 +5,19 @@
       "name": "t-w",
       "template": "debian13",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "created VM 't-w' from template 'debian13'",
+      "absent": "guest agent is responding"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "t-w"
+    },
+    "expect": {
+      "matches": "console for 't-w' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -22,6 +29,12 @@
           "kind": "agent"
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"kind\":\"agent\",\"result\":\"matched\"",
+        "the guest agent answered"
+      ]
     }
   },
   {
@@ -29,6 +42,9 @@
     "args": {
       "vm": "t-w",
       "text": ""
+    },
+    "expect": {
+      "contains": "sent 1 bytes"
     }
   },
   {
@@ -41,6 +57,9 @@
           "pattern": "login:"
         }
       ]
+    },
+    "expect": {
+      "matches": "\"generation\":\\d+,\"index\":0,\"kind\":\"console\",\"next\":\\d+,\"result\":\"matched\",\"text\":\"login:\""
     }
   },
   {
@@ -48,6 +67,9 @@
     "args": {
       "vm": "t-w",
       "max_bytes": 200
+    },
+    "expect": {
+      "contains": "t-w login:"
     }
   },
   {
@@ -61,6 +83,9 @@
           "pattern": "login:"
         }
       ]
+    },
+    "expect": {
+      "matches": "\"result\":\"timed_out\",\"resume\":\\[\\{\"generation\":\\d+,\"index\":0,\"since\":\\d+\\}\\]"
     }
   },
   {
@@ -78,6 +103,9 @@
           "command": "test -e /tmp/ready"
         }
       ]
+    },
+    "expect": {
+      "matches": "\"commands\":\\[\\{\"index\":1,\"last_exit_code\":1,.*\"result\":\"timed_out\",\"resume\":\\[\\{\"generation\":\\d+,\"index\":0,\"since\":\\d+\\}\\]"
     }
   },
   {
@@ -85,6 +113,9 @@
     "args": {
       "vm": "t-w",
       "command": "touch /tmp/ready; echo marker-42 > /dev/ttyS0"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
     }
   },
   {
@@ -97,6 +128,12 @@
           "kind": "command",
           "command": "test -e /tmp/ready && echo ready"
         }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"kind\":\"command\",\"result\":\"matched\"",
+        "\"text\":\"ready\\n\""
       ]
     }
   },
@@ -111,6 +148,12 @@
           "pattern": "marker-\\d+"
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"marker-42\""
+      ]
     }
   },
   {
@@ -118,6 +161,9 @@
     "args": {
       "vm": "t-w",
       "command": "nohup sh -c 'sleep 3; echo c > /proc/sysrq-trigger' >/dev/null 2>&1 &"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
     }
   },
   {
@@ -141,6 +187,13 @@
           "command": "false"
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"index\":1,\"kind\":\"console\"",
+        "\"result\":\"matched\"",
+        "\"text\":\"Kernel panic\""
+      ]
     }
   },
   {
@@ -151,6 +204,9 @@
     "args": {
       "vm": "t-w",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-w' is shut off"
     }
   },
   {
@@ -158,6 +214,9 @@
     "args": {
       "vm": "t-w",
       "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": "VM 't-w': started; guest agent is responding"
     }
   },
   {
@@ -165,6 +224,9 @@
     "args": {
       "vm": "t-w",
       "force": true
+    },
+    "expect": {
+      "matches": "console for 't-w' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -172,6 +234,9 @@
     "args": {
       "vm": "t-w",
       "command": "nohup sh -c 'sleep 5; poweroff' >/dev/null 2>&1 &"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
     }
   },
   {
@@ -187,6 +252,12 @@
           "pattern": "this never appears"
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"closed\"",
+        "console stream ended"
+      ]
     }
   },
   {
@@ -197,6 +268,9 @@
     "args": {
       "vm": "t-w",
       "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": "VM 't-w': started; guest agent is responding"
     }
   },
   {
@@ -204,6 +278,9 @@
     "args": {
       "vm": "t-w",
       "command": "nohup sh -c 'sleep 5; poweroff' >/dev/null 2>&1 &"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
     }
   },
   {
@@ -219,6 +296,12 @@
           "command": "false"
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"closed\"",
+        "the VM is not running"
+      ]
     }
   },
   {
@@ -233,6 +316,10 @@
           "kind": "agent"
         }
       ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
     }
   },
   {
@@ -245,6 +332,10 @@
           "pattern": "("
         }
       ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "bad pattern"
     }
   },
   {
@@ -252,12 +343,22 @@
     "args": {
       "vm": "t-w",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-w' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-w"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-w'",
+        "t-w-g1.qcow2",
+        "t-w-g1-seed.img"
+      ]
     }
   }
 ]

@@ -4,12 +4,18 @@
     "args": {
       "vm": "t-owrt",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-owrt': started"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "t-owrt"
+    },
+    "expect": {
+      "matches": "console for 't-owrt' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -22,6 +28,12 @@
           "pattern": "Please press Enter to activate this console"
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"Please press Enter to activate this console\""
+      ]
     }
   },
   {
@@ -29,6 +41,9 @@
     "args": {
       "vm": "t-owrt",
       "text": ""
+    },
+    "expect": {
+      "contains": "sent 1 bytes"
     }
   },
   {
@@ -41,12 +56,21 @@
           "pattern": "root@\\S+:\\S*# "
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"root@(none):~# \""
+      ]
     }
   },
   {
     "tool": "console_close",
     "args": {
       "vm": "t-owrt"
+    },
+    "expect": {
+      "contains": "console closed"
     }
   },
   {
@@ -54,6 +78,9 @@
     "args": {
       "vm": "t-owrt",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-owrt' is shut off"
     }
   }
 ]

@@ -5,12 +5,21 @@
       "name": "t-w",
       "template": "debian13",
       "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-w' from template 'debian13'",
+        "guest agent is responding"
+      ]
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "t-w"
+    },
+    "expect": {
+      "matches": "console for 't-w' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -21,6 +30,9 @@
     },
     "save": {
       "steps": "job"
+    },
+    "expect": {
+      "contains": "started with systemd-run"
     }
   },
   {
@@ -41,6 +53,9 @@
           "pattern": "Kernel panic"
         }
       ]
+    },
+    "expect": {
+      "matches": "\"index\":0,\"kind\":\"job_output\",\"next\":\\d+,\"result\":\"matched\",\"text\":\"step 3\""
     }
   },
   {
@@ -54,6 +69,9 @@
     },
     "save": {
       "short": "job"
+    },
+    "expect": {
+      "contains": "started with systemd-run"
     }
   },
   {
@@ -66,6 +84,12 @@
           "job": "${short}"
         }
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"exited with code 5\""
+      ]
     }
   },
   {
@@ -76,6 +100,9 @@
     },
     "save": {
       "long": "job"
+    },
+    "expect": {
+      "contains": "started with systemd-run"
     }
   },
   {
@@ -88,6 +115,12 @@
           "job": "${long}",
           "pattern": "step 3"
         }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"step 3\""
       ]
     }
   },
@@ -103,6 +136,10 @@
           "pattern": "never printed"
         }
       ]
+    },
+    "expect": {
+      "matches": "\"result\":\"timed_out\",\"resume\":\\[\\{\"index\":0,\"since\":\\d+\\}\\]",
+      "absent": "generation"
     }
   },
   {
@@ -115,6 +152,10 @@
           "job": "00000000-0000-4000-8000-000000000000"
         }
       ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "no job 00000000-0000-4000-8000-000000000000 in this guest"
     }
   },
   {
@@ -122,12 +163,22 @@
     "args": {
       "vm": "t-w",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-w' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-w"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-w'",
+        "t-w-g1.qcow2",
+        "t-w-g1-seed.img"
+      ]
     }
   }
 ]
