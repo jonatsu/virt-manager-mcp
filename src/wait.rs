@@ -1773,6 +1773,45 @@ mod tests {
         /// When set, each sleep also lasts as long in real time, for probes that do real work, such as encoding.
         real_sleep: bool,
         recogniser: Option<Arc<dyn Recognise>>,
+        /// When set, called in each sleep with the number of sleeps before it, after the clock moved, so a test can
+        /// hold the loop until its probes have delivered.
+        on_sleep: Option<Box<dyn Fn(u32) + Send + Sync>>,
+        sleeps: AtomicU32,
+    }
+
+    /// Counts the probe threads that have exited. A thread-local's destructor runs when its thread exits, after the
+    /// probe's closure has sent its result, so once a count is reached those results wait in their channels.
+    #[derive(Clone, Default)]
+    struct Exits(Arc<(Mutex<u32>, std::sync::Condvar)>);
+
+    struct ExitGuard(Exits);
+
+    impl Drop for ExitGuard {
+        fn drop(&mut self) {
+            let (count, changed) = &*(self.0).0;
+            *count.lock().unwrap() += 1;
+            changed.notify_all();
+        }
+    }
+
+    thread_local! {
+        static ON_EXIT: std::cell::RefCell<Option<ExitGuard>> = const { std::cell::RefCell::new(None) };
+    }
+
+    impl Exits {
+        /// Counts the current thread when it exits.
+        fn on_exit(&self) {
+            ON_EXIT.with(|guard| *guard.borrow_mut() = Some(ExitGuard(self.clone())));
+        }
+
+        /// Waits until `n` counted threads have exited.
+        fn wait_for(&self, n: u32) {
+            let (count, changed) = &*self.0;
+            let (count, timeout) = changed
+                .wait_timeout_while(count.lock().unwrap(), Duration::from_secs(10), |k| *k < n)
+                .unwrap();
+            assert!(!timeout.timed_out(), "only {} of {n} probes exited", *count);
+        }
     }
 
     impl FakeEnv {
@@ -1791,6 +1830,8 @@ mod tests {
                 progress: Mutex::default(),
                 real_sleep: false,
                 recogniser: None,
+                on_sleep: None,
+                sleeps: AtomicU32::new(0),
             }
         }
 
@@ -1815,6 +1856,9 @@ mod tests {
 
         fn sleep(&self, d: Duration) {
             *self.clock.lock().unwrap() += d;
+            if let Some(hook) = &self.on_sleep {
+                hook(self.sleeps.fetch_add(1, Ordering::SeqCst));
+            }
             // Lets probe threads, which return at once, finish within one poll.
             std::thread::sleep(if self.real_sleep {
                 d
@@ -1905,6 +1949,8 @@ mod tests {
         hold_check: Option<(u32, Mutex<Receiver<()>>)>,
         /// When set, a VM check of a stopped domain fails, as when libvirt cannot tell.
         check_fails_once_stopped: bool,
+        /// When set, counts each capture's probe thread when it exits.
+        exits: Option<Exits>,
     }
 
     impl FakeGuest {
@@ -1928,6 +1974,7 @@ mod tests {
                 checks: AtomicU32::new(0),
                 hold_check: None,
                 check_fails_once_stopped: false,
+                exits: None,
             }
         }
 
@@ -2040,6 +2087,9 @@ mod tests {
         }
 
         fn capture(&self, screen: u32) -> Result<RgbImage> {
+            if let Some(exits) = &self.exits {
+                exits.on_exit();
+            }
             if let Some(rx) = &self.capture_hang {
                 let _ = rx.lock().unwrap().recv();
             }
@@ -2732,6 +2782,8 @@ mod tests {
         hang: Option<Mutex<Receiver<()>>>,
         /// When set, every read fails.
         fails: bool,
+        /// When set, counts each read's probe thread when it exits.
+        exits: Option<Exits>,
     }
 
     impl FakeRecogniser {
@@ -2741,12 +2793,16 @@ mod tests {
                 reads: Mutex::default(),
                 hang: None,
                 fails: false,
+                exits: None,
             }
         }
     }
 
     impl Recognise for FakeRecogniser {
         fn read_lines(&self, frame: &RgbImage) -> Result<Vec<String>> {
+            if let Some(exits) = &self.exits {
+                exits.on_exit();
+            }
             if let Some(rx) = &self.hang {
                 let _ = rx.lock().unwrap().recv();
             }
@@ -2983,7 +3039,7 @@ mod tests {
     #[test]
     fn the_lowest_index_wins_between_screen_text_and_a_console_in_one_poll() {
         // The capture starts at 0, its frame arrives at 30 ms and starts a read, whose text arrives at 60 ms with the
-        // console's output.
+        // console's output. Each sleep waits for its poll's probe thread to exit, so its result is there at the next.
         for (conditions, winner) in [
             (
                 [screen_text("language"), console("login:")],
@@ -2991,9 +3047,23 @@ mod tests {
             ),
             ([console("login:"), screen_text("language")], (0, "console")),
         ] {
-            let recogniser = Arc::new(FakeRecogniser::reading(vec!["Select a language"]));
-            let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
-            let env = reading_env(vec![(POLL * 2, b"login: ")], &recogniser);
+            let exits = Exits::default();
+            let recogniser = Arc::new(FakeRecogniser {
+                exits: Some(exits.clone()),
+                ..FakeRecogniser::reading(vec!["Select a language"])
+            });
+            let guest = Arc::new(FakeGuest {
+                exits: Some(exits.clone()),
+                ..FakeGuest::showing(vec![solid(4, 4, 1)])
+            });
+            let env = FakeEnv {
+                on_sleep: Some(Box::new(move |sleeps| match sleeps {
+                    0 => exits.wait_for(1),
+                    1 => exits.wait_for(2),
+                    _ => {}
+                })),
+                ..reading_env(vec![(POLL * 2, b"login: ")], &recogniser)
+            };
             let o = wait_reading(&env, &guest, &conditions, 10).unwrap();
             let Outcome::Matched { index, kind, .. } = o else {
                 panic!("expected a match, got {o:?}")
