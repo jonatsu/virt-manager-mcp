@@ -149,9 +149,9 @@ as `ocrs` 0.12 did in the probe, and reads every string a test-bed case will wai
   name, checks the sum, and moves the file into place. It never leaves an unverified file under the final name, and
   exits non-zero on a mismatch.
 - `src/config.rs` gains `display.ocr_models`, with the rule the overview fixes.
-- `src/display.rs` gains the recogniser: the `ocrs` engine, built once from the models, running in its own 4-thread
-  pool, with the inversion of frames whose mean luminance is below one half. Until unit 5 calls it, it carries a
-  `dead_code` expectation naming unit 5.
+- `src/display.rs` gains the recogniser: the `ocrs` engine, built once from the models, running in `rten`'s shared
+  pool of 4 threads (see "OCR load" above), with the inversion of frames whose mean luminance is below one half.
+  Until unit 5 calls it, it carries a `dead_code` expectation naming unit 5.
 
 **Verification.**
 
