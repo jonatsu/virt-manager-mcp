@@ -42,9 +42,10 @@ cleanup() {
   fi
 }
 
-# Prints the SHA-256 sum of file $1.
+# Prints the SHA-256 sum of file $1. Hashing standard input keeps the file name, which sha256sum would escape when
+# it holds a backslash or newline, out of the output.
 sum_of() {
-  sum=$(sha256sum -- "$1") || return 1
+  sum=$(sha256sum < "$1") || return 1
   printf '%s\n' "${sum%% *}"
 }
 
@@ -88,12 +89,18 @@ if [ "$#" -ne 1 ] || [ -z "$1" ]; then
   exit 2
 fi
 dir=$1
+# A relative directory starting with "-" would read as an option to mktemp.
+case ${dir} in
+  /*) ;;
+  *) dir=./${dir} ;;
+esac
 
 for tool in curl sha256sum mktemp; do
   command -v "${tool}" > /dev/null 2>&1 || die "${tool} is required"
 done
 
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
