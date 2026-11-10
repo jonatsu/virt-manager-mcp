@@ -620,19 +620,28 @@ pub fn run(
                 reason,
             });
         }
-        if (failure_confirmed || now >= deadline)
-            && let Some((e, _)) = capture_failure
-        {
+        if failure_confirmed && let Some((e, _)) = capture_failure {
             return Err(e);
         }
         if now >= deadline {
-            return timed_out(&mut states);
+            return at_deadline(&mut states, capture_failure.map(|(e, _)| e));
         }
         if now >= next_progress {
             env.progress(now - start);
             next_progress = now + PROGRESS_EVERY;
         }
         env.sleep(POLL.min(deadline - now));
+    }
+}
+
+/// How a wait ends at its deadline: a match from a probe that finished after the last poll, as [`timed_out`] finds
+/// it, wins as a match in the same poll does; otherwise a capture failure no VM check has settled is returned, and
+/// without one the wait times out.
+fn at_deadline(states: &mut [State], capture_failure: Option<anyhow::Error>) -> Result<Outcome> {
+    let outcome = timed_out(states)?;
+    match (capture_failure, &outcome) {
+        (Some(e), Outcome::TimedOut { .. }) => Err(e),
+        _ => Ok(outcome),
     }
 }
 
@@ -2126,6 +2135,44 @@ mod tests {
             "{err}"
         );
         assert!(env.elapsed() < ms(1500), "{:?}", env.elapsed());
+    }
+
+    #[test]
+    fn at_the_deadline_a_late_match_wins_over_a_capture_failure() {
+        // A command condition whose run exited after the last poll, with `code`.
+        let finished = |code| {
+            let (tx, rx) = mpsc::channel();
+            tx.send(CommandStep::Exited {
+                code: Some(code),
+                output: b"ready\n".to_vec(),
+            })
+            .unwrap();
+            State::Command(CommandState {
+                command: Arc::from("test -e /tmp/ready"),
+                os_checked: true,
+                pid: Some(100),
+                last_code: None,
+                probe: Probe {
+                    inflight: Some(rx),
+                    next_at: None,
+                },
+            })
+        };
+        let failure = || Some(anyhow!("capturing display head 0: domain is not running"));
+        let o = at_deadline(&mut [finished(0)], failure()).unwrap();
+        assert_eq!(matched(&o), (0, "ready\n", None));
+        // A run that exited non-zero is no match, so the failure stands.
+        let err = at_deadline(&mut [finished(1)], failure()).unwrap_err();
+        assert!(err.to_string().contains("domain is not running"), "{err}");
+        // Without a failure the wait times out as before.
+        let o = at_deadline(&mut [finished(1)], None).unwrap();
+        assert_eq!(
+            o,
+            Outcome::TimedOut {
+                resume: vec![],
+                commands: vec![(0, None, Some(1))]
+            }
+        );
     }
 
     #[test]
