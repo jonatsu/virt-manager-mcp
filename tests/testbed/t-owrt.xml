@@ -1,0 +1,20 @@
+<!-- t-owrt: an OpenWrt x86-64 appliance whose only channel is the serial console (tests/testbed/README.md). -->
+<domain type='kvm'>
+  <name>t-owrt</name>
+  <memory unit='MiB'>256</memory>
+  <vcpu>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features><acpi/><apic/></features>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source file='/var/lib/libvirt/images/agent-vms/t-owrt.img'/>
+      <target dev='sda' bus='sata'/>
+    </disk>
+    <serial type='pty'><target type='isa-serial'/></serial>
+    <console type='pty'><target type='serial'/></console>
+  </devices>
+</domain>

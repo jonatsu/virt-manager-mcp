@@ -1,8 +1,9 @@
 # Test-bed config for VMs made from templates. trial-deb13 is deliberately absent, so the template cases cannot
-# touch it. t-listed is an unowned throwaway VM, defined with virsh, for refusal checks.
+# touch it. t-listed is an unowned throwaway VM, defined with virsh, for refusal checks; t-owrt is the serial-only
+# OpenWrt appliance (README).
 uri = "qemu:///system"
-allowed_vms = ["t-listed"]
-power_vms = ["t-listed"]
+allowed_vms = ["t-listed", "t-owrt"]
+power_vms = ["t-listed", "t-owrt"]
 share_project_dir = false
 read_only = false
 

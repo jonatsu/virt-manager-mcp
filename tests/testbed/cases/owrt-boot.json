@@ -1,0 +1,50 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-owrt",
+      "wait_for_agent_secs": 0
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-owrt"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 25
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "t-owrt",
+      "text": ""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-owrt",
+      "since": 0,
+      "wait_ms": 3000,
+      "max_bytes": 300000
+    }
+  },
+  {
+    "tool": "console_close",
+    "args": {
+      "vm": "t-owrt"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-owrt",
+      "force": true
+    }
+  }
+]
