@@ -77,6 +77,26 @@
     }
   },
   {
+    "tool": "job_read",
+    "args": {
+      "vm": "trial-deb13",
+      "job": "${job1}"
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "trial-deb13",
+      "job": "${job1}"
+    }
+  },
+  {
+    "tool": "job_list",
+    "args": {
+      "vm": "trial-deb13"
+    }
+  },
+  {
     "tool": "stop_vm",
     "args": {
       "vm": "t-w",

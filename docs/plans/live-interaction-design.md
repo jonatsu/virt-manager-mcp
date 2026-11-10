@@ -54,7 +54,7 @@ flowchart LR
 
 It takes a VM, a timeout and a list of conditions. The timeout is capped by `limits.max_wait_secs`, which must be
 above 0. A timeout of 0 checks console conditions once, and is refused with any other kind, which needs at least one
-probe. The call returns one of three results:
+probe. The call returns one of four results:
 
 - **matched:** the index and kind of the first condition that holds, the matched text, and, for console and job
   conditions, `next`, the offset just past the match. When several hold in the same poll, the lowest index wins. On
@@ -63,6 +63,7 @@ probe. The call returns one of three results:
   running to the timeout.
 - **timed out:** the result returns each console and job condition's resume point, the start of the last unfinished
   line, so the next call still matches output that arrived in between, including a prompt split across the two calls.
+- **cancelled:** the client cancelled the request; the wait stops at its next poll.
 
 Condition kinds, by run:
 
@@ -137,12 +138,12 @@ ID with its start time and the boot ID, and the exit code once the job ends.
 - Windows: `C:\ProgramData\virtmanager-mcp\jobs\<id>\`, started by a launcher sent like `exec` that redirects through
   `cmd /c` to keep the log in bytes.
 
-`job_read` returns output from an offset, up to `max_output_bytes`, the next offset, and the exit code once the job
-has ended. A job whose process is gone without an exit code, after a reboot or a kill, reads as "ended without
-status"; the start time and the boot ID guard against a reused process ID. `job_stop` signals the job's process
-group on Linux and ends its process tree from the recorded root ID on Windows. `job_list` lists the jobs in the
-guest, so an agent finds its jobs again after losing context. The jobs live in the guest, so they outlive a server
-restart, and a reset or deletion of the VM removes them.
+`job_read` returns output from an offset, up to `max_bytes` (by default `max_output_bytes`), the next offset, and
+the exit code once the job has ended. A job whose process is gone without an exit code, after a reboot or a kill,
+reads as "ended without status"; the start time and the boot ID guard against a reused process ID. `job_stop`
+signals the job's process group on Linux and ends its process tree from the recorded root ID on Windows. `job_list`
+lists the jobs in the guest, so an agent finds its jobs again after losing context. The jobs live in the guest, so
+they outlive a server restart, and a reset or deletion of the VM removes them.
 
 ## Invariants
 

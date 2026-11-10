@@ -278,7 +278,8 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   whose pauses would exceed `limits.max_wait_secs` is refused.
 - Jobs keep their files in `/var/lib/virtmanager-mcp/jobs/<id>/` in the guest and run under `systemd-run`, or
   `setsid` without systemd, so they survive an agent restart and a server restart. The launcher refuses a job
-  directory parent that is not a root-owned directory with mode 700. Windows guests are refused for now.
+  directory parent that is a symbolic link, or is not a root-owned directory with mode 700. Windows guests are
+  refused for now.
 - `copy_to_vm` streams the file in 64 KiB guest-agent requests, so the data never passes through
   the conversation. The host path is resolved (symlinks, `..`) before the `host_share_dirs`
   check, so links pointing outside a share are refused. On a Linux guest a new file gets mode 644
