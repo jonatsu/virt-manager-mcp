@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agent::{self, Agent, ExecSpec, GuestOs, powershell};
-use crate::console::Consoles;
+use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
 use crate::{display, fsops, manage};
 
@@ -229,6 +229,14 @@ pub struct ConsoleWriteParams {
     pub text: String,
     /// Append a carriage return (Enter). Default true.
     pub press_enter: Option<bool>,
+    /// Pause this many milliseconds (at most 1000) after each byte, for receivers that drop input sent back to
+    /// back, such as firmware and bootloaders.
+    pub inter_char_delay_ms: Option<u64>,
+    /// Send in chunks of this many bytes, pausing `chunk_delay_ms` after each. Use instead of
+    /// `inter_char_delay_ms`.
+    pub chunk_size: Option<usize>,
+    /// Pause after each chunk, in milliseconds (at most 1000).
+    pub chunk_delay_ms: Option<u64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -807,7 +815,14 @@ impl VirtServer {
             if p.press_enter.unwrap_or(true) {
                 data.push(b'\r');
             }
-            let (offset, generation) = s.consoles.write(&p.vm, &data)?;
+            let pacing = Pacing::from_options(
+                p.inter_char_delay_ms,
+                p.chunk_size,
+                p.chunk_delay_ms,
+                data.len(),
+                Duration::from_secs(s.hv.config.limits.max_wait_secs),
+            )?;
+            let (offset, generation) = s.consoles.write(&p.vm, &data, pacing)?;
             Ok(vec![ContentBlock::text(format!(
                 "sent {} bytes; the answer starts at offset {offset} (generation {generation})",
                 data.len()

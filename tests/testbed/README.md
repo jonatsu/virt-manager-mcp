@@ -40,6 +40,7 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-expiry.json` | `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without one; after 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
 | `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and an attached disk, and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
 | `console-generation.json` | Template config. A forced reopen starts a new generation; a read naming an old generation, or `since` above 0 without one, is refused; `snapshot_revert` of the running VM closes the console. |
+| `owrt-pacing.json` | On `t-owrt`, writes 4000 bytes to `cat` once paced (16-byte chunks, 20 ms) and once unpaced; `wc -c` and `md5sum` show both intact (`3f59f6f6…`). Pacing above 1000 ms and a paced write longer than `max_wait_secs` are refused. |
 | `owrt-boot.json` | Boots `t-owrt` with the console open and reaches its root shell; see "The OpenWrt appliance". |
 | `templates-outside-disk-setup.json`, `templates-outside-disk.json` | A reset and an expiry leave a disk file outside every pool in place; run with the steps below. |
 

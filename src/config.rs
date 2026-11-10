@@ -109,6 +109,9 @@ pub struct Limits {
     pub agent_timeout_secs: i32,
     /// Size of the per-VM serial console scrollback buffer.
     pub console_buffer_bytes: usize,
+    /// Longest a waiting call may block: `wait_for`, and a paced `console_write`. Several MCP clients cut tool
+    /// calls off at 60 s, so the default stays below that.
+    pub max_wait_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +176,7 @@ impl Default for Limits {
             max_file_read_bytes: 10 * 1024 * 1024,
             agent_timeout_secs: 10,
             console_buffer_bytes: 256 * 1024,
+            max_wait_secs: 50,
         }
     }
 }
@@ -215,6 +219,9 @@ impl Config {
         }
         if self.limits.console_buffer_bytes == 0 {
             bail!("limits.console_buffer_bytes must be positive");
+        }
+        if self.limits.max_wait_secs == 0 {
+            bail!("limits.max_wait_secs must be positive");
         }
         canonicalize_dirs(&mut self.host_share_dirs, "host_share_dirs")?;
         canonicalize_dirs(&mut self.manage.iso_dirs, "manage.iso_dirs")?;
@@ -369,6 +376,15 @@ mod tests {
         let mut config: Config = toml::from_str(text)?;
         config.validate()?;
         Ok(config)
+    }
+
+    #[test]
+    fn max_wait_defaults_below_client_cutoffs_and_refuses_zero() {
+        assert_eq!(parse("").unwrap().limits.max_wait_secs, 50);
+        let err = parse("[limits]\nmax_wait_secs = 0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_wait_secs"), "{err}");
     }
 
     #[test]

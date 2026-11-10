@@ -62,6 +62,7 @@ max_output_bytes = 1048576          # stdout/stderr cap per exec call
 max_file_read_bytes = 10485760      # read_file cap
 agent_timeout_secs = 10             # single guest agent request
 console_buffer_bytes = 262144       # serial console scrollback per VM
+max_wait_secs = 50                  # longest a wait_for or paced console_write may block
 
 [http]
 bind = "127.0.0.1:8765"

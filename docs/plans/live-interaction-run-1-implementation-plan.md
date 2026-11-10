@@ -304,8 +304,8 @@ carries each one:
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
 | 1 OpenWrt test guest | `a935abd` | OpenWrt 25.12.6 `generic-ext4-combined` image verified against the release `sha256sums`; `gunzip` exited 0; uploaded as `t-owrt.img` (126 MB) and defined from `tests/testbed/t-owrt.xml` on q35; `owrt-boot.json` showed the kernel log, "Please press Enter", the BusyBox banner and `root@OpenWrt:~#` | self-review |
-| 2 Console sessions |  |  |  |
-| 3 Console pacing |  |  |  |
+| 2 Console sessions | `d8d386f`; review notes in the unit-3 commit | 57 unit tests pass (generation rules, wait cursor, scan leaves `delivered`, scan reports `dropped`). `console-generation.json` on `t-g`: generations `…417001` then `…417002` after a forced reopen; `since 10` with generation 1 refused as an earlier session; `since 10` without a generation refused; `snapshot_revert` of the running VM closed the session and the next read said "no console open". The existing console cases on `trial-deb13` gave the same replies plus `generation` (`console-stall` reached `root@trial-deb13:~#` once run on a booted guest) | `code-reviewer` (Opus): approved. Its two minor notes are applied in the unit-3 commit: "already open" names the generation, and a failed write's error names the answer's offset and generation |
+| 3 Console pacing | this commit | 61 unit tests pass (segments, durations, option refusals at 1000 ms and at `max_wait_secs`, `max_wait_secs = 0` refused). `owrt-pacing.json` on `t-owrt`: 4000 bytes written to `cat` paced (16-byte chunks, 20 ms) and unpaced both gave `wc -c` 4000 and MD5 `3f59f6f6f02f857841c375830e5edeb1`, so unpaced input lost nothing on this guest and pacing is shown harmless; 1001 ms and a 4000 s paced write refused |  |
 | 4 `wait_for` |  |  |  |
 | 5 Linux jobs |  |  |  |
 | 6 Job conditions |  |  |  |
