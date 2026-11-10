@@ -124,9 +124,10 @@ Reviews of earlier work found these. None blocks the server's use.
     after `ESC ]` until a BEL or `ESC \` arrived, so a stray `ESC ]` from line noise stopped console waits with
     `strip_ansi` from matching. CAN or SUB now aborts an OSC sequence, and a newline, another escape sequence or
     4 KiB of body ends it, so the text after it shows.
-12. **Console conditions strip the same output once each.** Every console condition runs `ansi::strip` over its own
-    span on each poll with new output, which costs little at the default 256 KiB scrollback but grows with
-    `console_buffer_bytes` and the number of conditions. Strip once per poll and share the result.
+12. **Done: console conditions share one stripped scan.** Every console condition ran `ansi::strip` over its own span
+    on each poll with new output, a cost that grew with `console_buffer_bytes` and the number of conditions. A poll
+    now strips its scan once, on first use, and each condition matches from its own start in the result. A unit test
+    checks that this finds the same match and end offset as stripping each span alone.
 13. **Done: an expiry kept after a failed deletion keeps the boot disk.** The manual check for follow-up 7 showed the
     sweep deleting the overlay and seed before it reached the locked disk, so the VM it kept had lost its boot disk.
     The sweep now deletes disks in reverse document order, boot disk last, and stops at the first failure, so the boot

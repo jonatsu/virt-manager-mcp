@@ -5,6 +5,7 @@
 //! guest agent delays neither the console checks nor the end of the call. The loop reaches the world only through
 //! [`Env`] and [`Guest`], so tests drive it with a fake clock and fake probes.
 
+use std::cell::OnceCell;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -416,13 +417,15 @@ pub fn run(
         }
         // One scan serves every console condition, so all of them see the same output in a poll.
         let scan = console_scan(env, &states);
+        // Stripped once, on first use, for every console condition that strips escape sequences.
+        let stripped = OnceCell::new();
         let mut closed = None;
         for (index, state) in states.iter_mut().enumerate() {
             // After a stop, console conditions still get one look at the output stored before it.
             if stopped && !matches!(state, State::Console(_)) {
                 continue;
             }
-            match state.poll(scan.as_ref(), &guest, now, deadline, domain_id)? {
+            match state.poll(scan.as_ref(), &stripped, &guest, now, deadline, domain_id)? {
                 Poll::Pending => {}
                 Poll::Hit {
                     text,
@@ -595,6 +598,7 @@ impl State {
     fn poll(
         &mut self,
         scan: Option<&Result<SessionScan>>,
+        stripped: &OnceCell<ansi::Stripped>,
         guest: &Arc<dyn Guest>,
         now: Instant,
         deadline: Instant,
@@ -602,7 +606,7 @@ impl State {
     ) -> Result<Poll> {
         match self {
             State::Console(c) => Ok(match scan {
-                Some(scan) => c.poll(scan, domain_id),
+                Some(scan) => c.poll(scan, stripped, domain_id),
                 None => Poll::Pending,
             }),
             State::Agent(p) => {
@@ -766,8 +770,14 @@ struct ConsoleState {
 }
 
 impl ConsoleState {
-    /// Matches this condition against `scan`, a scan that starts at or before `self.from`.
-    fn poll(&mut self, scan: &Result<SessionScan>, domain_id: Option<u32>) -> Poll {
+    /// Matches this condition against `scan`, a scan that starts at or before `self.from`. `stripped` holds the
+    /// whole scan with escape sequences stripped, made on first use and shared by the poll's console conditions.
+    fn poll(
+        &mut self,
+        scan: &Result<SessionScan>,
+        stripped: &OnceCell<ansi::Stripped>,
+        domain_id: Option<u32>,
+    ) -> Poll {
         // The scan names the pinned generation, so a console reopened during the wait fails it too.
         let scan = match scan {
             Ok(s) => s,
@@ -777,7 +787,7 @@ impl ConsoleState {
         };
         // Output stored before a restart still counts, so match first.
         let restarted = domain_id.is_some() && self.domain_id != domain_id;
-        if let Some(hit) = self.find_new(scan) {
+        if let Some(hit) = self.find_new(scan, stripped) {
             return hit;
         }
         if restarted {
@@ -792,7 +802,11 @@ impl ConsoleState {
     }
 
     /// Matches the output that arrived since the last scan, and moves the resume point.
-    fn find_new(&mut self, scan: &SessionScan) -> Option<Poll> {
+    fn find_new(
+        &mut self,
+        scan: &SessionScan,
+        stripped: &OnceCell<ansi::Stripped>,
+    ) -> Option<Poll> {
         // When the scrollback dropped output, match from what it still holds.
         self.from = self.from.max(scan.scan.from);
         let skip = usize::try_from(self.from - scan.scan.from).unwrap_or(usize::MAX);
@@ -805,7 +819,13 @@ impl ConsoleState {
                     .iter()
                     .rposition(|&b| b == b'\n')
                     .map_or(0, |p| p as u64 + 1);
-            if let Some((next, text)) = find(&self.regex, self.strip_ansi, self.from, data) {
+            let found = if self.strip_ansi {
+                let stripped = stripped.get_or_init(|| ansi::strip(&scan.scan.data));
+                find_stripped(&self.regex, stripped, scan.scan.from, self.from)
+            } else {
+                find(&self.regex, self.from, data)
+            };
+            if let Some((next, text)) = found {
                 return Some(Poll::Hit {
                     text,
                     next: Some(next),
@@ -817,19 +837,30 @@ impl ConsoleState {
     }
 }
 
-/// Finds `regex` in `data`, which starts at raw offset `from`. Returns the raw offset just past the match and the
+/// Finds `regex` in raw `data`, which starts at raw offset `from`. Returns the raw offset just past the match and the
 /// matched text.
-fn find(regex: &Regex, strip_ansi: bool, from: u64, data: &[u8]) -> Option<(u64, String)> {
-    let (m, end) = if strip_ansi {
-        let stripped = ansi::strip(data);
-        let m = regex.find(&stripped.text)?;
-        let end = stripped.raw_end(m.end());
-        (text(m.as_bytes()), end)
+fn find(regex: &Regex, from: u64, data: &[u8]) -> Option<(u64, String)> {
+    let m = regex.find(data)?;
+    Some((from + m.end() as u64, text(m.as_bytes())))
+}
+
+/// Finds `regex` in the stripped text of a scan that starts at raw offset `scan_from`, from the first kept byte at or
+/// after raw offset `from`. Returns the raw offset just past the match and the matched text.
+fn find_stripped(
+    regex: &Regex,
+    stripped: &ansi::Stripped,
+    scan_from: u64,
+    from: u64,
+) -> Option<(u64, String)> {
+    let skip = usize::try_from(from - scan_from).unwrap_or(usize::MAX);
+    let start = stripped.origin.partition_point(|&o| o < skip);
+    let m = regex.find(&stripped.text[start..])?;
+    let end = if m.end() == 0 {
+        from
     } else {
-        let m = regex.find(data)?;
-        (text(m.as_bytes()), m.end())
+        scan_from + stripped.raw_end(start + m.end()) as u64
     };
-    Some((from + end as u64, m))
+    Some((end, text(m.as_bytes())))
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -1006,9 +1037,31 @@ mod tests {
         let regex = Regex::new("login: ").unwrap();
         let data = b"\x1b]noise\nDebian login: ";
         assert_eq!(
-            find(&regex, true, 100, data),
+            find_stripped(&regex, &ansi::strip(data), 100, 100),
             Some((100 + data.len() as u64, "login: ".to_string()))
         );
+    }
+
+    #[test]
+    fn one_stripped_scan_serves_every_start() {
+        // Each start is a sequence boundary, as a condition's start is: a write offset or the end of a match.
+        let data = b"\x1b[1mboot\x1b[0m ok\r\nlogin: \x1b]0;t\x07root\r\n# \x1b[32mdone\x1b[0m\n";
+        let shared = ansi::strip(data);
+        let regex = Regex::new("o+").unwrap();
+        for start in [0, 4, 8, 12, 13, 16, 17, 24, 30, 36, 38, 43, 47, 51] {
+            let span = ansi::strip(&data[start..]);
+            let alone = regex.find(&span.text).map(|m| {
+                (
+                    40 + (start + span.raw_end(m.end())) as u64,
+                    text(m.as_bytes()),
+                )
+            });
+            assert_eq!(
+                find_stripped(&regex, &shared, 40, 40 + start as u64),
+                alone,
+                "start {start}"
+            );
+        }
     }
 
     /// A fake console and clock: output chunks appear at set times, and each sleep moves the clock.
