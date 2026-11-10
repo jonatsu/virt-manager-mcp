@@ -131,10 +131,10 @@ Reviews of earlier work found these. None blocks the server's use.
     disk and its data survive; a disk attached after the one that failed may already be gone. In the manual
     check, now with a step for this, the failed sweep kept `t-exp2-g1.qcow2` and its seed, and the next sweep deleted
     all three volumes.
-14. **Console output stalls after an unpaced burst.** On `t-owrt`, after `owrt-pacing.json` writes 4000 bytes unpaced,
-    the session receives no more output, though writes still report bytes sent; a session reopened with `force: true`
-    works. The case fails most runs, with builds from before and after the console-lock changes alike, so
-    `run-all.sh` exits 1 on it. Evidence and open questions:
+14. **Done: the apparent console stall was a race in `owrt-pacing.json`.** The case sent its unpaced burst 1 ms after
+    `cat > /tmp/unpaced`. The burst reached the guest while its shell still held the terminal in raw, no-echo mode,
+    so nothing was echoed, and `cat` also swallowed the Ctrl-D and the `wc` line after it. The server delivered
+    every byte. The case now pauses after starting `cat` and after each Ctrl-D, and it passes. Evidence:
     [`2026-11-10-owrt-pacing-stall.md`](../research/2026-11-10-owrt-pacing-stall.md).
 
 ## Outcomes
@@ -189,7 +189,7 @@ Two items stand outside the outcomes, because their result is already clear. Eit
 - **Done: integration tests against real libvirt.** Every test-bed case carries expectations that
   `mcp_call.py --check` enforces, and `tests/testbed/run-all.sh` runs them all in order, setting up each case's
   preconditions with `virsh`, and prints "skipped" and exits 0 when the test bed is absent. A full run takes about
-  11 minutes. Only the root-only expiry check stays manual. The script exits 1 while follow-up 14 stands.
+  11 minutes. Only the root-only expiry check stays manual.
 
 Open questions for the designs:
 

@@ -51,6 +51,12 @@
     }
   },
   {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 1
+    }
+  },
+  {
     "tool": "console_write",
     "args": {
       "vm": "t-owrt",
@@ -75,6 +81,12 @@
     }
   },
   {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 1
+    }
+  },
+  {
     "tool": "console_write",
     "args": {
       "vm": "t-owrt",
@@ -82,6 +94,12 @@
     },
     "expect": {
       "contains": "sent 19 bytes"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 1
     }
   },
   {
@@ -104,6 +122,12 @@
     },
     "expect": {
       "contains": "sent 1 bytes"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 1
     }
   },
   {
