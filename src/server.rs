@@ -299,6 +299,9 @@ pub struct ScreenshotParams {
     pub screen: u32,
     /// Downscale so the image is at most this many pixels wide (default 1280; 0 = original size).
     pub max_width: Option<u32>,
+    /// Return only this part of the screen, cropped at full resolution before any downscaling. Its coordinates are
+    /// pixels of a full-screen image from this tool without a region, with that image's size.
+    pub region: Option<display::Region>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1167,7 +1170,10 @@ impl VirtServer {
             destructive_hint = false,
             idempotent_hint = true
         ),
-        description = "Take a screenshot of the VM's graphical display (PNG)."
+        description = "Take a screenshot of the VM's graphical display (PNG). The reply gives the image's size as \
+            WxH. With `region`, it returns only that part of the screen, at full resolution: give the region in pixels \
+            of a full-screen screenshot, with that image's size as image_width and image_height. A region image's \
+            pixels are not click coordinates; the reply gives the region's origin and size in the full-screen image."
     )]
     async fn screenshot(
         &self,
@@ -1175,14 +1181,26 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
+            let region = p.region.map(|r| r.check()).transpose()?;
             let max_width = match p.max_width.unwrap_or(1280) {
                 0 => None,
                 w => Some(w),
             };
-            let (png, w, h) = display::screenshot(&s.hv, &dom, p.screen, max_width)?;
+            let frame = display::capture(&dom, p.screen)?;
+            let crop = region
+                .map(|r| r.on_frame(frame.width(), frame.height()))
+                .transpose()?;
+            let (png, w, h) = display::encode_png(&frame, crop, max_width)?;
+            let text = match region {
+                None => format!("{w}x{h}"),
+                Some(r) => format!(
+                    "{w}x{h} image of the {r}. Its pixels are not click coordinates: use coordinates in \
+                     the full-screen image."
+                ),
+            };
             Ok(vec![
                 ContentBlock::image(B64.encode(png), "image/png"),
-                ContentBlock::text(format!("{w}x{h}")),
+                ContentBlock::text(text),
             ])
         })
         .await

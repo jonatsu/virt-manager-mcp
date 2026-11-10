@@ -1,6 +1,7 @@
 //! Graphical console: screenshots, keyboard input and text recognition.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::io::Cursor;
 use std::path::Path;
 use std::time::Duration;
@@ -8,12 +9,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use image::{ImageFormat, RgbImage, imageops::FilterType};
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use virt::domain::Domain;
 use virt::stream::Stream;
 use virt::sys;
 
 use crate::config::{OCR_DETECTION_MODEL, OCR_RECOGNITION_MODEL};
-use crate::hypervisor::Hypervisor;
 
 /// Threads that OCR runs on, so that a wait on a busy screen leaves the host's other cores to its VMs.
 pub const OCR_THREADS: usize = 4;
@@ -133,14 +135,153 @@ fn is_dark(image: &RgbImage) -> bool {
     2 * sum < pixels * 255 * 10_000
 }
 
-/// Takes a screenshot and returns it as PNG bytes plus the final (width, height).
-pub fn screenshot(
-    hv: &Hypervisor,
-    dom: &Domain,
-    screen: u32,
-    max_width: Option<u32>,
-) -> Result<(Vec<u8>, u32, u32)> {
-    let stream = hv.with_conn(|conn| Ok(Stream::new(conn, 0)?))?;
+/// A rectangle of the screen in pixels of a full-screen image the agent received, from `screenshot` without a region
+/// or from a wait's attachment, with that image's size. [`Region::check`] validates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Region {
+    /// Left edge, in pixels of the full-screen image.
+    pub x: u32,
+    /// Top edge, in pixels of the full-screen image.
+    pub y: u32,
+    /// Width in pixels of the full-screen image; at least 1.
+    pub width: u32,
+    /// Height in pixels of the full-screen image; at least 1.
+    pub height: u32,
+    /// Width of the full-screen image the coordinates come from, as its reply gave it.
+    #[schemars(required)]
+    pub image_width: Option<u32>,
+    /// Height of the full-screen image the coordinates come from, as its reply gave it.
+    #[schemars(required)]
+    pub image_height: Option<u32>,
+}
+
+impl Region {
+    /// Checks that the region names its image's size, has a positive size, and lies inside that image.
+    pub fn check(&self) -> Result<CheckedRegion> {
+        let image = ImageSize::new(self.image_width, self.image_height)?;
+        if self.width == 0 || self.height == 0 {
+            bail!("a region's width and height must be at least 1");
+        }
+        let rect = Rect {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        };
+        let fits = |start: u32, size: u32, limit: u32| {
+            start.checked_add(size).is_some_and(|end| end <= limit)
+        };
+        if !fits(rect.x, rect.width, image.width) || !fits(rect.y, rect.height, image.height) {
+            bail!("the region {rect} does not fit inside the {image} image it refers to");
+        }
+        Ok(CheckedRegion { rect, image })
+    }
+}
+
+/// The size of a full-screen image that an agent's coordinates refer to; both sides are positive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageSize {
+    width: u32,
+    height: u32,
+}
+
+impl ImageSize {
+    /// Checks the `image_width` and `image_height` an agent gave: both present and positive.
+    pub fn new(width: Option<u32>, height: Option<u32>) -> Result<Self> {
+        let (Some(width), Some(height)) = (width, height) else {
+            bail!(
+                "coordinates need image_width and image_height, the size of the full-screen image they come from"
+            );
+        };
+        if width == 0 || height == 0 {
+            bail!("image_width and image_height must be at least 1");
+        }
+        Ok(Self { width, height })
+    }
+}
+
+impl fmt::Display for ImageSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
+/// A rectangle in pixels, with a positive size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl fmt::Display for Rect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}x{} at ({}, {})",
+            self.width, self.height, self.x, self.y
+        )
+    }
+}
+
+/// A region that lies inside the full-screen image it refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckedRegion {
+    rect: Rect,
+    image: ImageSize,
+}
+
+impl CheckedRegion {
+    /// The region mapped proportionally onto a frame of `width` by `height` pixels, which may differ from the image
+    /// the agent saw. Edges round outwards, so the result covers the whole region, has a positive size, and never
+    /// leaves the frame.
+    pub fn on_frame(&self, width: u32, height: u32) -> Result<Rect> {
+        if width == 0 || height == 0 {
+            bail!("the screen frame is empty");
+        }
+        let (x, w) = scale_span(self.rect.x, self.rect.width, self.image.width, width);
+        let (y, h) = scale_span(self.rect.y, self.rect.height, self.image.height, height);
+        Ok(Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        })
+    }
+}
+
+impl fmt::Display for CheckedRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "region {} of the {} full-screen image",
+            self.rect, self.image
+        )
+    }
+}
+
+/// Maps the span from `start` of `size` pixels on an axis of `from` pixels onto an axis of `to` pixels, rounding the
+/// start down and the end up. The caller guarantees `0 < size`, `start + size <= from` and `0 < to`, so the result
+/// lies inside `0..to` with a size of at least 1: the end, at least `start * to / from` plus a positive amount, rounds
+/// up past the start's floor, and is at most `to`.
+fn scale_span(start: u32, size: u32, from: u32, to: u32) -> (u32, u32) {
+    let (from, to) = (u64::from(from), u64::from(to));
+    let first = u64::from(start) * to / from;
+    let end = (u64::from(start) + u64::from(size)) * to;
+    let last = end.div_ceil(from).min(to);
+    let narrow = |v: u64| u32::try_from(v).expect("a position on the frame fits its u32 size");
+    (narrow(first), narrow(last - first))
+}
+
+/// Captures display head `screen` of `dom` at full resolution. It opens the stream on the connection `dom` came
+/// from, so a probe thread holding only the domain can call it.
+pub fn capture(dom: &Domain, screen: u32) -> Result<RgbImage> {
+    let conn = dom
+        .get_connect()
+        .context("finding the domain's connection")?;
+    let stream = Stream::new(&conn, 0)?;
     let mime = dom.screenshot(&stream, screen, 0).map_err(|e| {
         anyhow!(
             "screenshot failed: {} (does the VM have a graphical display?)",
@@ -166,14 +307,31 @@ pub fn screenshot(
         other => ImageFormat::from_mime_type(other)
             .ok_or_else(|| anyhow!("unsupported screenshot format {other}"))?,
     };
-    let mut img =
-        image::load_from_memory_with_format(&raw, format).context("decoding screenshot")?;
+    Ok(image::load_from_memory_with_format(&raw, format)
+        .context("decoding screenshot")?
+        .into_rgb8())
+}
+
+/// Encodes `frame`, or the part `crop` names, as PNG, cropping at full resolution and then downscaling to at most
+/// `max_width` pixels wide. Returns the PNG with its width and height.
+pub fn encode_png(
+    frame: &RgbImage,
+    crop: Option<Rect>,
+    max_width: Option<u32>,
+) -> Result<(Vec<u8>, u32, u32)> {
+    let mut img = match crop {
+        Some(r) => {
+            Cow::Owned(image::imageops::crop_imm(frame, r.x, r.y, r.width, r.height).to_image())
+        }
+        None => Cow::Borrowed(frame),
+    };
     if let Some(w) = max_width
         && w > 0
         && img.width() > w
     {
-        let h = (img.height() as u64 * w as u64 / img.width() as u64).max(1) as u32;
-        img = img.resize_exact(w, h, FilterType::Triangle);
+        let h = (u64::from(img.height()) * u64::from(w) / u64::from(img.width())).max(1);
+        let h = u32::try_from(h).expect("a downscaled height is below the original");
+        img = Cow::Owned(image::imageops::resize(&*img, w, h, FilterType::Triangle));
     }
     let mut png = Vec::new();
     img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)?;
@@ -442,6 +600,215 @@ mod tests {
         // Mid-grey: 128 is just above one half of 255, 127 just below.
         assert!(!is_dark(&solid([128, 128, 128])));
         assert!(is_dark(&solid([127, 127, 127])));
+    }
+
+    fn region(x: u32, y: u32, width: u32, height: u32, image: (u32, u32)) -> Region {
+        Region {
+            x,
+            y,
+            width,
+            height,
+            image_width: Some(image.0),
+            image_height: Some(image.1),
+        }
+    }
+
+    fn rect(x: u32, y: u32, width: u32, height: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The region mapped onto a frame of `frame` size.
+    fn mapped(r: Region, frame: (u32, u32)) -> Rect {
+        r.check().unwrap().on_frame(frame.0, frame.1).unwrap()
+    }
+
+    fn refusal(r: Region) -> String {
+        format!("{:#}", r.check().unwrap_err())
+    }
+
+    #[test]
+    fn a_frame_of_the_image_size_maps_corners_to_themselves() {
+        let image = (1280, 800);
+        assert_eq!(mapped(region(0, 0, 1, 1, image), image), rect(0, 0, 1, 1));
+        assert_eq!(
+            mapped(region(1279, 799, 1, 1, image), image),
+            rect(1279, 799, 1, 1)
+        );
+        assert_eq!(
+            mapped(region(0, 0, 1280, 800, image), image),
+            rect(0, 0, 1280, 800)
+        );
+    }
+
+    #[test]
+    fn a_larger_frame_scales_the_region_up() {
+        let image = (640, 400);
+        let frame = (1280, 800);
+        assert_eq!(
+            mapped(region(10, 20, 30, 40, image), frame),
+            rect(20, 40, 60, 80)
+        );
+        // The bottom-right pixel of the image covers two by two pixels of the frame.
+        assert_eq!(
+            mapped(region(639, 399, 1, 1, image), frame),
+            rect(1278, 798, 2, 2)
+        );
+    }
+
+    #[test]
+    fn a_smaller_frame_scales_the_region_down() {
+        let image = (1280, 800);
+        let frame = (720, 400);
+        assert_eq!(
+            mapped(region(0, 0, 640, 400, image), frame),
+            rect(0, 0, 360, 200)
+        );
+        assert_eq!(
+            mapped(region(640, 400, 640, 400, image), frame),
+            rect(360, 200, 360, 200)
+        );
+    }
+
+    #[test]
+    fn regions_at_the_right_and_bottom_edges_stay_inside_the_frame() {
+        let image = (1280, 800);
+        let frame = (720, 400);
+        // 1279 * 720 / 1280 = 719.4: the start rounds down, the end up to the frame's edge.
+        assert_eq!(
+            mapped(region(1279, 0, 1, 800, image), frame),
+            rect(719, 0, 1, 400)
+        );
+        assert_eq!(
+            mapped(region(0, 799, 1280, 1, image), frame),
+            rect(0, 399, 720, 1)
+        );
+        // A frame smaller than one image pixel per frame pixel still gives a pixel.
+        assert_eq!(mapped(region(1, 1, 1, 1, (3, 3)), (2, 2)), rect(0, 0, 2, 2));
+    }
+
+    /// Every region of every small image, on every small frame, maps to a non-empty rectangle inside the frame that
+    /// covers the region's proportional span.
+    #[test]
+    fn rounding_never_leaves_the_frame() {
+        for from in 1..=7u32 {
+            for to in 1..=7u32 {
+                for start in 0..from {
+                    for size in 1..=from - start {
+                        let (first, len) = scale_span(start, size, from, to);
+                        assert!(len >= 1, "{start}+{size} of {from} on {to}");
+                        assert!(first + len <= to, "{start}+{size} of {from} on {to}");
+                        assert!(first * from <= start * to);
+                        assert!((first + len) * from >= (start + size) * to);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_region_needs_the_size_of_its_image() {
+        let mut r = region(0, 0, 10, 10, (100, 100));
+        r.image_width = None;
+        assert!(refusal(r).contains("need image_width and image_height"));
+        let mut r = region(0, 0, 10, 10, (100, 100));
+        r.image_height = None;
+        assert!(refusal(r).contains("need image_width and image_height"));
+        assert!(refusal(region(0, 0, 10, 10, (0, 100))).contains("must be at least 1"));
+        assert!(refusal(region(0, 0, 10, 10, (100, 0))).contains("must be at least 1"));
+
+        let parsed: Region =
+            serde_json::from_str(r#"{"x": 0, "y": 0, "width": 10, "height": 10}"#).unwrap();
+        assert!(refusal(parsed).contains("need image_width and image_height"));
+        let schema = serde_json::to_value(schemars::schema_for!(Region)).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        for field in ["image_width", "image_height"] {
+            assert!(required.contains(&field.into()), "{field} in {required:?}");
+        }
+    }
+
+    #[test]
+    fn a_region_needs_a_positive_size() {
+        assert!(
+            refusal(region(0, 0, 0, 10, (100, 100)))
+                .contains("width and height must be at least 1")
+        );
+        assert!(
+            refusal(region(0, 0, 10, 0, (100, 100)))
+                .contains("width and height must be at least 1")
+        );
+    }
+
+    #[test]
+    fn a_region_must_lie_inside_its_image() {
+        let image = (1280, 800);
+        assert!(region(1270, 790, 10, 10, image).check().is_ok());
+        assert_eq!(
+            refusal(region(1271, 0, 10, 10, image)),
+            "the region 10x10 at (1271, 0) does not fit inside the 1280x800 image it refers to"
+        );
+        assert!(refusal(region(0, 791, 10, 10, image)).contains("does not fit inside"));
+        assert!(refusal(region(1280, 0, 1, 1, image)).contains("does not fit inside"));
+        // An end past u32::MAX is outside, not a wrapped small number.
+        assert!(refusal(region(u32::MAX, 0, 2, 1, image)).contains("does not fit inside"));
+    }
+
+    #[test]
+    fn an_empty_frame_is_refused() {
+        let checked = region(0, 0, 1, 1, (10, 10)).check().unwrap();
+        assert!(checked.on_frame(0, 10).is_err());
+        assert!(checked.on_frame(10, 0).is_err());
+    }
+
+    #[test]
+    fn the_region_reply_names_its_origin_size_and_image() {
+        let checked = region(5, 6, 7, 8, (1280, 800)).check().unwrap();
+        assert_eq!(
+            checked.to_string(),
+            "region 7x8 at (5, 6) of the 1280x800 full-screen image"
+        );
+    }
+
+    fn decoded(png: &[u8]) -> RgbImage {
+        image::load_from_memory_with_format(png, ImageFormat::Png)
+            .unwrap()
+            .into_rgb8()
+    }
+
+    #[test]
+    fn encoding_crops_at_full_resolution_before_downscaling() {
+        // Red on the left half, blue on the right, with a one-pixel green column at x = 60.
+        let frame = RgbImage::from_fn(100, 50, |x, _| match x {
+            60 => image::Rgb([0, 255, 0]),
+            0..50 => image::Rgb([255, 0, 0]),
+            _ => image::Rgb([0, 0, 255]),
+        });
+
+        let (png, w, h) = encode_png(&frame, Some(rect(60, 10, 1, 20)), None).unwrap();
+        assert_eq!((w, h), (1, 20));
+        assert!(decoded(&png).pixels().all(|p| p.0 == [0, 255, 0]));
+
+        let (png, w, h) = encode_png(&frame, Some(rect(70, 0, 30, 50)), Some(10)).unwrap();
+        assert_eq!((w, h), (10, 16));
+        assert!(decoded(&png).pixels().all(|p| p.0 == [0, 0, 255]));
+
+        // A crop already narrower than max_width keeps its size.
+        let (_, w, h) = encode_png(&frame, Some(rect(0, 0, 40, 20)), Some(1280)).unwrap();
+        assert_eq!((w, h), (40, 20));
+    }
+
+    #[test]
+    fn encoding_without_a_region_keeps_the_full_screenshot_behaviour() {
+        let frame = RgbImage::from_pixel(1600, 900, image::Rgb([1, 2, 3]));
+        let (png, w, h) = encode_png(&frame, None, Some(1280)).unwrap();
+        assert_eq!((w, h), (1280, 720));
+        assert_eq!(decoded(&png).dimensions(), (1280, 720));
+        assert_eq!(encode_png(&frame, None, None).unwrap().1, 1600);
+        assert_eq!(encode_png(&frame, None, Some(0)).unwrap().1, 1600);
     }
 
     // Tests with the OCR models. They read the probe's screenshots in docs/research/2026-11-10-ocr-probe/. Run them
