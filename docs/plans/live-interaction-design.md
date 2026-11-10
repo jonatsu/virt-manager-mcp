@@ -17,7 +17,7 @@ outcome lands in three runs: waits, console and Linux jobs; then OCR, screen and
 | Decision | Chosen | Why | Status |
 | -- | -- | -- | -- |
 | Guests served | Agentless guests on equal footing with agent-equipped ones: installers, bootloaders, kernels, Windows, appliances | These are planned test targets, and the console and screen are their only channels | resolved |
-| Reading screen text | OCR in the server with `ocrs`, plus a wait until the screen settles | A server-side match lets an agent wait without receiving repeated images | provisional: a probe on GRUB, Debian installer and Windows setup screenshots decides between `ocrs` and Tesseract |
+| Reading screen text | OCR in the server with `ocrs` 0.14, which needs Rust 1.94, so the crate's `rust-version` rises to 1.94; plus a wait until the screen settles | A server-side match lets an agent wait without receiving repeated images. In the probe ([`2026-11-10-ocr-probe.md`](../research/2026-11-10-ocr-probe.md)), `ocrs` read 31 of 44 key strings exactly, against Tesseract's 21, and Tesseract dropped every button label and highlighted row | resolved |
 | Mouse | QEMU monitor `input-send-event`, sent through libvirt, with a USB tablet for absolute positions | Works with SPICE and VNC displays; the server builds the one command form itself | resolved |
 | Waiting | One `wait_for` tool with a list of conditions, returning on the first that holds | An agent waiting for success must also stop at a failure such as a kernel panic, across channels | resolved |
 | Call length | At most `limits.max_wait_secs` (default 50 s) per wait; a wait that runs out returns resume points | Codex and some Claude Code paths cut calls at 60 s | resolved |
@@ -75,7 +75,7 @@ Condition kinds, by run:
 | `job_done` | a job has exited, or has ended without writing its status | 1 (Linux), 3 (Windows) |
 | `job_output` | a job's output from `since` matches a pattern | 1 (Linux), 3 (Windows) |
 | `screen_text` | OCR of the screen, or of a region, matches a pattern | 2 |
-| `screen_settled` | the share of changed pixels stays below a threshold for a given time | 2 |
+| `screen_settled` | fewer than a threshold of pixels change between frames for a given time | 2 |
 
 Read-only mode refuses `command`, `screen_text`, `screen_settled` and the screenshot attachment, because it disables
 command execution and screenshots today. `wait_for` checks the client's cancellation on every poll, so a cancelled
@@ -117,10 +117,17 @@ domain's USB tablet. A VM without a tablet is refused with that reason; VMs made
 `create_vm_from_template` have one. libvirt marks a domain that receives monitor commands as tainted
 (`custom-monitor`), and the tool description and the README say so.
 
-OCR runs only when the frame's hash has changed, on the region when one is given. One capture per VM and poll serves
-every wait on that VM. The models live at `display.ocr_models`, and `scripts/fetch-ocr-models.sh` downloads them and
-checks SHA-256 sums pinned in the script. Without models, `screen_text` is refused with that reason. The
-`screen_settled` threshold, which must tolerate a blinking cursor or a spinner, is set by the run-2 probe.
+OCR runs only when the frame's hash has changed, on the region when one is given. A frame whose mean luminance is
+below one half is inverted first, because `ocrs` misreads light text on black, as on a text console. One capture per
+VM and poll serves every wait on that VM. The models are the `ocrs` project's ONNX detection and recognition models.
+They live at `display.ocr_models`, and `scripts/fetch-ocr-models.sh` downloads them and checks SHA-256 sums pinned in
+the script, since upstream publishes none. Without models, `screen_text` is refused with that reason.
+
+`screen_settled` holds when fewer than a threshold of pixels differ between consecutive frames, compared exactly, for
+a settle time: by default 600 pixels for 3 s. The threshold counts pixels, not a share, because idle noise is fixed in
+pixels whatever the frame or region size: in the probe a blinking cursor changed 16 pixels and a firmware spinner up
+to 415, while a progress-bar step changed over 1100 and a page change far more. One typed character changes about 70,
+so typing does not count as change.
 
 ### Jobs
 
@@ -183,11 +190,12 @@ published.
   - A Linux job streams output and is stopped. A second case file, run as a new server process, reads the same job
     after the restart and lists it.
 - Run 2:
-  - The OCR probe on screenshots of GRUB, the Debian installer and Windows 11 setup is recorded in `docs/research/`.
-    It picks the engine and the settle threshold, and checks that the engine builds on Rust 1.89 and passes
-    `cargo deny`.
-  - The Windows ISO is uploaded into `agent-vms` in this run, because QEMU on `qemu:///system` cannot read the user's
-    home directory, and a VM boots it to the setup screen.
+  - The OCR probe on screenshots of GRUB, the Debian installer and Windows 11 setup, in
+    [`2026-11-10-ocr-probe.md`](../research/2026-11-10-ocr-probe.md), picked the engine and the settle threshold.
+    `trial-deb13` keeps GRUB on its serial console, so GRUB screens come from the Debian netinst ISO booted under UEFI.
+  - The Debian netinst and Windows 11 ISOs are in `agent-vms` as `tpl-debian13-netinst.iso` and
+    `tpl-win11-26h2.iso`, because QEMU on `qemu:///system` cannot read the user's home directory. A VM boots the
+    Windows ISO to the setup screen.
   - The Debian netinst installer is driven by screen waits, keys and the mouse to its partitioning screen.
   - A VM without a tablet refuses `mouse`.
 - Run 3:
@@ -210,8 +218,9 @@ published.
 
 ## Risks
 
-1. OCR may misread low-resolution text-mode fonts. The run-2 probe measures it before the engine is fixed; Tesseract is
-   the fallback, at the cost of system libraries in the build and in CI.
+1. OCR misreads some text-mode fonts: in the probe, `ocrs` read "SeaBIOS" as "seaBinS" and dropped trailing dots.
+   Inverting dark frames fixes most of it, and patterns for screen text should be loose. `ocrs` 0.14 was not in the
+   probe, so run 2 checks it on the probe's screenshots before relying on it.
 2. Hardened hosts may deny monitor access. The mouse then fails with libvirt's reason; keyboard input still works.
 3. The Windows guest agent depends on drivers no setup on this host has tried. Run 3 may need a design change there.
 4. A guest that fills its disk can lose job output. Job logs are not capped in the guest.
@@ -220,5 +229,4 @@ published.
 
 | Question | Kind | Recommendation |
 | -- | -- | -- |
-| `ocrs` or Tesseract | Settled by the run-2 probe | `ocrs`, unless it misreads the probe screens or fails the Rust 1.89 build |
 | How the Windows guest agent gets its driver | Settled in run 3 | Load the `virtio-win` serial driver and `qemu-ga` MSI from the `virtio-win` ISO in the unattended setup |
