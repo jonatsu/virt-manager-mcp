@@ -88,7 +88,9 @@ so run this check by hand, from the repository root:
 2. Make the attached disk undeletable: `sudo chattr +i /var/lib/libvirt/images/agent-vms/t-exp2-vdc.qcow2`.
 3. Wait 70 s, then run `target/release/virtmanager-mcp --config tests/testbed/config-templates.toml sweep`. It exits 1,
    and its log says it could not delete `t-exp2-vdc.qcow2` and keeps `t-exp2`.
-4. Check that `virsh -c qemu:///system dominfo t-exp2` still finds the VM.
+4. Check that `virsh -c qemu:///system dominfo t-exp2` still finds the VM, and that
+   `virsh -c qemu:///system vol-list agent-vms` still lists its boot disk `t-exp2-g1.qcow2` and seed
+   `t-exp2-g1-seed.img`.
 5. Make the disk deletable again: `sudo chattr -i /var/lib/libvirt/images/agent-vms/t-exp2-vdc.qcow2`.
 6. Run the sweep command again. It deletes `t-exp2` and exits 0, and `virsh -c qemu:///system vol-list agent-vms` lists
    no `t-exp2` volume.

@@ -125,6 +125,11 @@ Reviews of earlier work found these. None blocks the server's use.
 12. **Console conditions strip the same output once each.** Every console condition runs `ansi::strip` over its own
     span on each poll with new output, which costs little at the default 256 KiB scrollback but grows with
     `console_buffer_bytes` and the number of conditions. Strip once per poll and share the result.
+13. **Done: an expiry kept after a failed deletion keeps the boot disk.** The manual check for follow-up 7 showed the
+    sweep deleting the overlay and seed before it reached the locked disk, so the VM it kept could not boot. The
+    sweep now deletes disks in reverse document order, boot disk last, and stops at the first failure. In the manual
+    check, now with a step for this, the failed sweep kept `t-exp2-g1.qcow2` and its seed, and the next sweep deleted
+    all three volumes.
 
 ## Outcomes
 

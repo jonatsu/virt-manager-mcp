@@ -128,8 +128,9 @@ whose `expires` has passed, the sweep:
 2. Forces the VM off through its own path, because `delete_vm` refuses running VMs.
 3. Deletes its volumes in `manage.disk_pool`, then undefines it and logs the deletion on stderr. Deleting first means
    a crash in between leaves a domain the next sweep finds again. A volume outside the pool is left in place and logged
-   by name. A volume whose deletion fails keeps the domain: the expiry counts as failed, so `virtmanager-mcp sweep`
-   exits non-zero, and the next sweep retries it.
+   by name. It deletes the disks in reverse document order, so the boot disk goes last, and stops at the first
+   deletion that fails. That volume keeps the domain, with its boot disk: the expiry counts as failed, so
+   `virtmanager-mcp sweep` exits non-zero, and the next sweep retries it.
 
 Two processes may sweep the same VM; the one that finds it gone treats that as done.
 
@@ -140,6 +141,7 @@ Two processes may sweep the same VM; the one that finds it gone treats that as d
 - Deleting, resetting or expiring a VM leaves no volume of its old state in the pool.
 - Configs without `[manage.templates]` behave as today, and the new tools stay hidden.
 - A reset never leaves the VM without disks: the new disks exist before the old ones are removed.
+- An expiry that keeps a VM after a failed volume deletion leaves its boot disk in place.
 
 ## Code changes
 

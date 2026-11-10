@@ -741,19 +741,15 @@ pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
             .filter(|d| d.device == "disk")
             .collect();
         let pool = disk_pool(conn, m)?;
-        let outcomes: Vec<(String, DiskDeletion)> = disks
-            .iter()
-            .map(|d| {
-                let outcome = match pool_volume(conn, &pool, &m.disk_pool, d) {
-                    Some(vol) => match vol.delete(0) {
-                        Ok(()) => DiskDeletion::Deleted,
-                        Err(e) => DiskDeletion::Failed(e.message().to_string()),
-                    },
-                    None => DiskDeletion::NotInPool,
-                };
-                (d.source(), outcome)
-            })
-            .collect();
+        let outcomes = delete_disks_boot_last(&disks, |d| {
+            match pool_volume(conn, &pool, &m.disk_pool, d) {
+                Some(vol) => match vol.delete(0) {
+                    Ok(()) => DiskDeletion::Deleted,
+                    Err(e) => DiskDeletion::Failed(e.message().to_string()),
+                },
+                None => DiskDeletion::NotInPool,
+            }
+        });
         // A volume left behind keeps the domain, so the next sweep finds the VM again and retries it.
         let msg = expiry_report(&name, uuid, &outcomes)?;
         match dom.undefine_flags(UNDEFINE_FLAGS) {
@@ -771,6 +767,25 @@ enum DiskDeletion {
     /// Not a volume in `manage.disk_pool`: already deleted, or outside it. It is left in place.
     NotInPool,
     Failed(String),
+}
+
+/// Deletes `disks` with `delete` in reverse document order, so the boot disk, which comes first, goes last, and stops
+/// at the first failure. A VM kept after a failed deletion therefore still has its boot disk and every disk before
+/// the one that failed. Returns each tried disk's source and outcome.
+fn delete_disks_boot_last(
+    disks: &[DiskInfo],
+    mut delete: impl FnMut(&DiskInfo) -> DiskDeletion,
+) -> Vec<(String, DiskDeletion)> {
+    let mut outcomes = Vec::new();
+    for d in disks.iter().rev() {
+        let outcome = delete(d);
+        let failed = matches!(outcome, DiskDeletion::Failed(_));
+        outcomes.push((d.source(), outcome));
+        if failed {
+            break;
+        }
+    }
+    outcomes
 }
 
 /// The log line for an expiry whose disks fared as `outcomes`, given as (source path, outcome) pairs.
@@ -1995,6 +2010,53 @@ mod tests {
             err.contains("is kept so the next sweep retries it"),
             "{err}"
         );
+    }
+
+    fn disk_at(file: &str) -> DiskInfo {
+        DiskInfo {
+            device: "disk".into(),
+            target: String::new(),
+            bus: String::new(),
+            file: Some(file.into()),
+            pool: None,
+            volume: None,
+            range: 0..0,
+        }
+    }
+
+    #[test]
+    fn expiry_deletes_the_boot_disk_last_and_stops_at_a_failure() {
+        let disks = [
+            disk_at("/pool/t-g1.qcow2"),
+            disk_at("/pool/t-g1-seed.img"),
+            disk_at("/pool/t-vdc.qcow2"),
+        ];
+        let mut tried = Vec::new();
+        let outcomes = delete_disks_boot_last(&disks, |d| {
+            tried.push(d.source());
+            DiskDeletion::Deleted
+        });
+        assert_eq!(
+            tried,
+            [
+                "/pool/t-vdc.qcow2",
+                "/pool/t-g1-seed.img",
+                "/pool/t-g1.qcow2"
+            ]
+        );
+        assert_eq!(outcomes.len(), 3);
+
+        let mut tried = Vec::new();
+        let outcomes = delete_disks_boot_last(&disks, |d| {
+            tried.push(d.source());
+            DiskDeletion::Failed("Operation not permitted".into())
+        });
+        assert_eq!(
+            tried,
+            ["/pool/t-vdc.qcow2"],
+            "the seed and the boot disk stay"
+        );
+        assert!(expiry_report("t", "u-1", &outcomes).is_err());
     }
 
     #[test]
