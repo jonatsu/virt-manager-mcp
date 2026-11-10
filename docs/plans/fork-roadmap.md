@@ -159,27 +159,11 @@ Open questions for the designs:
 
 ## Next
 
-The baseline, the defects and outcome 1 are done; outcome 1 was re-verified in full at `aa44f14`, and the plan's
-execution record holds its evidence.
+The baseline, the defects, outcome 1 and follow-ups 7 to 9 are done. Outcome 1 was re-verified in full at `aa44f14`,
+and the plan's execution record holds its evidence. Follow-ups 7 to 9 landed in `63e28ab`, `31bb732`, `805a5d9` and
+`3a64f86`. At `3a64f86`, the gate and `cargo +1.89 test --locked` passed (52 tests), and the reset, expiry and
+outside-disk test-bed cases passed with no `t-*` VM or volume left and the template checksum unchanged. A separate
+conformance review found no material mismatch. The manual root check for follow-up 7 has not been run yet.
 
-1. **Follow-ups 7 to 9**, as one run before outcome 2. They close the expiry and reset gaps that the final
-   outcome-1 conformance review found, and the design already covers the behaviour they restore, so they need no new
-   design. The run's goal:
-   - **Objective:** an expiry whose volume deletion fails keeps the domain, counts as failed and is retried by the
-     next sweep; a refused `reset_vm` leaves the console session open; and a test shows reset and expiry leave a disk
-     outside `disk_pool` in place.
-   - **Success criteria:** each follow-up lands in its own commit with a test that fails before the fix where the
-     fault can be produced, and is marked done here. The `AGENTS.md` gate and `cargo +1.89 test --locked` exit 0 at
-     the last commit. The test-bed cases `templates-reset*`, `templates-expiry*` and the new cases pass, leaving no
-     `t-*` VM or volume and the template checksum unchanged. A separate conformance review against
-     [`disposable-vms-design.md`](disposable-vms-design.md) and follow-ups 7 to 9 finds no material mismatch. The
-     commits are pushed and CI is green.
-   - **Verification:** run the gate, the test-bed cases and the conformance review after the last change.
-   - **Boundaries:** touch only `trial-deb13` and `t-*` or `tpl-*` VMs and volumes in `agent-vms` on
-     `qemu:///system`; the out-of-pool disk is a file the user owns outside every pool. Weaken no guardrail in
-     `AGENTS.md`.
-   - **Stop conditions:** stop and ask when a fix needs a design change, or when a step needs root, a host or libvirt
-     configuration change, or another VM or pool. A fault the test bed cannot produce rests on a unit test, and the
-     record says so.
-2. **Outcome 2**, from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each
-   with its own plan.
+Next is outcome 2, from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each
+with its own plan.

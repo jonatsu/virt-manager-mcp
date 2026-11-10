@@ -38,7 +38,7 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-reset-uefi.json` | Creates `t-u` from `debian13-uefi` and resets it; the reset closes the console opened before it, and the VM boots under UEFI with its marker file gone. |
 | `templates-reset-saved.json` | Run after `virsh managedsave t-u`: the reset discards the saved state and boots fresh; a `create_vm` VM named `t-u-g4` holding the next disk name makes the next reset refuse with nothing changed, and the console opened before it still reads output; then both VMs are deleted. |
 | `templates-expiry.json` | `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without one; after 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
-| `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
+| `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and an attached disk, and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
 | `templates-outside-disk-setup.json`, `templates-outside-disk.json` | A reset and an expiry leave a disk file outside every pool in place; run with the steps below. |
 
 `templates-reset.json` and `templates-expiry.json` need `t-listed`, a VM defined with `virsh` and never started.
