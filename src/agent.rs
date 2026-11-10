@@ -116,53 +116,12 @@ impl<'a> Agent<'a> {
         timeout: Duration,
         max_output: usize,
     ) -> Result<ExecOutcome> {
-        let mut args = json!({
-            "path": spec.path,
-            "arg": spec.args,
-            "capture-output": true,
-        });
-        if !spec.env.is_empty() {
-            args["env"] = json!(spec.env);
-        }
-        if let Some(input) = &spec.stdin {
-            args["input-data"] = json!(B64.encode(input));
-        }
-        let pid = self
-            .call("guest-exec", Some(args))?
-            .get("pid")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| anyhow!("guest-exec returned no pid"))?;
-
+        let pid = self.start(spec)?;
         let start = Instant::now();
         let mut delay = Duration::from_millis(50);
         loop {
-            let st = self.call("guest-exec-status", Some(json!({ "pid": pid })))?;
-            if st.get("exited").and_then(Value::as_bool).unwrap_or(false) {
-                let stream = |data: &str, trunc: &str| -> Result<(Vec<u8>, bool)> {
-                    let mut bytes = match st.get(data).and_then(Value::as_str) {
-                        Some(s) => B64.decode(s)?,
-                        None => Vec::new(),
-                    };
-                    let mut truncated = st.get(trunc).and_then(Value::as_bool).unwrap_or(false);
-                    if bytes.len() > max_output {
-                        bytes.truncate(max_output);
-                        truncated = true;
-                    }
-                    Ok((bytes, truncated))
-                };
-                let (stdout, stdout_truncated) = stream("out-data", "out-truncated")?;
-                let (stderr, stderr_truncated) = stream("err-data", "err-truncated")?;
-                return Ok(ExecOutcome {
-                    pid,
-                    exit_code: st.get("exitcode").and_then(Value::as_i64),
-                    signal: st.get("signal").and_then(Value::as_i64),
-                    timed_out: false,
-                    kill_attempted: false,
-                    stdout,
-                    stdout_truncated,
-                    stderr,
-                    stderr_truncated,
-                });
+            if let Some(outcome) = self.status(pid, max_output)? {
+                return Ok(outcome);
             }
             if start.elapsed() >= timeout {
                 return Ok(ExecOutcome {
@@ -175,6 +134,59 @@ impl<'a> Agent<'a> {
             std::thread::sleep(delay.min(timeout.saturating_sub(start.elapsed())));
             delay = (delay * 2).min(Duration::from_millis(500));
         }
+    }
+
+    /// Starts a process with its output captured, and returns its PID without waiting for it.
+    pub fn start(&self, spec: &ExecSpec) -> Result<i64> {
+        let mut args = json!({
+            "path": spec.path,
+            "arg": spec.args,
+            "capture-output": true,
+        });
+        if !spec.env.is_empty() {
+            args["env"] = json!(spec.env);
+        }
+        if let Some(input) = &spec.stdin {
+            args["input-data"] = json!(B64.encode(input));
+        }
+        self.call("guest-exec", Some(args))?
+            .get("pid")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("guest-exec returned no pid"))
+    }
+
+    /// The outcome of a process that `start` began, or `None` while it runs. Each output stream is cut to
+    /// `max_output` bytes.
+    pub fn status(&self, pid: i64, max_output: usize) -> Result<Option<ExecOutcome>> {
+        let st = self.call("guest-exec-status", Some(json!({ "pid": pid })))?;
+        if !st.get("exited").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(None);
+        }
+        let stream = |data: &str, trunc: &str| -> Result<(Vec<u8>, bool)> {
+            let mut bytes = match st.get(data).and_then(Value::as_str) {
+                Some(s) => B64.decode(s)?,
+                None => Vec::new(),
+            };
+            let mut truncated = st.get(trunc).and_then(Value::as_bool).unwrap_or(false);
+            if bytes.len() > max_output {
+                bytes.truncate(max_output);
+                truncated = true;
+            }
+            Ok((bytes, truncated))
+        };
+        let (stdout, stdout_truncated) = stream("out-data", "out-truncated")?;
+        let (stderr, stderr_truncated) = stream("err-data", "err-truncated")?;
+        Ok(Some(ExecOutcome {
+            pid,
+            exit_code: st.get("exitcode").and_then(Value::as_i64),
+            signal: st.get("signal").and_then(Value::as_i64),
+            timed_out: false,
+            kill_attempted: false,
+            stdout,
+            stdout_truncated,
+            stderr,
+            stderr_truncated,
+        }))
     }
 
     /// Best-effort termination of a timed-out guest-exec process.
