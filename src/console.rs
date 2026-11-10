@@ -480,6 +480,15 @@ impl Consoles {
         }
     }
 
+    /// Called once `vm` is shut off. Waits up to `wait` for the session's reader to record that the stream ended, and
+    /// records it as ended when it has not, so a read right after reports the console closed. Its stream may never
+    /// report the end after a power-off.
+    pub fn note_shut_off(&self, vm: &str, wait: Duration) {
+        if let Ok((buffer, _, _)) = self.session(vm) {
+            await_closed(&buffer, wait, SHUT_OFF);
+        }
+    }
+
     pub fn is_open(&self, vm: &str) -> bool {
         self.sessions
             .lock()
@@ -501,6 +510,27 @@ impl Consoles {
             .get(vm)
             .map(|s| (s.buffer.clone(), s.generation, s.domain_id))
             .ok_or_else(|| anyhow!("no console open for '{vm}'; call console_open first"))
+    }
+}
+
+/// The reason a session records when its VM is shut off and the stream has not reported its end.
+const SHUT_OFF: &str = "console stream ended (VM shut down)";
+
+/// Waits up to `wait` for `buffer` to record why its stream closed, and records `reason` when it has not.
+fn await_closed(buffer: &Mutex<Buffer>, wait: Duration, reason: &str) {
+    let deadline = Instant::now() + wait;
+    loop {
+        {
+            let mut b = buffer.lock().unwrap();
+            if b.closed.is_some() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                b.closed = Some(reason.to_string());
+                return;
+            }
+        }
+        std::thread::sleep(POLL);
     }
 }
 
@@ -559,7 +589,8 @@ fn read_loop(stream: &Stream, buffer: &Mutex<Buffer>, stop: &AtomicBool, cap: us
             }
         }
     };
-    buffer.lock().unwrap().closed = Some(reason);
+    // Keep a reason already recorded, such as a shut-off noted before the stream ended.
+    buffer.lock().unwrap().closed.get_or_insert(reason);
 }
 
 #[cfg(test)]
@@ -572,6 +603,36 @@ mod tests {
             start,
             ..Buffer::default()
         }
+    }
+
+    #[test]
+    fn a_shut_off_keeps_the_end_the_reader_records() {
+        let b = Arc::new(Mutex::new(Buffer::default()));
+        let reader = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(POLL * 2);
+                b.lock()
+                    .unwrap()
+                    .closed
+                    .get_or_insert("console stream ended (from the reader)".into());
+            })
+        };
+        await_closed(&b, Duration::from_secs(5), SHUT_OFF);
+        reader.join().unwrap();
+        assert_eq!(
+            b.lock().unwrap().closed.as_deref(),
+            Some("console stream ended (from the reader)")
+        );
+    }
+
+    #[test]
+    fn a_shut_off_records_the_end_when_the_stream_never_reports_it() {
+        let b = Mutex::new(Buffer::default());
+        let start = Instant::now();
+        await_closed(&b, POLL * 3, SHUT_OFF);
+        assert!(start.elapsed() >= POLL * 3);
+        assert_eq!(b.lock().unwrap().closed.as_deref(), Some(SHUT_OFF));
     }
 
     #[test]

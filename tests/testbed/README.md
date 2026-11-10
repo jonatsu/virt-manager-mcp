@@ -26,7 +26,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | `write-file-mode.json` | `write_file` modes: 644 by default, an explicit `600`, a kept `640` on append and overwrite, a refused `4755`. |
 | `start-vm-waits-for-agent.json` | Stops the guest agent, which restarts 20 s later; `start_vm` waits and reports it responding. |
 | `console-reopen.json` | A second `console_open` reports the session open; with `force: true` it replaces the session, which then works. |
-| `console-closed-on-power-off.json` | Powers the VM off under an open console, once from inside the guest and once with a forced `stop_vm`; each next read reports the console closed. The case starts the VM again. |
+| `console-closed-on-power-off.json` | Powers the VM off under an open console, once from inside the guest and once with a forced `stop_vm`; each next read reports the console closed, the one after `stop_vm` with `wait_ms: 0`. The case starts the VM again. |
 
 The template cases below run with `config-templates.toml`. They need the template volume `tpl-debian13.qcow2`, which
 `scripts/make-template.sh` builds ([`docs/templates.md`](../../docs/templates.md)).

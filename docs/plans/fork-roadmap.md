@@ -98,8 +98,10 @@ Reviews of earlier work found these. None blocks the server's use.
     libvirt domain implements, so tests drive it with a scripted guest. They show that a failed `chmod` never opens
     an existing file, that a new file gets its mode before any data, and that a new file whose `chmod` fails is
     removed unwritten.
-05. **`console_read` with `wait_ms: 0` right after `stop_vm`** can return `closed: null`, because the reader records
-    the stream's end a moment later. A non-zero wait reports it.
+05. **Done: `console_read` with `wait_ms: 0` right after `stop_vm` reports the console closed.** The reader records
+    the stream's end a moment after the VM stops, so such a read could return `closed: null`. Once the VM is off,
+    `stop_vm` now waits up to 2 s for the session to record the end, and records it itself when the stream never
+    reports it. `console-closed-on-power-off.json` reads with `wait_ms: 0` after its forced `stop_vm`.
 06. **Convert the existing documents to the short, plain style.** `AGENTS.md` asks for short, plain designs. Bring this
     roadmap, the brainstorm draft, the test-bed README and the research notes into the same style; the research copies
     keep their copied text and change only their own notes.

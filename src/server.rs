@@ -27,6 +27,10 @@ use crate::{ansi, display, fsops, jobs, manage, wait};
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
 
+/// How long stop_vm waits for a console session to see its stream end once the VM is off; the reader polls every
+/// 30 ms, so this is ample.
+const CONSOLE_END_WAIT: Duration = Duration::from_secs(2);
+
 /// Tools hidden in read-only mode.
 const MUTATING_TOOLS: &[&str] = &[
     "guest_info",
@@ -793,8 +797,9 @@ impl VirtServer {
             let wait = Duration::from_secs(p.wait_secs.unwrap_or(60).min(300));
             let off = s.hv.stop(&p.vm, p.force, wait)?;
             let msg = if off {
-                // Keep any console session: its reader sees the stream end and records why, so a
-                // later console_read reports the console closed instead of "no console open".
+                // Keep any console session, so a later console_read reports the console closed instead of "no
+                // console open"; wait for it to record the end first, so even a read with wait_ms 0 sees it.
+                s.consoles.note_shut_off(&p.vm, CONSOLE_END_WAIT);
                 format!("VM '{}' is shut off", p.vm)
             } else {
                 format!(

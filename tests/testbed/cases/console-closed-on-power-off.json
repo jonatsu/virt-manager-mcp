@@ -121,7 +121,7 @@
     "tool": "console_read",
     "args": {
       "vm": "trial-deb13",
-      "wait_ms": 5000
+      "wait_ms": 0
     },
     "expect": {
       "contains": "console stream ended"
