@@ -338,6 +338,30 @@ pub fn encode_png(
     Ok((png, img.width(), img.height()))
 }
 
+/// The number of pixels in which `a` and `b` differ, compared exactly, inside `area` or over the whole frame. Returns
+/// `None` when the frames differ in size, which counts as a change of every pixel. The caller maps `area` onto the
+/// frame, so it lies inside both frames when their sizes match.
+pub fn changed_pixels(a: &RgbImage, b: &RgbImage, area: Option<Rect>) -> Option<u64> {
+    if a.dimensions() != b.dimensions() {
+        return None;
+    }
+    let area = area.unwrap_or(Rect {
+        x: 0,
+        y: 0,
+        width: a.width(),
+        height: a.height(),
+    });
+    let mut changed = 0;
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                changed += 1;
+            }
+        }
+    }
+    Some(changed)
+}
+
 /// Presses a set of keys simultaneously (e.g. ctrl+alt+delete) and releases them.
 pub fn send_combo(dom: &Domain, keys: &[u32], hold_ms: u32) -> Result<()> {
     if keys.is_empty() {
@@ -809,6 +833,27 @@ mod tests {
         assert_eq!(decoded(&png).dimensions(), (1280, 720));
         assert_eq!(encode_png(&frame, None, None).unwrap().1, 1600);
         assert_eq!(encode_png(&frame, None, Some(0)).unwrap().1, 1600);
+    }
+
+    #[test]
+    fn changed_pixels_counts_exact_differences_in_the_area() {
+        let a = RgbImage::from_pixel(10, 10, image::Rgb([9, 9, 9]));
+        let mut b = a.clone();
+        // One channel off by one is a change.
+        b.put_pixel(0, 0, image::Rgb([9, 9, 10]));
+        b.put_pixel(5, 5, image::Rgb([0, 0, 0]));
+        b.put_pixel(9, 9, image::Rgb([0, 0, 0]));
+        assert_eq!(changed_pixels(&a, &a, None), Some(0));
+        assert_eq!(changed_pixels(&a, &b, None), Some(3));
+        assert_eq!(changed_pixels(&a, &b, Some(rect(5, 5, 5, 5))), Some(2));
+        assert_eq!(changed_pixels(&a, &b, Some(rect(1, 1, 4, 4))), Some(0));
+        assert_eq!(changed_pixels(&a, &b, Some(rect(9, 9, 1, 1))), Some(1));
+        // A size change is not a pixel count.
+        assert_eq!(changed_pixels(&a, &RgbImage::new(10, 11), None), None);
+        assert_eq!(
+            changed_pixels(&a, &RgbImage::new(11, 10), Some(rect(0, 0, 1, 1))),
+            None
+        );
     }
 
     // Tests with the OCR models. They read the probe's screenshots in docs/research/2026-11-10-ocr-probe/. Run them

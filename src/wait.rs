@@ -2,15 +2,19 @@
 //!
 //! The loop polls every 30 ms. Console conditions scan the session buffer on the loop's own thread. Each agent and
 //! command condition runs its probes on a thread of its own, at most one at a time and about once a second, so a hung
-//! guest agent delays neither the console checks nor the end of the call. The loop reaches the world only through
-//! [`Env`] and [`Guest`], so tests drive it with a fake clock and fake probes.
+//! guest agent delays neither the console checks nor the end of the call. A wait with screen conditions captures
+//! their display head the same way, on one probe thread every 500 ms, and every screen condition reads that
+//! capture. The loop reaches the world only through [`Env`] and [`Guest`], so tests drive it with a fake clock and
+//! fake probes.
 
 use std::cell::OnceCell;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use image::RgbImage;
 use regex::bytes::Regex;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -21,6 +25,7 @@ use crate::agent::{Agent, ExecSpec, GuestOs};
 use crate::ansi;
 use crate::config::Config;
 use crate::console::{Consoles, SessionScan};
+use crate::display::{self, CheckedRegion, Region};
 use crate::jobs;
 use uuid::Uuid;
 
@@ -38,6 +43,19 @@ const MAX_TEXT: usize = 4096;
 const MAX_CONDITIONS: usize = 16;
 /// Most bytes of a job's output one `job_output` probe reads.
 const MAX_JOB_READ: usize = 1024 * 1024;
+/// How often a wait with screen conditions captures a frame; the interval `max_changed_pixels`'s default was
+/// calibrated on.
+const FRAME_EVERY: Duration = Duration::from_millis(500);
+/// Most pixels two consecutive frames of a settled screen may differ in, by default.
+const DEFAULT_MAX_CHANGED_PIXELS: u32 = 600;
+/// How long the screen must hold still, by default, in seconds.
+const DEFAULT_SETTLE_SECS: f64 = 3.0;
+/// The shortest `settle_secs`: one frame interval.
+const MIN_SETTLE_SECS: f64 = 0.5;
+/// The time past the call's timeout that a screenshot attachment may take, within the call's bound.
+const ATTACH_MARGIN: Duration = Duration::from_secs(2);
+/// Width that an attached screenshot is downscaled to, as `screenshot` does by default.
+const ATTACH_WIDTH: u32 = 1280;
 
 /// One thing to wait for.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -73,6 +91,21 @@ pub enum Condition {
         /// Byte offset in the job's output to match from, such as `next` from an earlier result. Default 0.
         since: Option<u64>,
     },
+    /// The screen has stopped changing: over `settle_secs`, no two consecutive frames, captured every 500 ms,
+    /// differ in more than `max_changed_pixels` pixels, compared exactly. A change of frame size counts as a change.
+    /// All screen conditions of one wait name the same display head. Refused in read-only mode.
+    ScreenSettled {
+        /// Most pixels two consecutive frames may differ in while the screen counts as still. Default 600, which
+        /// lets a blinking text cursor through.
+        max_changed_pixels: Option<u32>,
+        /// Seconds the screen must hold still; at least 0.5 and at most the call's timeout. Default 3.
+        settle_secs: Option<f64>,
+        /// Compare only this part of the screen, in pixels of a full-screen image from `screenshot` or a wait's
+        /// attachment, with that image's size.
+        region: Option<Region>,
+        /// Display head index (default 0).
+        screen: Option<u32>,
+    },
 }
 
 impl Condition {
@@ -84,6 +117,19 @@ impl Condition {
             Condition::Command { .. } => "command",
             Condition::JobDone { .. } => "job_done",
             Condition::JobOutput { .. } => "job_output",
+            Condition::ScreenSettled { .. } => "screen_settled",
+        }
+    }
+
+    /// The display head a screen condition reads, or `None` for the other kinds.
+    fn screen(&self) -> Option<u32> {
+        match self {
+            Condition::ScreenSettled { screen, .. } => Some(screen.unwrap_or(0)),
+            Condition::Console { .. }
+            | Condition::Agent
+            | Condition::Command { .. }
+            | Condition::JobDone { .. }
+            | Condition::JobOutput { .. } => None,
         }
     }
 }
@@ -104,16 +150,40 @@ pub enum Check {
         regex: Regex,
         since: u64,
     },
+    ScreenSettled {
+        max_changed_pixels: u32,
+        settle: Duration,
+        region: Option<CheckedRegion>,
+        screen: u32,
+    },
 }
 
 /// Refuses a list of conditions the server will not wait for, before any libvirt call: an empty or overlong list, a
-/// pattern that does not compile, an offset without its generation, and a command in read-only mode.
-pub fn validate_conditions(config: &Config, conditions: &[Condition]) -> Result<Vec<Check>> {
+/// pattern that does not compile, an offset without its generation, a command or screen condition in read-only
+/// mode, screen conditions on different display heads, and a bad region or `settle_secs` for a call of `timeout`.
+pub fn validate_conditions(
+    config: &Config,
+    timeout: Duration,
+    conditions: &[Condition],
+) -> Result<Vec<Check>> {
     if conditions.is_empty() {
         bail!("name at least one condition");
     }
     if conditions.len() > MAX_CONDITIONS {
         bail!("name at most {MAX_CONDITIONS} conditions");
+    }
+    // One capture per poll serves every screen condition, so they all read one head.
+    let mut heads = conditions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| Some((i, c.screen()?)));
+    if let Some((first, head)) = heads.next()
+        && let Some((i, other)) = heads.find(|&(_, h)| h != head)
+    {
+        bail!(
+            "condition {i}: all screen conditions of one wait must name the same display head; condition {first} \
+             names screen {head} and condition {i} screen {other}"
+        );
     }
     conditions
         .iter()
@@ -164,9 +234,46 @@ pub fn validate_conditions(config: &Config, conditions: &[Condition]) -> Result<
                         .map_err(|e| anyhow!("condition {i}: bad pattern: {e}"))?,
                     since: since.unwrap_or(0),
                 },
+                Condition::ScreenSettled {
+                    max_changed_pixels,
+                    settle_secs,
+                    region,
+                    screen,
+                } => {
+                    if config.read_only {
+                        bail!("condition {i}: screen conditions are disabled in read-only mode");
+                    }
+                    Check::ScreenSettled {
+                        max_changed_pixels: max_changed_pixels
+                            .unwrap_or(DEFAULT_MAX_CHANGED_PIXELS),
+                        settle: settle_duration(*settle_secs, timeout)
+                            .map_err(|e| anyhow!("condition {i}: {e}"))?,
+                        region: region
+                            .map(|r| r.check())
+                            .transpose()
+                            .map_err(|e| anyhow!("condition {i}: {e:#}"))?,
+                        screen: screen.unwrap_or(0),
+                    }
+                }
             })
         })
         .collect()
+}
+
+/// Checks `settle_secs`: at least one frame interval and at most the call's `timeout`. A zero timeout is left to
+/// [`run`], whose refusal says that screen conditions need at least 1 s.
+fn settle_duration(settle_secs: Option<f64>, timeout: Duration) -> Result<Duration> {
+    let secs = settle_secs.unwrap_or(DEFAULT_SETTLE_SECS);
+    if secs.is_nan() || secs < MIN_SETTLE_SECS {
+        bail!("settle_secs must be at least {MIN_SETTLE_SECS}, got {secs}");
+    }
+    if !timeout.is_zero() && secs > timeout.as_secs_f64() {
+        bail!(
+            "settle_secs {secs} is above the call's timeout of {} s",
+            timeout.as_secs()
+        );
+    }
+    Duration::try_from_secs_f64(secs).map_err(|e| anyhow!("settle_secs {secs}: {e}"))
 }
 
 /// Everything the loop needs from the server and the clock.
@@ -211,6 +318,9 @@ pub trait Guest: Send + Sync + 'static {
         max_bytes: usize,
         timeout_secs: i32,
     ) -> Result<Option<jobs::Read>>;
+    /// Display head `screen` at full resolution. libvirt bounds the call by no timeout, so the loop never waits on
+    /// one.
+    fn capture(&self, screen: u32) -> Result<RgbImage>;
 }
 
 /// The guest agent of a real domain.
@@ -271,6 +381,10 @@ impl Guest for LiveGuest {
     ) -> Result<Option<jobs::Read>> {
         jobs::read(&Agent::new(&self.0, timeout_secs), job, since, max_bytes)
     }
+
+    fn capture(&self, screen: u32) -> Result<RgbImage> {
+        display::capture(&self.0, screen)
+    }
 }
 
 /// The real environment of a wait on `vm`.
@@ -318,6 +432,8 @@ pub enum Outcome {
         next: Option<u64>,
         /// For a console condition: the session's generation, to pass with `next`.
         generation: Option<u64>,
+        /// For a screen condition: the frame it matched on.
+        frame: Option<ScreenFrame>,
     },
     Closed {
         index: Option<usize>,
@@ -343,6 +459,7 @@ impl Outcome {
                 text,
                 next,
                 generation,
+                frame,
             } => {
                 let mut v = json!({
                     "result": "matched", "index": index, "kind": kind, "text": text, "waited_ms": waited_ms,
@@ -352,6 +469,9 @@ impl Outcome {
                 }
                 if let Some(generation) = generation {
                     v["generation"] = json!(generation);
+                }
+                if let Some(frame) = frame {
+                    v["screen"] = json!(frame.screen);
                 }
                 v
             }
@@ -386,11 +506,14 @@ pub fn run(
 ) -> Result<Outcome> {
     if timeout.is_zero() && checks.iter().any(|c| !matches!(c, Check::Console { .. })) {
         bail!(
-            "timeout_secs 0 checks console conditions once; agent, command and job conditions need at least 1 s"
+            "timeout_secs 0 checks console conditions once; agent, command, job and screen conditions need at \
+             least 1 s"
         );
     }
     let start = env.now();
     let deadline = start + timeout;
+    // Validation made every screen condition name the same head.
+    let mut frames = checks.iter().find_map(Check::screen).map(FrameSource::new);
     let mut states = checks
         .into_iter()
         .map(|c| State::new(c, env))
@@ -412,6 +535,11 @@ pub fn run(
             }
             Some(Err(_)) | None => false,
         };
+        // A new frame, when one arrived since the last poll; every screen condition reads the same one.
+        let frame = match &mut frames {
+            Some(frames) if !stopped => frames.poll(now, deadline, &guest)?,
+            _ => None,
+        };
         if !stopped {
             vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id());
         }
@@ -425,12 +553,19 @@ pub fn run(
             if stopped && !matches!(state, State::Console(_)) {
                 continue;
             }
-            match state.poll(scan.as_ref(), &stripped, &guest, now, deadline, domain_id)? {
+            let looks = Looks {
+                scan: scan.as_ref(),
+                stripped: &stripped,
+                frame: frame.as_ref(),
+                domain_id,
+            };
+            match state.poll(&looks, &guest, now, deadline)? {
                 Poll::Pending => {}
                 Poll::Hit {
                     text,
                     next,
                     generation,
+                    frame,
                 } => {
                     if let (Some(to), Some(generation)) = (next, generation) {
                         env.advance_cursor(generation, to);
@@ -441,6 +576,7 @@ pub fn run(
                         text,
                         next,
                         generation,
+                        frame,
                     });
                 }
                 Poll::Closed(reason) => {
@@ -486,6 +622,7 @@ fn timed_out(states: &mut [State]) -> Result<Outcome> {
                         text,
                         next,
                         generation: None,
+                        frame: None,
                     });
                 }
                 if j.output.is_some() {
@@ -501,14 +638,107 @@ fn timed_out(states: &mut [State]) -> Result<Outcome> {
                         text,
                         next: None,
                         generation: None,
+                        frame: None,
                     });
                 }
                 commands.push((index, c.pid, c.last_code));
             }
-            State::Agent(_) => {}
+            State::Agent(_) | State::Settled(_) => {}
         }
     }
     Ok(Outcome::TimedOut { resume, commands })
+}
+
+/// A screenshot attached to a match, or why the match has none.
+#[derive(Debug, PartialEq)]
+pub enum Attachment {
+    Image {
+        png: Vec<u8>,
+        width: u32,
+        height: u32,
+        screen: u32,
+    },
+    Failed(String),
+}
+
+impl Attachment {
+    /// Adds the image's size and display head, or the note, to a result's JSON.
+    pub fn describe(&self, result: &mut Value) {
+        match self {
+            Attachment::Image {
+                width,
+                height,
+                screen,
+                ..
+            } => {
+                result["screenshot"] =
+                    json!({ "width": width, "height": height, "screen": screen });
+            }
+            Attachment::Failed(note) => result["screenshot_note"] = json!(note),
+        }
+    }
+}
+
+/// The screenshot a match attaches, downscaled to [`ATTACH_WIDTH`] pixels wide: the frame a screen condition matched
+/// on, or for any other match a capture of display head 0 made now. That capture runs on a probe thread and is given
+/// up 2 s after the match or after `deadline`, the end of the wait, whichever is earlier, so the call still returns
+/// within its timeout plus 2 s. Returns `None` unless `outcome` is a match.
+pub fn attach(
+    env: &dyn Env,
+    guest: &Arc<dyn Guest>,
+    outcome: &Outcome,
+    deadline: Instant,
+) -> Option<Attachment> {
+    let Outcome::Matched { frame, .. } = outcome else {
+        return None;
+    };
+    let (screen, image) = match frame {
+        Some(frame) => (frame.screen, Ok(frame.image.clone())),
+        None => (0, capture_by(env, guest, 0, deadline).map(Arc::new)),
+    };
+    let encoded = image.and_then(|image| {
+        display::encode_png(&image, None, Some(ATTACH_WIDTH)).context("encoding the screenshot")
+    });
+    Some(match encoded {
+        Ok((png, width, height)) => Attachment::Image {
+            png,
+            width,
+            height,
+            screen,
+        },
+        Err(e) => Attachment::Failed(format!("no screenshot attached: {e:#}")),
+    })
+}
+
+/// Captures display head `screen` on a probe thread, waiting until 2 s past now or past `deadline`, whichever is
+/// earlier.
+fn capture_by(
+    env: &dyn Env,
+    guest: &Arc<dyn Guest>,
+    screen: u32,
+    deadline: Instant,
+) -> Result<RgbImage> {
+    let now = env.now();
+    let limit = now.min(deadline) + ATTACH_MARGIN;
+    let mut probe = Probe::default();
+    if !probe.start_if_due(now, limit, Duration::ZERO, guest, move |g, _| {
+        g.capture(screen)
+    }) {
+        bail!("could not start capturing display head {screen}");
+    }
+    loop {
+        if let Some(image) = probe.take() {
+            return image.with_context(|| format!("capturing display head {screen}"));
+        }
+        let now = env.now();
+        if now >= limit {
+            bail!(
+                "capturing display head {screen} did not finish within {} s",
+                ATTACH_MARGIN.as_secs()
+            );
+        }
+        env.sleep(POLL.min(limit - now));
+    }
 }
 
 /// The session's output from the earliest start of any console condition, or `None` without console conditions.
@@ -529,6 +759,7 @@ enum Poll {
         text: String,
         next: Option<u64>,
         generation: Option<u64>,
+        frame: Option<ScreenFrame>,
     },
     Closed(String),
 }
@@ -539,7 +770,92 @@ impl Poll {
             text,
             next: None,
             generation: None,
+            frame: None,
         }
+    }
+}
+
+/// What one poll observed, shared by every condition: the console scan, its stripped text, the new frame, and the
+/// domain's current ID.
+struct Looks<'a> {
+    scan: Option<&'a Result<SessionScan>>,
+    stripped: &'a OnceCell<ansi::Stripped>,
+    frame: Option<&'a Captured>,
+    domain_id: Option<u32>,
+}
+
+/// A frame of the display head that a wait's screen conditions read, with the time its capture started.
+struct Captured {
+    image: Arc<RgbImage>,
+    at: Instant,
+}
+
+/// A frame a screen condition matched on, kept for the screenshot attachment.
+#[derive(Clone, PartialEq)]
+pub struct ScreenFrame {
+    pub screen: u32,
+    pub image: Arc<RgbImage>,
+}
+
+impl fmt::Debug for ScreenFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (w, h) = self.image.dimensions();
+        write!(
+            f,
+            "ScreenFrame {{ screen: {}, size: {w}x{h} }}",
+            self.screen
+        )
+    }
+}
+
+/// Captures the display head of a wait's screen conditions on a probe thread, every [`FRAME_EVERY`].
+struct FrameSource {
+    screen: u32,
+    probe: Probe<Result<RgbImage>>,
+    /// When the capture in flight started.
+    started: Option<Instant>,
+}
+
+impl FrameSource {
+    fn new(screen: u32) -> Self {
+        Self {
+            screen,
+            probe: Probe::default(),
+            started: None,
+        }
+    }
+
+    /// The frame that arrived since the last poll, if any, and starts the next capture when one is due. A capture
+    /// that failed ends the wait with its cause. One still in flight at the deadline is left to finish on its own
+    /// thread, and its frame is dropped.
+    fn poll(
+        &mut self,
+        now: Instant,
+        deadline: Instant,
+        guest: &Arc<dyn Guest>,
+    ) -> Result<Option<Captured>> {
+        let frame = match self.probe.take() {
+            Some(image) => {
+                let image =
+                    image.with_context(|| format!("capturing display head {}", self.screen))?;
+                let at = self.started.take().expect("a finished capture had a start");
+                Some(Captured {
+                    image: Arc::new(image),
+                    at,
+                })
+            }
+            None => None,
+        };
+        let screen = self.screen;
+        if self
+            .probe
+            .start_if_due(now, deadline, FRAME_EVERY, guest, move |g, _| {
+                g.capture(screen)
+            })
+        {
+            self.started = Some(now);
+        }
+        Ok(frame)
     }
 }
 
@@ -548,6 +864,7 @@ enum State {
     Agent(Probe<bool>),
     Command(CommandState),
     Job(JobState),
+    Settled(SettleState),
 }
 
 impl State {
@@ -583,6 +900,15 @@ impl State {
             Check::JobOutput { job, regex, since } => {
                 State::Job(JobState::new(job, Some(regex), since))
             }
+            Check::ScreenSettled {
+                max_changed_pixels,
+                settle,
+                region,
+                screen,
+            } => State::Settled(SettleState {
+                screen,
+                settle: Settle::new(max_changed_pixels, settle, region),
+            }),
         })
     }
 
@@ -592,23 +918,26 @@ impl State {
             State::Agent(_) => "agent",
             State::Command(_) => "command",
             State::Job(j) => j.kind(),
+            State::Settled(_) => "screen_settled",
         }
     }
 
     fn poll(
         &mut self,
-        scan: Option<&Result<SessionScan>>,
-        stripped: &OnceCell<ansi::Stripped>,
+        looks: &Looks<'_>,
         guest: &Arc<dyn Guest>,
         now: Instant,
         deadline: Instant,
-        domain_id: Option<u32>,
     ) -> Result<Poll> {
         match self {
-            State::Console(c) => Ok(match scan {
-                Some(scan) => c.poll(scan, stripped, domain_id),
+            State::Console(c) => Ok(match looks.scan {
+                Some(scan) => c.poll(scan, looks.stripped, looks.domain_id),
                 None => Poll::Pending,
             }),
+            State::Settled(s) => match looks.frame {
+                Some(frame) => s.poll(frame),
+                None => Ok(Poll::Pending),
+            },
             State::Agent(p) => {
                 if p.take() == Some(true) {
                     return Ok(Poll::hit("the guest agent answered".into()));
@@ -619,6 +948,93 @@ impl State {
             State::Command(c) => c.poll(now, deadline, guest),
             State::Job(j) => j.poll(now, deadline, guest),
         }
+    }
+}
+
+impl Check {
+    /// The display head a screen check reads, or `None` for the other kinds.
+    fn screen(&self) -> Option<u32> {
+        match self {
+            Check::ScreenSettled { screen, .. } => Some(*screen),
+            Check::Console { .. }
+            | Check::Agent
+            | Check::Command(_)
+            | Check::JobDone(_)
+            | Check::JobOutput { .. } => None,
+        }
+    }
+}
+
+/// A `screen_settled` condition.
+struct SettleState {
+    screen: u32,
+    settle: Settle,
+}
+
+impl SettleState {
+    fn poll(&mut self, frame: &Captured) -> Result<Poll> {
+        let Some(held) = self.settle.push(frame.at, &frame.image)? else {
+            return Ok(Poll::Pending);
+        };
+        Ok(Poll::Hit {
+            text: format!(
+                "the screen held still for {:.1} s, with at most {} pixels changed between frames",
+                held.as_secs_f64(),
+                self.settle.max_changed_pixels
+            ),
+            next: None,
+            generation: None,
+            frame: Some(ScreenFrame {
+                screen: self.screen,
+                image: frame.image.clone(),
+            }),
+        })
+    }
+}
+
+/// Whether a sequence of frames has settled: it keeps the previous frame and the time of the frame that last changed
+/// beyond the threshold.
+struct Settle {
+    max_changed_pixels: u32,
+    settle: Duration,
+    region: Option<CheckedRegion>,
+    previous: Option<Arc<RgbImage>>,
+    /// The capture time of the first frame, or of the last frame that differed from the one before it in more than
+    /// `max_changed_pixels` pixels or in size.
+    still_since: Option<Instant>,
+}
+
+impl Settle {
+    fn new(max_changed_pixels: u32, settle: Duration, region: Option<CheckedRegion>) -> Self {
+        Self {
+            max_changed_pixels,
+            settle,
+            region,
+            previous: None,
+            still_since: None,
+        }
+    }
+
+    /// Takes in the frame captured at `at`, later than the one before. Returns how long the screen has held still
+    /// once that is at least `settle`.
+    fn push(&mut self, at: Instant, frame: &Arc<RgbImage>) -> Result<Option<Duration>> {
+        let changed = match &self.previous {
+            None => true,
+            Some(previous) => {
+                let area = self
+                    .region
+                    .map(|r| r.on_frame(frame.width(), frame.height()))
+                    .transpose()?;
+                display::changed_pixels(previous, frame, area)
+                    .is_none_or(|n| n > u64::from(self.max_changed_pixels))
+            }
+        };
+        self.previous = Some(frame.clone());
+        if changed {
+            self.still_since = Some(at);
+        }
+        let held = at - self.still_since.expect("set by the first frame");
+        Ok((held >= self.settle).then_some(held))
     }
 }
 
@@ -697,6 +1113,7 @@ impl JobState {
                 text: text(m.as_bytes()),
                 next: Some(from + m.end() as u64),
                 generation: None,
+                frame: None,
             }));
         }
         // Read on from the last unfinished line, so a match split across reads is found. A cut read with no line end
@@ -830,6 +1247,7 @@ impl ConsoleState {
                     text,
                     next: Some(next),
                     generation: Some(self.generation),
+                    frame: None,
                 });
             }
         }
@@ -899,8 +1317,8 @@ impl<T: Send + 'static> Probe<T> {
         }
     }
 
-    /// Starts `f` on its own thread when no probe is in flight and the last one started `every` ago or more. Each
-    /// agent call gets the time left, between 1 and 2 s.
+    /// Starts `f` on its own thread when no probe is in flight and the last one started `every` ago or more, and
+    /// returns whether it started. Each agent call gets the time left, between 1 and 2 s.
     fn start_if_due(
         &mut self,
         now: Instant,
@@ -908,9 +1326,9 @@ impl<T: Send + 'static> Probe<T> {
         every: Duration,
         guest: &Arc<dyn Guest>,
         f: impl FnOnce(&dyn Guest, i32) -> T + Send + 'static,
-    ) {
+    ) -> bool {
         if self.inflight.is_some() || self.next_at.is_some_and(|at| now < at) || now >= deadline {
-            return;
+            return false;
         }
         let timeout_secs = if deadline - now >= Duration::from_secs(2) {
             2
@@ -924,10 +1342,13 @@ impl<T: Send + 'static> Probe<T> {
             .spawn(move || {
                 let _ = tx.send(f(guest.as_ref(), timeout_secs));
             });
+        self.next_at = Some(now + every);
         if spawned.is_ok() {
             self.inflight = Some(rx);
+            true
+        } else {
+            false
         }
-        self.next_at = Some(now + every);
     }
 }
 
@@ -1182,6 +1603,13 @@ mod tests {
         job: Mutex<Vec<(jobs::State, &'static [u8])>>,
         /// The `since` of each job read.
         job_reads: Mutex<Vec<u64>>,
+        /// The frame each capture returns in turn; the last repeats. Empty means every capture fails, as on a VM
+        /// without graphics.
+        frames: Mutex<Vec<RgbImage>>,
+        /// The display head of each capture.
+        captures: Mutex<Vec<u32>>,
+        /// When set, every capture blocks until the sender is dropped.
+        capture_hang: Option<Mutex<Receiver<()>>>,
     }
 
     impl FakeGuest {
@@ -1197,6 +1625,17 @@ mod tests {
                 hang: None,
                 job: Mutex::new(vec![]),
                 job_reads: Mutex::new(vec![]),
+                frames: Mutex::new(vec![]),
+                captures: Mutex::new(vec![]),
+                capture_hang: None,
+            }
+        }
+
+        /// A guest whose captures return `frames` in turn.
+        fn showing(frames: Vec<RgbImage>) -> Self {
+            Self {
+                frames: Mutex::new(frames),
+                ..Self::new()
             }
         }
 
@@ -1284,6 +1723,23 @@ mod tests {
                 cut,
             }))
         }
+
+        fn capture(&self, screen: u32) -> Result<RgbImage> {
+            if let Some(rx) = &self.capture_hang {
+                let _ = rx.lock().unwrap().recv();
+            }
+            self.captures.lock().unwrap().push(screen);
+            let mut frames = self.frames.lock().unwrap();
+            let Some(frame) = frames.first().cloned() else {
+                bail!(
+                    "screenshot failed: this domain has no graphics (does the VM have a graphical display?)"
+                );
+            };
+            if frames.len() > 1 {
+                frames.remove(0);
+            }
+            Ok(frame)
+        }
     }
 
     fn job(id: &Uuid) -> String {
@@ -1304,8 +1760,463 @@ mod tests {
     }
 
     fn wait(env: &FakeEnv, guest: FakeGuest, conditions: &[Condition], secs: u64) -> Outcome {
-        let checks = validate_conditions(&Config::default(), conditions).unwrap();
+        let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, conditions).unwrap();
         run(env, Arc::new(guest), checks, Duration::from_secs(secs)).unwrap()
+    }
+
+    /// A timeout long enough for any condition's validation.
+    const ANY_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// A `width`x`height` frame of one grey `level`.
+    fn solid(width: u32, height: u32, level: u8) -> RgbImage {
+        RgbImage::from_pixel(width, height, image::Rgb([level; 3]))
+    }
+
+    /// A 100x10 black frame whose first `changed` pixels, in row order, are white.
+    fn with_changed(changed: u32) -> RgbImage {
+        RgbImage::from_fn(100, 10, |x, y| {
+            image::Rgb([if y * 100 + x < changed { 255 } else { 0 }; 3])
+        })
+    }
+
+    fn settled(max_changed_pixels: Option<u32>, settle_secs: Option<f64>) -> Condition {
+        Condition::ScreenSettled {
+            max_changed_pixels,
+            settle_secs,
+            region: None,
+            screen: None,
+        }
+    }
+
+    /// Validates `conditions` for a call of `secs` and runs them on `guest`.
+    fn wait_on(
+        env: &FakeEnv,
+        guest: &Arc<FakeGuest>,
+        conditions: &[Condition],
+        secs: u64,
+    ) -> Result<Outcome> {
+        let timeout = Duration::from_secs(secs);
+        let checks = validate_conditions(&Config::default(), timeout, conditions)?;
+        let guest: Arc<dyn Guest> = guest.clone();
+        run(env, guest, checks, timeout)
+    }
+
+    /// Feeds `frames`, captured at the given milliseconds, to a settle check, and returns the first time it held.
+    fn first_hold(
+        mut settle: Settle,
+        frames: impl IntoIterator<Item = (u64, RgbImage)>,
+    ) -> Option<u64> {
+        let origin = Instant::now();
+        frames.into_iter().find_map(|(at, frame)| {
+            settle
+                .push(origin + ms(at), &Arc::new(frame))
+                .unwrap()
+                .map(|_| at)
+        })
+    }
+
+    #[test]
+    fn a_still_screen_settles_after_settle_secs() {
+        let still = (0..10).map(|k| (k * 500, solid(4, 4, 7)));
+        let settle = Settle::new(600, Duration::from_secs(3), None);
+        assert_eq!(first_hold(settle, still), Some(3000));
+    }
+
+    #[test]
+    fn a_change_just_before_settle_secs_starts_the_count_again() {
+        // The frame at 2.5 s differs in every pixel from the one before, so the screen holds from 2.5 s.
+        let frames = (0..14).map(|k| (k * 500, solid(4, 4, if k < 5 { 7 } else { 8 })));
+        let settle = Settle::new(0, Duration::from_secs(3), None);
+        assert_eq!(first_hold(settle, frames), Some(5500));
+    }
+
+    #[test]
+    fn a_change_of_frame_size_counts_as_a_change() {
+        // Same colour, one column wider from 2.5 s, with a threshold that would let any pixel change through.
+        let frames = (0..14).map(|k| (k * 500, solid(if k < 5 { 4 } else { 5 }, 4, 7)));
+        let settle = Settle::new(u32::MAX, Duration::from_secs(3), None);
+        assert_eq!(first_hold(settle, frames), Some(5500));
+    }
+
+    #[test]
+    fn the_threshold_allows_up_to_max_changed_pixels() {
+        // Frames alternate between black and one with `changed` white pixels.
+        let alternating = |changed| {
+            (0..10).map(move |k| {
+                let frame = if k % 2 == 0 {
+                    with_changed(0)
+                } else {
+                    with_changed(changed)
+                };
+                (k * 500, frame)
+            })
+        };
+        let hold = |changed| {
+            first_hold(
+                Settle::new(600, Duration::from_secs(3), None),
+                alternating(changed),
+            )
+        };
+        assert_eq!(hold(599), Some(3000), "just below");
+        assert_eq!(hold(600), Some(3000), "at");
+        assert_eq!(hold(601), None, "just above");
+    }
+
+    #[test]
+    fn a_region_compares_only_its_part_of_the_screen() {
+        // The changing pixels are in the first six rows; the region is the bottom four rows of a 200x20 image the
+        // agent saw, which maps onto rows 6 to 9 of the 100x10 frame.
+        let region = Region {
+            x: 0,
+            y: 12,
+            width: 200,
+            height: 8,
+            image_width: Some(200),
+            image_height: Some(20),
+        }
+        .check()
+        .unwrap();
+        let frames = (0..10).map(|k| (k * 500, with_changed(if k % 2 == 0 { 0 } else { 600 })));
+        let settle = Settle::new(0, Duration::from_secs(3), Some(region));
+        assert_eq!(first_hold(settle, frames.clone()), Some(3000));
+        let whole = Settle::new(0, Duration::from_secs(3), None);
+        assert_eq!(first_hold(whole, frames), None);
+    }
+
+    #[test]
+    fn screen_settled_matches_on_the_polled_frames() {
+        // Frames start about every 510 ms (17 polls); the sixth one, at 2.55 s, changes in all its 16 pixels.
+        let mut frames = vec![solid(4, 4, 1); 5];
+        frames.push(solid(4, 4, 2));
+        let guest = Arc::new(FakeGuest::showing(frames));
+        let env = FakeEnv::new(vec![]);
+        let o = wait_on(
+            &env,
+            &guest,
+            &[console("never"), settled(Some(0), None)],
+            20,
+        )
+        .unwrap();
+        let Outcome::Matched {
+            index, kind, frame, ..
+        } = &o
+        else {
+            panic!("expected a match, got {o:?}")
+        };
+        assert_eq!((*index, *kind), (1, "screen_settled"));
+        assert_eq!(frame.as_ref().unwrap().screen, 0);
+        // It holds from 2.55 s, so it matches at the frame that starts 3 s after that.
+        let waited = env.elapsed();
+        assert!(
+            waited >= ms(5550) && waited < ms(6200),
+            "matched after {waited:?}"
+        );
+        let json = o.to_json(waited);
+        assert_eq!(json["screen"], 0, "{json}");
+        assert!(guest.captures.lock().unwrap().iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn screen_settled_captures_the_head_it_names() {
+        let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
+        let env = FakeEnv::new(vec![]);
+        let on_head_one = Condition::ScreenSettled {
+            max_changed_pixels: None,
+            settle_secs: Some(0.5),
+            region: None,
+            screen: Some(1),
+        };
+        let o = wait_on(&env, &guest, &[on_head_one], 5).unwrap();
+        assert_eq!(matched(&o).0, 0);
+        let captures = guest.captures.lock().unwrap().clone();
+        assert!(
+            !captures.is_empty() && captures.iter().all(|&s| s == 1),
+            "{captures:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_capture_ends_the_wait_with_its_cause() {
+        let guest = Arc::new(FakeGuest::new());
+        let env = FakeEnv::new(vec![]);
+        let err = wait_on(&env, &guest, &[settled(None, None)], 10).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.starts_with("capturing display head 0: ") && err.contains("no graphics"),
+            "{err}"
+        );
+        assert!(env.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_hung_capture_at_the_deadline_times_out_within_its_bound() {
+        let (tx, rx) = mpsc::channel();
+        let guest = Arc::new(FakeGuest {
+            capture_hang: Some(Mutex::new(rx)),
+            ..FakeGuest::showing(vec![solid(4, 4, 1)])
+        });
+        let env = FakeEnv::new(vec![]);
+        let o = wait_on(&env, &guest, &[settled(None, None)], 4).unwrap();
+        assert!(matches!(o, Outcome::TimedOut { .. }), "{o:?}");
+        assert!(env.elapsed() >= Duration::from_secs(4));
+        assert!(env.elapsed() <= Duration::from_secs(4) + POLL);
+        drop(tx);
+    }
+
+    #[test]
+    fn a_hung_capture_does_not_delay_console_checks() {
+        let (tx, rx) = mpsc::channel();
+        let guest = Arc::new(FakeGuest {
+            capture_hang: Some(Mutex::new(rx)),
+            ..FakeGuest::showing(vec![solid(4, 4, 1)])
+        });
+        let env = FakeEnv::new(vec![(ms(1500), b"login: ")]);
+        let o = wait_on(&env, &guest, &[settled(None, None), console("login:")], 10).unwrap();
+        assert_eq!(matched(&o).0, 1);
+        assert!(env.elapsed() <= ms(1500) + POLL, "{:?}", env.elapsed());
+        drop(tx);
+    }
+
+    #[test]
+    fn screen_settled_validates_its_settle_time_region_and_head() {
+        let refused = |timeout: u64, conditions: &[Condition]| {
+            let err =
+                validate_conditions(&Config::default(), Duration::from_secs(timeout), conditions)
+                    .err()
+                    .unwrap();
+            format!("{err:#}")
+        };
+        let err = refused(10, &[settled(None, Some(0.49))]);
+        assert!(err.contains("settle_secs must be at least 0.5"), "{err}");
+        let err = refused(10, &[settled(None, Some(10.5))]);
+        assert!(err.contains("above the call's timeout of 10 s"), "{err}");
+        // The default of 3 s is above a 2 s timeout too.
+        assert!(refused(2, &[settled(None, None)]).contains("above the call's timeout"));
+        for ok in [Some(0.5), Some(10.0), None] {
+            assert!(
+                validate_conditions(
+                    &Config::default(),
+                    Duration::from_secs(10),
+                    &[settled(None, ok)]
+                )
+                .is_ok(),
+                "{ok:?}"
+            );
+        }
+        let outside = Condition::ScreenSettled {
+            max_changed_pixels: None,
+            settle_secs: None,
+            region: Some(Region {
+                x: 90,
+                y: 0,
+                width: 20,
+                height: 10,
+                image_width: Some(100),
+                image_height: Some(100),
+            }),
+            screen: None,
+        };
+        let err = refused(10, &[outside]);
+        assert!(
+            err.starts_with("condition 0: the region") && err.contains("does not fit"),
+            "{err}"
+        );
+        let head = |screen| Condition::ScreenSettled {
+            max_changed_pixels: None,
+            settle_secs: None,
+            region: None,
+            screen,
+        };
+        let err = refused(10, &[head(None), console("x"), head(Some(1))]);
+        assert!(err.contains("must name the same display head"), "{err}");
+        assert!(
+            validate_conditions(
+                &Config::default(),
+                ANY_TIMEOUT,
+                &[head(None), head(Some(0))]
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_zero_timeout_refuses_screen_conditions() {
+        let checks =
+            validate_conditions(&Config::default(), Duration::ZERO, &[settled(None, None)])
+                .unwrap();
+        let env = FakeEnv::new(vec![]);
+        let err = run(&env, Arc::new(FakeGuest::new()), checks, Duration::ZERO)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("screen conditions need at least 1 s"), "{err}");
+    }
+
+    #[test]
+    fn read_only_mode_refuses_screen_settled() {
+        let read_only = Config {
+            read_only: true,
+            ..Config::default()
+        };
+        let err = validate_conditions(&read_only, ANY_TIMEOUT, &[settled(None, None)])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("disabled in read-only mode"), "{err}");
+        assert!(
+            validate_conditions(&Config::default(), ANY_TIMEOUT, &[settled(None, None)]).is_ok()
+        );
+    }
+
+    /// Runs `conditions` on `guest` for up to 10 s, then takes the attachment as `wait_for` does.
+    fn wait_and_attach(
+        env: &FakeEnv,
+        guest: &Arc<FakeGuest>,
+        conditions: &[Condition],
+    ) -> (Outcome, Option<Attachment>) {
+        let deadline = env.now() + Duration::from_secs(10);
+        let o = wait_on(env, guest, conditions, 10).unwrap();
+        let guest: Arc<dyn Guest> = guest.clone();
+        let attachment = attach(env, &guest, &o, deadline);
+        (o, attachment)
+    }
+
+    #[test]
+    fn a_console_match_attaches_a_downscaled_screenshot_of_head_0() {
+        let guest = Arc::new(FakeGuest::showing(vec![solid(1600, 900, 3)]));
+        let env = FakeEnv::new(vec![(ms(200), b"login: ")]);
+        let (o, attachment) = wait_and_attach(&env, &guest, &[console("login:")]);
+        assert_eq!(matched(&o).0, 0);
+        let Some(Attachment::Image {
+            png,
+            width,
+            height,
+            screen,
+        }) = &attachment
+        else {
+            panic!("expected an image, got {attachment:?}")
+        };
+        assert_eq!((*width, *height, *screen), (1280, 720, 0));
+        let decoded = image::load_from_memory(png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1280, 720));
+        assert_eq!(*guest.captures.lock().unwrap(), [0]);
+        let mut json = o.to_json(Duration::ZERO);
+        attachment.unwrap().describe(&mut json);
+        assert_eq!(
+            json["screenshot"],
+            json!({ "width": 1280, "height": 720, "screen": 0 })
+        );
+    }
+
+    #[test]
+    fn a_screen_match_attaches_the_frame_it_matched_on() {
+        let guest = Arc::new(FakeGuest::showing(vec![solid(8, 6, 5)]));
+        let env = FakeEnv::new(vec![]);
+        let on_head_two = Condition::ScreenSettled {
+            max_changed_pixels: None,
+            settle_secs: Some(0.5),
+            region: None,
+            screen: Some(2),
+        };
+        let (o, attachment) = wait_and_attach(&env, &guest, &[on_head_two]);
+        assert_eq!(matched(&o).0, 0);
+        let captures = guest.captures.lock().unwrap().len();
+        assert!(
+            matches!(
+                attachment,
+                Some(Attachment::Image {
+                    width: 8,
+                    height: 6,
+                    screen: 2,
+                    ..
+                })
+            ),
+            "{attachment:?}"
+        );
+        // The attachment reused the matched frame rather than capturing again.
+        assert_eq!(captures, 2, "two frames, half a second apart");
+    }
+
+    #[test]
+    fn a_failed_attachment_capture_keeps_the_match_and_adds_a_note() {
+        let guest = Arc::new(FakeGuest::new());
+        let env = FakeEnv::new(vec![(ms(0), b"login: ")]);
+        let (o, attachment) = wait_and_attach(&env, &guest, &[console("login:")]);
+        assert_eq!(matched(&o).0, 0);
+        let mut json = o.to_json(Duration::ZERO);
+        attachment.unwrap().describe(&mut json);
+        assert_eq!(json["result"], "matched");
+        let note = json["screenshot_note"].as_str().unwrap();
+        assert!(
+            note.starts_with("no screenshot attached: capturing display head 0: ")
+                && note.contains("no graphics"),
+            "{note}"
+        );
+        assert!(json.get("screenshot").is_none());
+    }
+
+    #[test]
+    fn a_hung_attachment_capture_is_given_up_after_2_s() {
+        let (tx, rx) = mpsc::channel();
+        let guest = Arc::new(FakeGuest {
+            capture_hang: Some(Mutex::new(rx)),
+            ..FakeGuest::showing(vec![solid(4, 4, 1)])
+        });
+        let env = FakeEnv::new(vec![(ms(100), b"login: ")]);
+        let (o, attachment) = wait_and_attach(&env, &guest, &[console("login:")]);
+        assert_eq!(matched(&o).0, 0);
+        let matched_at = ms(100) + POLL;
+        assert!(
+            env.elapsed() <= matched_at + ATTACH_MARGIN + POLL,
+            "{:?}",
+            env.elapsed()
+        );
+        let Some(Attachment::Failed(note)) = attachment else {
+            panic!("expected a note, got {attachment:?}")
+        };
+        assert!(note.contains("did not finish within 2 s"), "{note}");
+        drop(tx);
+    }
+
+    #[test]
+    fn an_attachment_capture_ends_with_the_call_margin_after_the_deadline() {
+        // A match found at the deadline itself leaves only the 2 s margin.
+        let (tx, rx) = mpsc::channel();
+        let guest: Arc<dyn Guest> = Arc::new(FakeGuest {
+            capture_hang: Some(Mutex::new(rx)),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let deadline = env.now();
+        env.sleep(Duration::from_secs(1));
+        let o = Outcome::Matched {
+            index: 0,
+            kind: "agent",
+            text: String::new(),
+            next: None,
+            generation: None,
+            frame: None,
+        };
+        let attachment = attach(&env, &guest, &o, deadline);
+        assert!(matches!(attachment, Some(Attachment::Failed(_))));
+        assert!(env.elapsed() <= ATTACH_MARGIN + POLL, "{:?}", env.elapsed());
+        drop(tx);
+    }
+
+    #[test]
+    fn only_a_match_gets_an_attachment() {
+        let guest = Arc::new(FakeGuest::showing(vec![solid(4, 4, 1)]));
+        let env = FakeEnv::new(vec![]);
+        let deadline = env.now();
+        let guest: Arc<dyn Guest> = guest;
+        for o in [
+            Outcome::Cancelled,
+            Outcome::TimedOut {
+                resume: vec![],
+                commands: vec![],
+            },
+        ] {
+            assert_eq!(attach(&env, &guest, &o, deadline), None);
+        }
     }
 
     fn matched(o: &Outcome) -> (usize, &str, Option<u64>) {
@@ -1392,7 +2303,8 @@ mod tests {
             ..FakeGuest::new()
         });
         let stopper = guest.clone();
-        let checks = validate_conditions(&Config::default(), &[Condition::Agent]).unwrap();
+        let checks =
+            validate_conditions(&Config::default(), ANY_TIMEOUT, &[Condition::Agent]).unwrap();
         let waiter = std::thread::spawn(move || {
             let env = FakeEnv::new(vec![]);
             let o = run(&env, guest, checks, Duration::from_secs(30)).unwrap();
@@ -1443,6 +2355,7 @@ mod tests {
         let env = FakeEnv::new(vec![]);
         let checks = validate_conditions(
             &Config::default(),
+            ANY_TIMEOUT,
             &[Condition::Command {
                 command: "true".into(),
             }],
@@ -1469,7 +2382,7 @@ mod tests {
             pattern: "step 3 is done".into(),
             since: None,
         };
-        let checks = validate_conditions(&Config::default(), &[cond]).unwrap();
+        let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, &[cond]).unwrap();
         let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
         assert_eq!(matched(&o), (0, "step 3 is done", Some(21)));
         assert_eq!(*guest.job_reads.lock().unwrap(), [0, 7]);
@@ -1492,7 +2405,7 @@ mod tests {
             pattern: "step 3".into(),
             since: None,
         };
-        let checks = validate_conditions(&Config::default(), &[cond]).unwrap();
+        let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, &[cond]).unwrap();
         let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
         assert_eq!(matched(&o).0, 0);
         let reads = guest.job_reads.lock().unwrap().clone();
@@ -1514,7 +2427,9 @@ mod tests {
         let done = Condition::JobDone {
             job: job(&Uuid::new_v4()),
         };
-        let checks = validate_conditions(&Config::default(), std::slice::from_ref(&done)).unwrap();
+        let checks =
+            validate_conditions(&Config::default(), ANY_TIMEOUT, std::slice::from_ref(&done))
+                .unwrap();
         let err = run(&env, Arc::new(FakeGuest::new()), checks, Duration::ZERO)
             .unwrap_err()
             .to_string();
@@ -1523,7 +2438,7 @@ mod tests {
             os: GuestOs::Windows,
             ..FakeGuest::new()
         };
-        let checks = validate_conditions(&Config::default(), &[done]).unwrap();
+        let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, &[done]).unwrap();
         let err = run(&env, Arc::new(windows), checks, Duration::from_secs(5))
             .unwrap_err()
             .to_string();
@@ -1543,7 +2458,7 @@ mod tests {
             pattern: "never".into(),
             since: Some(0),
         };
-        let checks = validate_conditions(&Config::default(), &[cond]).unwrap();
+        let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, &[cond]).unwrap();
         let o = run(&env, guest, checks, Duration::from_secs(3)).unwrap();
         let Outcome::TimedOut { resume, .. } = &o else {
             panic!("expected a timeout, got {o:?}")
@@ -1565,10 +2480,12 @@ mod tests {
         });
         let env = FakeEnv::new(vec![]);
         let done = Condition::JobDone { job: job(&id) };
-        let checks = validate_conditions(&Config::default(), std::slice::from_ref(&done)).unwrap();
+        let checks =
+            validate_conditions(&Config::default(), ANY_TIMEOUT, std::slice::from_ref(&done))
+                .unwrap();
         let o = run(&env, guest, checks, Duration::from_secs(10)).unwrap();
         assert_eq!(matched(&o), (0, "exited with code 3", None));
-        let checks = validate_conditions(&Config::default(), &[done]).unwrap();
+        let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, &[done]).unwrap();
         let err = run(
             &env,
             Arc::new(FakeGuest::new()),
@@ -1595,11 +2512,11 @@ mod tests {
                 since: None,
             },
         ];
-        assert!(validate_conditions(&read_only, &conds).is_ok());
+        assert!(validate_conditions(&read_only, ANY_TIMEOUT, &conds).is_ok());
         let bad = Condition::JobDone {
             job: "../etc".into(),
         };
-        assert!(validate_conditions(&read_only, &[bad]).is_err());
+        assert!(validate_conditions(&read_only, ANY_TIMEOUT, &[bad]).is_err());
     }
 
     #[test]
@@ -1611,6 +2528,7 @@ mod tests {
         let env = FakeEnv::new(vec![]);
         let checks = validate_conditions(
             &Config::default(),
+            ANY_TIMEOUT,
             &[Condition::Command {
                 command: "true".into(),
             }],
@@ -1624,7 +2542,8 @@ mod tests {
     #[test]
     fn a_zero_timeout_refuses_probe_conditions_and_checks_the_console_once() {
         let env = FakeEnv::new(vec![(ms(0), b"login: ")]);
-        let checks = validate_conditions(&Config::default(), &[Condition::Agent]).unwrap();
+        let checks =
+            validate_conditions(&Config::default(), ANY_TIMEOUT, &[Condition::Agent]).unwrap();
         let err = run(&env, Arc::new(FakeGuest::new()), checks, Duration::ZERO)
             .unwrap_err()
             .to_string();
@@ -1718,6 +2637,7 @@ mod tests {
         let env = FakeEnv::new(vec![]);
         let checks = validate_conditions(
             &Config::default(),
+            ANY_TIMEOUT,
             &[Condition::Command {
                 command: "test -e /tmp/ready".into(),
             }],
@@ -1757,6 +2677,7 @@ mod tests {
         let env = FakeEnv::new(vec![]);
         let checks = validate_conditions(
             &Config::default(),
+            ANY_TIMEOUT,
             &[Condition::Command {
                 command: "true".into(),
             }],
@@ -1771,7 +2692,10 @@ mod tests {
     #[test]
     fn validation_refuses_bad_conditions() {
         let refused = |config: &Config, c: Condition| {
-            validate_conditions(config, &[c]).err().unwrap().to_string()
+            validate_conditions(config, ANY_TIMEOUT, &[c])
+                .err()
+                .unwrap()
+                .to_string()
         };
         let config = Config::default();
         assert!(refused(&config, console("(")).contains("bad pattern"));
@@ -1790,9 +2714,9 @@ mod tests {
             command: "true".into(),
         };
         assert!(refused(&read_only, cmd.clone()).contains("read-only"));
-        assert!(validate_conditions(&config, &[cmd]).is_ok());
-        assert!(validate_conditions(&read_only, &[Condition::Agent]).is_ok());
-        assert!(validate_conditions(&config, &[]).is_err());
+        assert!(validate_conditions(&config, ANY_TIMEOUT, &[cmd]).is_ok());
+        assert!(validate_conditions(&read_only, ANY_TIMEOUT, &[Condition::Agent]).is_ok());
+        assert!(validate_conditions(&config, ANY_TIMEOUT, &[]).is_err());
     }
 
     #[test]

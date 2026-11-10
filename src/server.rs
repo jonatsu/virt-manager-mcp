@@ -268,10 +268,23 @@ pub struct JobStopParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct WaitForParams {
     pub vm: String,
-    /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks console conditions once and is refused with agent, command and job conditions.
+    /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks console conditions once and is refused with agent, command, job and screen conditions.
     pub timeout_secs: Option<u64>,
     /// What to wait for, at most 16; the call returns on the first that holds.
     pub conditions: Vec<wait::Condition>,
+    /// On a match, attach a PNG screenshot, downscaled to 1280 pixels wide, of the matched screen condition's display
+    /// head, or of head 0 for other kinds; the result gives its size. Refused in read-only mode.
+    pub screenshot: Option<bool>,
+}
+
+/// Whether a `wait_for` call attaches a screenshot to a match. Read-only mode refuses the attachment, which
+/// `validate_conditions` cannot see.
+fn attachment_wanted(config: &Config, screenshot: Option<bool>) -> Result<bool> {
+    let wanted = screenshot.unwrap_or(false);
+    if wanted && config.read_only {
+        bail!("screenshot attachments are disabled in read-only mode");
+    }
+    Ok(wanted)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1004,13 +1017,18 @@ impl VirtServer {
         `console` (the open console session's output matches a regex; ANSI-stripped by default), `agent` (the guest \
         agent answers), `command` (a shell command run through the guest agent exits 0; Linux guests, not in \
         read-only mode), `job_done` (a job from job_start has ended) and `job_output` (a job's output from `since` \
-        matches a regex); job conditions work on Linux guests, read-only mode included. Results: `matched` with the \
-        condition's index and the matched text (lowest index wins a tie; console and job_output matches add `next`, \
-        console matches also `generation`, and a console match moves the session's wait cursor past it); `closed` \
-        when the VM stops or restarts or the console session ends; `timed_out` with a resume point per console and \
-        job_output condition (pass it back as `since`, with `generation` for a console, to keep matching output that \
-        arrived in between) and each command's running PID. A console condition without `since` starts where the \
-        last console_write began, so write first, then wait. A wait never changes what console_read returns."
+        matches a regex); job conditions work on Linux guests, read-only mode included. `screen_settled` holds once \
+        the graphical display, captured every 500 ms, has stopped changing for `settle_secs` (not in read-only mode); \
+        all screen conditions of one wait read the same display head, and a failed capture, as on a VM without \
+        graphics, ends the call with an error. Results: `matched` with the condition's index and the matched text \
+        (lowest index wins a tie; console and job_output matches add `next`, console matches also `generation`, \
+        screen matches `screen`, and a console match moves the session's wait cursor past it); `closed` when the VM \
+        stops or restarts or the console session ends; `timed_out` with a resume point per console and job_output \
+        condition (pass it back as `since`, with `generation` for a console, to keep matching output that arrived in \
+        between) and each command's running PID. With `screenshot: true`, a match attaches a screenshot and gives \
+        its size as `screenshot`, or a `screenshot_note` when it could not be taken. A console condition without \
+        `since` starts where the last console_write began, so write first, then wait. A wait never changes what \
+        console_read returns."
     )]
     async fn wait_for(
         &self,
@@ -1024,10 +1042,11 @@ impl VirtServer {
             .map(|token| (token, ctx.peer.clone()));
         let runtime = tokio::runtime::Handle::current();
         self.blocking(move |s| {
-            let checks = wait::validate_conditions(&s.hv.config, &p.conditions)?;
-            let dom = s.hv.domain(&p.vm)?;
             let max = s.hv.config.limits.max_wait_secs;
             let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(max).min(max));
+            let checks = wait::validate_conditions(&s.hv.config, timeout, &p.conditions)?;
+            let attach = attachment_wanted(&s.hv.config, p.screenshot)?;
+            let dom = s.hv.domain(&p.vm)?;
             let notify = |waited: Duration| {
                 if let Some((token, peer)) = &progress {
                     let mut param =
@@ -1046,10 +1065,23 @@ impl VirtServer {
                 progress: Box::new(notify),
             };
             let started = std::time::Instant::now();
-            let outcome = wait::run(&env, Arc::new(wait::LiveGuest(dom)), checks, timeout)?;
-            Ok(vec![ContentBlock::text(
-                outcome.to_json(started.elapsed()).to_string(),
-            )])
+            let guest: Arc<dyn wait::Guest> = Arc::new(wait::LiveGuest(dom));
+            let outcome = wait::run(&env, guest.clone(), checks, timeout)?;
+            let mut result = outcome.to_json(started.elapsed());
+            let attachment = if attach {
+                wait::attach(&env, &guest, &outcome, started + timeout)
+            } else {
+                None
+            };
+            if let Some(attachment) = &attachment {
+                attachment.describe(&mut result);
+            }
+            // The JSON goes first, so a client reading the first text block finds it.
+            let mut content = vec![ContentBlock::text(result.to_string())];
+            if let Some(wait::Attachment::Image { png, .. }) = attachment {
+                content.push(ContentBlock::image(B64.encode(png), "image/png"));
+            }
+            Ok(content)
         })
         .await
     }
@@ -1912,6 +1944,41 @@ mod tests {
         let writable = hidden_tools(&Config::default());
         for tool in ["job_start", "job_stop", "job_read", "job_list", "wait_for"] {
             assert!(!writable.contains(&tool), "{tool} is hidden");
+        }
+    }
+
+    #[test]
+    fn read_only_mode_refuses_the_screenshot_attachment() {
+        let read_only = Config {
+            read_only: true,
+            ..Config::default()
+        };
+        let err = attachment_wanted(&read_only, Some(true)).unwrap_err();
+        assert!(
+            err.to_string().contains("disabled in read-only mode"),
+            "{err}"
+        );
+        assert!(!attachment_wanted(&read_only, Some(false)).unwrap());
+        assert!(!attachment_wanted(&read_only, None).unwrap());
+        assert!(attachment_wanted(&Config::default(), Some(true)).unwrap());
+        assert!(!attachment_wanted(&Config::default(), None).unwrap());
+    }
+
+    #[test]
+    fn wait_for_advertises_the_screen_fields() {
+        let schema = serde_json::to_value(schemars::schema_for!(WaitForParams)).unwrap();
+        assert_eq!(
+            schema["properties"]["screenshot"]["type"],
+            json!(["boolean", "null"])
+        );
+        let text = schema.to_string();
+        for field in [
+            "screen_settled",
+            "max_changed_pixels",
+            "settle_secs",
+            "region",
+        ] {
+            assert!(text.contains(field), "{field} missing from {text}");
         }
     }
 
