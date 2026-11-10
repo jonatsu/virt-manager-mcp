@@ -172,9 +172,11 @@ before it is built, and each feature from the earlier list sits under one of the
 
 Two items stand outside the outcomes, because their result is already clear. Either can land at any time.
 
-- **MCP tool annotations.** Set `readOnlyHint`, `destructiveHint` and `idempotentHint` on every tool, so that clients
-  and permission layers can gate `delete_vm`, `snapshot_revert`, `detach_disk` and similar tools apart from reads.
-  `src/` sets none today.
+- **Done: MCP tool annotations.** Every tool sets `readOnlyHint`, `destructiveHint` and `idempotentHint`, so that
+  clients and permission layers can gate `delete_vm`, `snapshot_revert`, `detach_disk` and similar tools apart from
+  reads. Tools that send input to the guest (`exec`, `job_start`, `console_write`, `send_keys`, `type_text`) count as
+  destructive, because the input can run anything. A unit test checks that every tool states all three hints, and
+  that read-only mode hides every tool not marked read-only, apart from `console_open` and `console_close`.
 - **Integration tests against real libvirt.** Turn the test-bed call lists into automated tests that run only when
   the test bed is present, and skip otherwise.
 

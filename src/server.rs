@@ -518,6 +518,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "List VMs this server may access: power state, whether start_vm/stop_vm may be used on them, \
         whether the VM management tools may act on them (managed), and for running VMs whether the QEMU guest agent responds and the guest OS family."
     )]
@@ -554,6 +559,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Query the guest agent for OS details, hostname, network interfaces, filesystems, logged-in users and timezone."
     )]
     async fn guest_info(
@@ -583,6 +593,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Run a command inside the guest via the QEMU guest agent and return exit code, stdout and stderr. \
         Non-interactive: the command must not wait for user input. Provide either `command` (run by a shell; default \
         /bin/sh on Linux, PowerShell on Windows) or `program` + `args` (run directly)."
@@ -626,6 +641,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Read a file from the guest via the QEMU guest agent. Returns text, or base64 for binary content."
     )]
     async fn read_file(
@@ -662,6 +682,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Write (or append to) a file in the guest via the QEMU guest agent. On Linux guests a new \
         file gets mode 644 unless `mode` says otherwise; an existing file keeps its mode."
     )]
@@ -686,6 +711,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Copy a file from the host into the guest via the QEMU guest agent. The file is streamed \
         directly by the server, so it can be large and never passes through the conversation. Only files inside the \
         shared host directories (named in the server instructions) can be copied."
@@ -715,6 +745,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Start a VM that is shut off (or resume it if paused, wake it if suspended). \
         Only VMs with power_control: true in list_vms can be started."
     )]
@@ -741,6 +776,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        ),
         description = "Shut down a VM. By default asks the guest to shut down cleanly (ACPI power button or guest \
         agent) and waits for it; with force: true it is powered off immediately, which can lose unsaved data. \
         Only VMs with power_control: true in list_vms can be stopped."
@@ -770,6 +810,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "List a directory in the guest (name, type, size, modification time, mode, owner)."
     )]
     async fn list_dir(
@@ -786,7 +831,14 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Get metadata of a single file or directory in the guest.")]
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
+        description = "Get metadata of a single file or directory in the guest."
+    )]
     async fn stat_path(
         &self,
         Parameters(p): Parameters<PathParams>,
@@ -799,6 +851,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
         description = "Attach to the VM's serial/virtio text console (like `virsh console`). Output is buffered \
         from this point on; read it with console_read. Needs a <console>/<serial> device in the VM and a getty or \
         other program on it in the guest."
@@ -818,6 +875,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Read buffered output from an open serial console. Returns `next` and `generation`; pass both \
         as `since` and `generation` on the following call to get only new output. Each console_open starts a new \
         generation, and an offset from an earlier one is refused. With `wait_ms`, waits for output no earlier read \
@@ -856,6 +918,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Send text to an open serial console (by default followed by Enter). Returns the offset and \
         generation where the guest's answer starts; wait_for and console_read can start there. For a receiver that \
         drops input sent back to back, pace the write: inter_char_delay_ms pauses between bytes, or chunk_size with \
@@ -891,7 +958,14 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Detach from a VM's serial console.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
+        description = "Detach from a VM's serial console."
+    )]
     async fn console_close(
         &self,
         Parameters(p): Parameters<VmParam>,
@@ -908,6 +982,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Wait until the first of several conditions holds on a VM, and return which one. Kinds: \
         `console` (the open console session's output matches a regex; ANSI-stripped by default), `agent` (the guest \
         agent answers), `command` (a shell command run through the guest agent exits 0; Linux guests, not in \
@@ -963,6 +1042,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Start a long-running shell command in a Linux guest as a background job, and return its job \
         ID at once. The job runs detached from the guest agent (through systemd-run, or setsid without systemd), so \
         it survives an agent restart and a server restart. Its stdout and stderr go to one log; read it with \
@@ -988,6 +1072,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Read a job's output from a byte offset, with its state: starting, running, exited (with \
         exit_code), or \"ended without status\" when its process is gone without an exit code, as after a reboot or \
         a forced stop. Pass `next` back as `since` to read on."
@@ -1019,6 +1108,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        ),
         description = "Stop a running job: SIGTERM to its process group, which still records the exit code, or \
         SIGKILL with force. Refused when the job's process is no longer the one it started."
     )]
@@ -1037,6 +1131,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "List the jobs in a Linux guest with their state and start time (seconds since the epoch)."
     )]
     async fn job_list(
@@ -1052,7 +1151,14 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Take a screenshot of the VM's graphical display (PNG).")]
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
+        description = "Take a screenshot of the VM's graphical display (PNG)."
+    )]
     async fn screenshot(
         &self,
         Parameters(p): Parameters<ScreenshotParams>,
@@ -1073,6 +1179,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Press key combinations on the VM's virtual keyboard, in order (e.g. ctrl+alt+delete, win+r, enter)."
     )]
     async fn send_keys(
@@ -1099,6 +1210,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Type text on the VM's virtual keyboard into whatever has focus (graphical or text console). \
         Assumes the guest uses a US keyboard layout."
     )]
@@ -1122,6 +1238,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
         description = "Create a new VM (shut off; start it with start_vm). It gets a new qcow2 system disk, an empty \
         or ISO-loaded SATA CD-ROM it boots from after the disk, a virtio NIC, the QEMU guest agent channel, a serial \
         console and a SPICE display. The guest agent must still be installed inside the guest. Limits and allowed \
@@ -1153,6 +1274,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "List the templates create_vm_from_template can make VMs from, with how many VMs this server \
         made from each."
     )]
@@ -1162,6 +1288,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
         description = "Create a disposable VM from a template in seconds: a thin copy-on-write disk on the template, \
         the guest agent already installed, and the VM's name as its hostname. By default it starts the VM and waits \
         for the guest agent. With lifetime_minutes the server deletes the VM, disks included, when it expires. \
@@ -1207,6 +1338,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Return a VM made by create_vm_from_template to its template's state: it is powered off, its \
         disks, snapshots and attached disks are replaced by fresh ones from the template, and it starts again with \
         the same name, MAC address, hardware and expiry. Everything written to its disks is lost. VMs made by \
@@ -1235,6 +1371,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        ),
         description = "Delete a shut-off VM with managed: true in list_vms, including its snapshots, NVRAM and TPM \
         state. Its disks in the server's disk pool are deleted; other disks and ISOs are left in place. Cannot be undone."
     )]
@@ -1251,6 +1392,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Show the configuration of a VM with managed: true in list_vms: vCPUs, memory, firmware, TPM, \
         disks and CD-ROMs (with targets), and network interfaces (with MACs)."
     )]
@@ -1263,6 +1409,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Change the vCPU count and/or memory of a managed VM. Changes the persistent configuration, \
         so a running VM picks them up after it is shut down and started again."
     )]
@@ -1282,6 +1433,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
         description = "Create a new empty qcow2 disk in the server's disk pool and attach it to a managed VM as the \
         next free virtio disk (vdb, vdc, ...). Also works while the VM is running."
     )]
@@ -1298,6 +1454,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        ),
         description = "Detach a disk from a shut-off managed VM and DELETE its volume if it is in the server's disk \
         pool (disks elsewhere are only detached). Use describe_vm to find the target."
     )]
@@ -1314,6 +1475,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
         description = "Insert an ISO (from list_isos) into a managed VM's CD-ROM drive, or eject it by omitting iso. \
         Works while the VM is running. A shut-off VM without a CD-ROM drive gets one added."
     )]
@@ -1329,6 +1495,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
         description = "Add a virtio network interface on an allowed libvirt network to a managed VM (also live)."
     )]
     async fn attach_nic(
@@ -1344,6 +1515,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        ),
         description = "Remove a network interface, identified by MAC address (see describe_vm), from a managed VM."
     )]
     async fn detach_nic(
@@ -1358,13 +1534,25 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "List the ISO images on the host that create_vm and set_cdrom may use.")]
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
+        description = "List the ISO images on the host that create_vm and set_cdrom may use."
+    )]
     async fn list_isos(&self) -> Result<CallToolResult, ErrorData> {
         self.blocking(|s| Ok(vec![json_block(&manage::list_isos(&s.hv.config.manage))?]))
             .await
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
         description = "Create a snapshot of a managed VM. For a running VM it includes the memory state, so \
         reverting resumes exactly where it was."
     )]
@@ -1379,7 +1567,14 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "List the snapshots of a managed VM, oldest first.")]
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
+        description = "List the snapshots of a managed VM, oldest first."
+    )]
     async fn snapshot_list(
         &self,
         Parameters(p): Parameters<VmParam>,
@@ -1389,6 +1584,11 @@ impl VirtServer {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
         description = "Revert a managed VM to a snapshot. Changes made since the snapshot are lost."
     )]
     async fn snapshot_revert(
@@ -1408,7 +1608,14 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Delete a snapshot of a managed VM. The VM itself is not changed.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        ),
+        description = "Delete a snapshot of a managed VM. The VM itself is not changed."
+    )]
     async fn snapshot_delete(
         &self,
         Parameters(p): Parameters<SnapshotParams>,
@@ -1573,6 +1780,65 @@ fn json_block<T: serde::Serialize>(v: &T) -> Result<ContentBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_tool_states_its_hints() {
+        let tools = VirtServer::tool_router().list_all();
+        assert_eq!(tools.len(), 39);
+        let read_only_mode = hidden_tools(
+            &toml::from_str(
+                r#"
+                read_only = true
+                power_vms = ["*"]
+                host_share_dirs = ["/srv"]
+                [manage]
+                create = true
+                delete = true
+                reconfigure = true
+                snapshots = true
+                [manage.templates.debian]
+                volume = "tpl.qcow2"
+                "#,
+            )
+            .unwrap(),
+        );
+        for tool in &tools {
+            let name = tool.name.as_ref();
+            let a = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has no annotations"));
+            let (Some(read_only), Some(destructive), Some(_)) =
+                (a.read_only_hint, a.destructive_hint, a.idempotent_hint)
+            else {
+                panic!("{name} leaves a hint unset: {a:?}");
+            };
+            assert!(
+                !(read_only && destructive),
+                "{name} is read-only and destructive"
+            );
+            // Read-only mode also hides some reads, such as describe_vm, with their feature; it must hide every
+            // tool that changes something, apart from attaching to and detaching from the console.
+            if !read_only && !["console_open", "console_close"].contains(&name) {
+                assert!(
+                    read_only_mode.contains(&name),
+                    "{name} changes something but read_only mode shows it"
+                );
+            }
+        }
+        // Input to the guest can run anything, such as `rm -rf /`.
+        for name in [
+            "exec",
+            "job_start",
+            "console_write",
+            "send_keys",
+            "type_text",
+        ] {
+            let tool = tools.iter().find(|t| t.name == name).unwrap();
+            let a = tool.annotations.as_ref().unwrap();
+            assert_eq!(a.destructive_hint, Some(true), "{name}");
+        }
+    }
 
     #[test]
     fn read_only_hides_job_start_and_stop_but_not_reads_or_waits() {
