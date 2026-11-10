@@ -1430,7 +1430,8 @@ impl ServerHandler for VirtServer {
         let mut extra = String::new();
         if config.read_only {
             extra.push_str(
-                " The server is in READ-ONLY mode: only listing VMs, reading files/directories and reading the serial console are available.",
+                " The server is in READ-ONLY mode: only listing VMs, reading files/directories, reading the serial \
+                 console, reading and listing existing jobs, and wait_for without command conditions are available.",
             );
         } else {
             if config.power_vms.is_empty() && !config.manage.enabled() {
@@ -1456,7 +1457,11 @@ impl ServerHandler for VirtServer {
             .with_instructions(format!(
                 "Access to libvirt/virt-manager VMs (Linux and Windows guests). Start with list_vms. \
                  exec, file and info tools need the QEMU guest agent running in the guest. console_* tools use the \
-                 serial console; screenshot/send_keys/type_text use the graphical display.{extra}"
+                 serial console; screenshot/send_keys/type_text use the graphical display. To wait for a prompt, a \
+                 boot, a command or a job, use wait_for instead of sleeping and rereading: it returns on the first \
+                 of several conditions, so list failure signs such as \"Kernel panic\" next to the success you \
+                 expect. For work longer than an exec timeout on a Linux guest, use job_start, then job_read or \
+                 wait_for with job_done or job_output; job_list finds jobs again.{extra}"
             ))
     }
 }
