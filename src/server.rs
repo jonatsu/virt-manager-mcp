@@ -209,6 +209,9 @@ pub struct ConsoleReadParams {
     pub vm: String,
     /// Absolute offset to read from (use `next` from the previous read). Omit to get the most recent output.
     pub since: Option<u64>,
+    /// The `generation` returned with `since`. Needed whenever `since` is above 0, so an offset from an earlier
+    /// console session is refused rather than misread.
+    pub generation: Option<u64>,
     /// Max bytes to return (default 65536).
     pub max_bytes: Option<usize>,
     /// Wait up to this many milliseconds (max 30000) for output that no earlier read returned, then until the
@@ -754,8 +757,9 @@ impl VirtServer {
     }
 
     #[tool(
-        description = "Read buffered output from an open serial console. Returns `next`, the offset to pass as \
-        `since` on the following call to get only new output. With `wait_ms`, waits for output no earlier read \
+        description = "Read buffered output from an open serial console. Returns `next` and `generation`; pass both \
+        as `since` and `generation` on the following call to get only new output. Each console_open starts a new \
+        generation, and an offset from an earlier one is refused. With `wait_ms`, waits for output no earlier read \
         returned, then until it pauses for half a second; a closed console returns at once."
     )]
     async fn console_read(
@@ -764,14 +768,23 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let wait = Duration::from_millis(p.wait_ms.min(30_000));
-            let r = s
-                .consoles
-                .read(&p.vm, p.since, p.max_bytes.unwrap_or(64 * 1024), wait)?;
+            let r = s.consoles.read(
+                &p.vm,
+                p.since,
+                p.generation,
+                p.max_bytes.unwrap_or(64 * 1024),
+                wait,
+            )?;
             let mut text = String::from_utf8_lossy(&r.data).into_owned();
             if p.strip_ansi.unwrap_or(true) {
                 text = strip_ansi(&text);
             }
-            let meta = json!({ "next": r.next, "dropped_bytes": r.dropped, "closed": r.closed });
+            let meta = json!({
+                "next": r.next,
+                "generation": r.generation,
+                "dropped_bytes": r.dropped,
+                "closed": r.closed,
+            });
             Ok(vec![
                 ContentBlock::text(meta.to_string()),
                 ContentBlock::text(text),
@@ -780,7 +793,10 @@ impl VirtServer {
         .await
     }
 
-    #[tool(description = "Send text to an open serial console (by default followed by Enter).")]
+    #[tool(
+        description = "Send text to an open serial console (by default followed by Enter). Returns the offset and \
+        generation where the guest's answer starts; wait_for and console_read can start there."
+    )]
     async fn console_write(
         &self,
         Parameters(p): Parameters<ConsoleWriteParams>,
@@ -791,9 +807,9 @@ impl VirtServer {
             if p.press_enter.unwrap_or(true) {
                 data.push(b'\r');
             }
-            s.consoles.write(&p.vm, &data)?;
+            let (offset, generation) = s.consoles.write(&p.vm, &data)?;
             Ok(vec![ContentBlock::text(format!(
-                "sent {} bytes",
+                "sent {} bytes; the answer starts at offset {offset} (generation {generation})",
                 data.len()
             ))])
         })
@@ -1161,10 +1177,13 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let msg = manage::snapshot_revert(&s.hv, &p.vm, &p.snapshot)?;
-            if !s.hv.lookup(&p.vm)?.is_active()? {
-                s.consoles.close(&p.vm);
-            }
-            Ok(vec![ContentBlock::text(msg)])
+            // A revert replaces the guest's state under the console, running or not, so the session ends here.
+            let closed = if s.consoles.close(&p.vm) {
+                "; its console session was closed, so open a new one"
+            } else {
+                ""
+            };
+            Ok(vec![ContentBlock::text(format!("{msg}{closed}"))])
         })
         .await
     }

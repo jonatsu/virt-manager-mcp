@@ -1,0 +1,100 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-g",
+      "template": "debian13",
+      "wait_for_agent_secs": 0
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-g"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 20
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "t-g",
+      "text": ""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-g",
+      "since": 0,
+      "wait_ms": 3000
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-g",
+      "force": true
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-g",
+      "since": 10,
+      "generation": 1
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-g",
+      "since": 10
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-g",
+      "since": 0
+    }
+  },
+  {
+    "tool": "snapshot_create",
+    "args": {
+      "vm": "t-g",
+      "snapshot": "s1"
+    }
+  },
+  {
+    "tool": "snapshot_revert",
+    "args": {
+      "vm": "t-g",
+      "snapshot": "s1"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-g",
+      "since": 0
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-g",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-g"
+    }
+  }
+]

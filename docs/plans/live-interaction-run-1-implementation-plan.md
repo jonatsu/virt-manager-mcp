@@ -303,7 +303,7 @@ carries each one:
 
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
-| 1 OpenWrt test guest |  |  |  |
+| 1 OpenWrt test guest | `a935abd` | OpenWrt 25.12.6 `generic-ext4-combined` image verified against the release `sha256sums`; `gunzip` exited 0; uploaded as `t-owrt.img` (126 MB) and defined from `tests/testbed/t-owrt.xml` on q35; `owrt-boot.json` showed the kernel log, "Please press Enter", the BusyBox banner and `root@OpenWrt:~#` | self-review |
 | 2 Console sessions |  |  |  |
 | 3 Console pacing |  |  |  |
 | 4 `wait_for` |  |  |  |

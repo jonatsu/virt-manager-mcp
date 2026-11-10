@@ -39,6 +39,7 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-reset-saved.json` | Run after `virsh managedsave t-u`: the reset discards the saved state and boots fresh; a `create_vm` VM named `t-u-g4` holding the next disk name makes the next reset refuse with nothing changed, and the console opened before it still reads output; then both VMs are deleted. |
 | `templates-expiry.json` | `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without one; after 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
 | `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and an attached disk, and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
+| `console-generation.json` | Template config. A forced reopen starts a new generation; a read naming an old generation, or `since` above 0 without one, is refused; `snapshot_revert` of the running VM closes the console. |
 | `owrt-boot.json` | Boots `t-owrt` with the console open and reaches its root shell; see "The OpenWrt appliance". |
 | `templates-outside-disk-setup.json`, `templates-outside-disk.json` | A reset and an expiry leave a disk file outside every pool in place; run with the steps below. |
 

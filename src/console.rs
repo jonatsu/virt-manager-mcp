@@ -5,10 +5,10 @@
 //! offsets, so callers can read incrementally with a cursor.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use virt::domain::Domain;
@@ -34,11 +34,37 @@ struct Buffer {
     /// Highest offset any read has returned. A waiting read waits for output
     /// beyond it, so rereading from an old offset still waits for the guest.
     delivered: u64,
+    /// Where a wait without `since` starts: the buffer's end before the last write, or just past the last match.
+    wait_cursor: u64,
 }
 
 impl Buffer {
     fn end(&self) -> u64 {
         self.start + self.data.len() as u64
+    }
+
+    /// Marks the start of a write: the guest's answer to it begins at the returned offset.
+    fn begin_write(&mut self) -> u64 {
+        self.wait_cursor = self.end();
+        self.wait_cursor
+    }
+
+    /// Everything from `since` (default: the wait cursor) to the end, without marking it delivered.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wait_for uses it from run 1 unit 4")
+    )]
+    fn scan(&self, since: Option<u64>) -> ScanResult {
+        let from = since.unwrap_or(self.wait_cursor).min(self.end());
+        let dropped = self.start.saturating_sub(from);
+        let from = from.max(self.start);
+        let skip = usize::try_from(from - self.start).expect("the buffer fits in memory");
+        ScanResult {
+            data: self.data.iter().skip(skip).copied().collect(),
+            from,
+            dropped,
+            closed: self.closed.clone(),
+        }
     }
 
     /// Output from absolute offset `since` (None = only the latest `max_bytes`).
@@ -63,6 +89,7 @@ impl Buffer {
             data,
             dropped,
             closed: self.closed.clone(),
+            generation: 0,
         }
     }
 }
@@ -95,6 +122,48 @@ struct Session {
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     device: Option<String>,
+    generation: u64,
+    /// The running domain's ID when the session opened; a stop and start gives the domain a new one.
+    domain_id: Option<u32>,
+}
+
+/// A session's output from an offset, read for a wait without marking it delivered.
+#[expect(dead_code, reason = "wait_for uses it from run 1 unit 4")]
+pub struct ScanResult {
+    pub data: Vec<u8>,
+    /// Offset of `data[0]`.
+    pub from: u64,
+    /// Bytes from the requested offset that were already dropped from the scrollback.
+    pub dropped: u64,
+    pub closed: Option<String>,
+}
+
+/// A scan with the session it came from.
+#[expect(dead_code, reason = "wait_for uses it from run 1 unit 4")]
+pub struct SessionScan {
+    pub scan: ScanResult,
+    pub generation: u64,
+    pub domain_id: Option<u32>,
+}
+
+/// The first generation of a server process started at `now_secs`, so two processes rarely share numbers.
+fn first_generation(now_secs: u64) -> u64 {
+    now_secs.saturating_mul(1000)
+}
+
+/// Checks that an offset belongs to the session with `current` generation. Offset 0 and an omitted offset need no
+/// generation; any other offset must name the generation of the read that returned it.
+fn check_generation(since: Option<u64>, given: Option<u64>, current: u64) -> Result<()> {
+    match (since, given) {
+        (_, Some(g)) if g != current => bail!(
+            "offset from an earlier console session (generation {g}; the open session is generation {current}); \
+             read from since 0 with generation {current}"
+        ),
+        (Some(s), None) if s > 0 => bail!(
+            "since {s} needs the generation of the read that returned it; the open session is generation {current}"
+        ),
+        _ => Ok(()),
+    }
 }
 
 impl Drop for Session {
@@ -114,11 +183,26 @@ pub struct ReadResult {
     /// Bytes that were requested but already dropped from the scrollback.
     pub dropped: u64,
     pub closed: Option<String>,
+    /// The session's generation, to pass with `next`.
+    pub generation: u64,
 }
 
-#[derive(Default)]
 pub struct Consoles {
     sessions: Mutex<HashMap<String, Session>>,
+    /// The last generation handed out.
+    generation: AtomicU64,
+}
+
+impl Default for Consoles {
+    fn default() -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        Self {
+            sessions: Mutex::default(),
+            generation: AtomicU64::new(first_generation(now)),
+        }
+    }
 }
 
 impl Consoles {
@@ -158,6 +242,7 @@ impl Consoles {
             )
         })?;
 
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let stream = Arc::new(stream);
         let buffer = Arc::new(Mutex::new(Buffer::default()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -176,25 +261,30 @@ impl Consoles {
                 stop,
                 reader: Some(reader),
                 device: device.map(str::to_string),
+                generation,
+                domain_id: dom.get_id(),
             },
         );
         Ok(format!(
-            "console for '{vm}' opened; output is buffered from now on"
+            "console for '{vm}' opened (generation {generation}); output is buffered from now on"
         ))
     }
 
     /// Returns buffered output from absolute offset `since` (None = only the
     /// latest `max_bytes` bytes). A non-zero `wait` first waits up to that long
     /// for output that no earlier read returned, then until it pauses for
-    /// `SETTLE`; a zero `wait` returns at once.
+    /// `SETTLE`; a zero `wait` returns at once. `since` above 0 must come with
+    /// the `generation` of the read that returned it.
     pub fn read(
         &self,
         vm: &str,
         since: Option<u64>,
+        generation: Option<u64>,
         max_bytes: usize,
         wait: Duration,
     ) -> Result<ReadResult> {
-        let buffer = self.buffer(vm)?;
+        let (buffer, current, _) = self.session(vm)?;
+        check_generation(since, generation, current)?;
         let deadline = Instant::now() + wait;
         let mut settle = Settle::default();
         loop {
@@ -206,8 +296,9 @@ impl Consoles {
                     || now >= deadline
                     || settle.ready(b.end(), b.delivered, now)
                 {
-                    let r = b.slice(since, max_bytes);
+                    let mut r = b.slice(since, max_bytes);
                     b.delivered = b.delivered.max(r.next);
+                    r.generation = current;
                     return Ok(r);
                 }
             }
@@ -215,16 +306,19 @@ impl Consoles {
         }
     }
 
-    pub fn write(&self, vm: &str, data: &[u8]) -> Result<()> {
-        let stream = {
+    /// Sends `data` and returns the offset the guest's answer starts at, with the session's generation. That offset
+    /// becomes the wait cursor, so a wait without `since` looks at the answer only.
+    pub fn write(&self, vm: &str, data: &[u8]) -> Result<(u64, u64)> {
+        let (stream, offset, generation) = {
             let sessions = self.sessions.lock().unwrap();
             let s = sessions
                 .get(vm)
                 .ok_or_else(|| anyhow!("no console open for '{vm}'; call console_open first"))?;
-            if let Some(reason) = &s.buffer.lock().unwrap().closed {
+            let mut b = s.buffer.lock().unwrap();
+            if let Some(reason) = &b.closed {
                 bail!("console for '{vm}' is closed: {reason}");
             }
-            s.stream.clone()
+            (s.stream.clone(), b.begin_write(), s.generation)
         };
         let mut sent = 0;
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -243,7 +337,26 @@ impl Consoles {
                 ),
             }
         }
-        Ok(())
+        Ok((offset, generation))
+    }
+
+    /// The output from `since` (default: the wait cursor) to the end, for a wait. Marks nothing delivered, so
+    /// `console_read` sees the same output afterwards.
+    #[expect(dead_code, reason = "wait_for uses it from run 1 unit 4")]
+    pub fn scan(
+        &self,
+        vm: &str,
+        since: Option<u64>,
+        generation: Option<u64>,
+    ) -> Result<SessionScan> {
+        let (buffer, current, domain_id) = self.session(vm)?;
+        check_generation(since, generation, current)?;
+        let scan = buffer.lock().unwrap().scan(since);
+        Ok(SessionScan {
+            scan,
+            generation: current,
+            domain_id,
+        })
     }
 
     pub fn is_open(&self, vm: &str) -> bool {
@@ -258,12 +371,12 @@ impl Consoles {
         self.sessions.lock().unwrap().remove(vm).is_some()
     }
 
-    fn buffer(&self, vm: &str) -> Result<Arc<Mutex<Buffer>>> {
+    fn session(&self, vm: &str) -> Result<(Arc<Mutex<Buffer>>, u64, Option<u32>)> {
         self.sessions
             .lock()
             .unwrap()
             .get(vm)
-            .map(|s| s.buffer.clone())
+            .map(|s| (s.buffer.clone(), s.generation, s.domain_id))
             .ok_or_else(|| anyhow!("no console open for '{vm}'; call console_open first"))
     }
 }
@@ -346,6 +459,64 @@ mod tests {
         let r = b.slice(Some(5), 4);
         assert_eq!(r.data, b"Pass");
         assert_eq!((r.next, r.dropped), (17, 8));
+    }
+
+    #[test]
+    fn generations_differ_between_process_starts() {
+        assert!(first_generation(1_000_001) > first_generation(1_000_000));
+        let consoles = Consoles::default();
+        let a = consoles.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let b = consoles.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        assert!(b > a, "each new session takes a higher generation");
+    }
+
+    #[test]
+    fn stale_or_missing_generations_are_refused() {
+        assert!(check_generation(None, None, 7).is_ok());
+        assert!(
+            check_generation(Some(0), None, 7).is_ok(),
+            "since 0 needs none"
+        );
+        assert!(check_generation(Some(40), Some(7), 7).is_ok());
+        let stale = check_generation(Some(40), Some(6), 7)
+            .unwrap_err()
+            .to_string();
+        assert!(stale.contains("earlier console session"), "{stale}");
+        let missing = check_generation(Some(40), None, 7).unwrap_err().to_string();
+        assert!(missing.contains("needs the generation"), "{missing}");
+        assert!(
+            check_generation(Some(0), Some(6), 7).is_err(),
+            "a named stale generation is refused even at 0"
+        );
+    }
+
+    #[test]
+    fn a_write_moves_the_wait_cursor_to_the_end() {
+        let mut b = buffer(b"login: ", 0);
+        assert_eq!(b.begin_write(), 7);
+        b.data.extend(b"root\r\nPassword: ");
+        let s = b.scan(None);
+        assert_eq!(s.from, 7);
+        assert_eq!(s.data, b"root\r\nPassword: ");
+    }
+
+    #[test]
+    fn scan_marks_nothing_delivered() {
+        let b = buffer(b"login: ", 0);
+        let s = b.scan(Some(0));
+        assert_eq!(s.data, b"login: ");
+        assert_eq!(
+            b.delivered, 0,
+            "a waiting read afterwards still waits for new output"
+        );
+    }
+
+    #[test]
+    fn scan_reports_bytes_dropped_from_scrollback() {
+        let b = buffer(b"Password: ", 13);
+        let s = b.scan(Some(5));
+        assert_eq!((s.from, s.dropped), (13, 8));
+        assert_eq!(s.data, b"Password: ");
     }
 
     #[test]
