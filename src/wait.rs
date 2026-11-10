@@ -137,8 +137,6 @@ pub trait Env {
     fn scan(&self, since: Option<u64>, generation: Option<u64>) -> Result<SessionScan>;
     /// Moves the wait cursor past a match, as [`Consoles::advance_cursor`] does.
     fn advance_cursor(&self, generation: u64, to: u64);
-    /// The running domain's ID, or `None` once it stopped.
-    fn domain_id(&self) -> Option<u32>;
     fn cancelled(&self) -> bool;
     /// Called every 5 s with the time waited so far.
     fn progress(&self, waited: Duration);
@@ -147,11 +145,18 @@ pub trait Env {
 /// A process the `command` probe started.
 pub enum ExecState {
     Running,
-    Exited { code: Option<i64>, output: Vec<u8> },
+    Exited {
+        code: Option<i64>,
+        output: Vec<u8>,
+    },
+    /// The agent does not know the PID, as after an agent restart.
+    Gone,
 }
 
-/// The guest agent calls the probes make, each bounded by `timeout_secs`.
+/// The calls the probes make, each on a thread of its own. Agent calls are bounded by `timeout_secs`.
 pub trait Guest: Send + Sync + 'static {
+    /// The running domain's current ID, `None` once it stopped, or an error when libvirt cannot tell.
+    fn domain_id(&self) -> Result<Option<u32>>;
     fn ping(&self, timeout_secs: i32) -> bool;
     fn os(&self, timeout_secs: i32) -> Result<GuestOs>;
     fn start(&self, command: &str, timeout_secs: i32) -> Result<i64>;
@@ -162,6 +167,17 @@ pub trait Guest: Send + Sync + 'static {
 pub struct LiveGuest(pub Domain);
 
 impl Guest for LiveGuest {
+    fn domain_id(&self) -> Result<Option<u32>> {
+        // A `Domain` caches its ID at lookup, so only a fresh lookup sees a stop or a restart.
+        let conn = self.0.get_connect()?;
+        let fresh = Domain::lookup_by_uuid_string(&conn, &self.0.get_uuid_string()?)?;
+        Ok(if fresh.is_active()? {
+            fresh.get_id()
+        } else {
+            None
+        })
+    }
+
     fn ping(&self, timeout_secs: i32) -> bool {
         Agent::new(&self.0, timeout_secs).ping()
     }
@@ -175,15 +191,16 @@ impl Guest for LiveGuest {
     }
 
     fn status(&self, pid: i64, timeout_secs: i32) -> Result<ExecState> {
-        Ok(
-            match Agent::new(&self.0, timeout_secs).status(pid, MAX_TEXT)? {
-                None => ExecState::Running,
-                Some(o) => ExecState::Exited {
-                    code: o.exit_code,
-                    output: o.stdout,
-                },
-            },
-        )
+        match Agent::new(&self.0, timeout_secs).status(pid, MAX_TEXT) {
+            Ok(None) => Ok(ExecState::Running),
+            Ok(Some(o)) => Ok(ExecState::Exited {
+                code: o.exit_code,
+                output: o.stdout,
+            }),
+            // qemu-ga's answer for a PID it does not track.
+            Err(e) if format!("{e:#}").contains("Invalid parameter") => Ok(ExecState::Gone),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -191,7 +208,6 @@ impl Guest for LiveGuest {
 pub struct LiveEnv<'a> {
     pub consoles: &'a Consoles,
     pub vm: &'a str,
-    pub dom: Domain,
     pub cancelled: Box<dyn Fn() -> bool + 'a>,
     pub progress: Box<dyn Fn(Duration) + 'a>,
 }
@@ -211,10 +227,6 @@ impl Env for LiveEnv<'_> {
 
     fn advance_cursor(&self, generation: u64, to: u64) {
         self.consoles.advance_cursor(self.vm, generation, to);
-    }
-
-    fn domain_id(&self) -> Option<u32> {
-        self.dom.get_id()
     }
 
     fn cancelled(&self) -> bool {
@@ -293,13 +305,22 @@ pub fn run(
     checks: Vec<Check>,
     timeout: Duration,
 ) -> Result<Outcome> {
+    if timeout.is_zero()
+        && checks
+            .iter()
+            .any(|c| matches!(c, Check::Agent | Check::Command(_)))
+    {
+        bail!(
+            "timeout_secs 0 checks console conditions once; agent and command conditions need at least 1 s"
+        );
+    }
     let start = env.now();
     let deadline = start + timeout;
     let mut states = checks
         .into_iter()
         .map(|c| State::new(c, env))
         .collect::<Result<Vec<_>>>()?;
-    let mut next_vm_check = start;
+    let mut vm = Probe::<Result<Option<u32>>>::default();
     let mut next_progress = start + PROGRESS_EVERY;
     let mut domain_id = None;
     loop {
@@ -307,19 +328,22 @@ pub fn run(
         if env.cancelled() {
             return Ok(Outcome::Cancelled);
         }
-        if now >= next_vm_check {
-            domain_id = env.domain_id();
-            if domain_id.is_none() {
+        match vm.take() {
+            Some(Ok(None)) => {
                 return Ok(Outcome::Closed {
                     index: None,
                     reason: "the VM is not running".into(),
                 });
             }
-            next_vm_check = now + VM_CHECK_EVERY;
+            Some(Ok(id)) => domain_id = id,
+            Some(Err(_)) | None => {}
         }
+        vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id());
+        // One scan serves every console condition, so all of them see the same output in a poll.
+        let scan = console_scan(env, &states);
         let mut closed = None;
         for (index, state) in states.iter_mut().enumerate() {
-            match state.poll(env, &guest, now, deadline, domain_id)? {
+            match state.poll(scan.as_ref(), &guest, now, deadline, domain_id)? {
                 Poll::Pending => {}
                 Poll::Hit { text, next } => {
                     if let Some((to, generation)) = next {
@@ -344,7 +368,7 @@ pub fn run(
             });
         }
         if now >= deadline {
-            return Ok(timed_out(&states));
+            return Ok(timed_out(&mut states));
         }
         if now >= next_progress {
             env.progress(now - start);
@@ -354,17 +378,33 @@ pub fn run(
     }
 }
 
-fn timed_out(states: &[State]) -> Outcome {
+fn timed_out(states: &mut [State]) -> Outcome {
     let mut resume = Vec::new();
     let mut commands = Vec::new();
-    for (index, state) in states.iter().enumerate() {
+    for (index, state) in states.iter_mut().enumerate() {
         match state {
             State::Console(c) => resume.push((index, c.resume, c.generation)),
-            State::Command(c) => commands.push((index, c.pid, c.last_code)),
+            State::Command(c) => {
+                // A probe that finished during the last poll may have started a run; report it.
+                let _ = c.absorb();
+                commands.push((index, c.pid, c.last_code));
+            }
             State::Agent(_) => {}
         }
     }
     Outcome::TimedOut { resume, commands }
+}
+
+/// The session's output from the earliest start of any console condition, or `None` without console conditions.
+fn console_scan(env: &dyn Env, states: &[State]) -> Option<Result<SessionScan>> {
+    let consoles = states.iter().filter_map(|s| match s {
+        State::Console(c) => Some(c),
+        _ => None,
+    });
+    let (from, generation) = consoles.fold(None, |acc: Option<(u64, u64)>, c| {
+        Some(acc.map_or((c.from, c.generation), |(f, g)| (f.min(c.from), g)))
+    })?;
+    Some(env.scan(Some(from), Some(generation)))
 }
 
 enum Poll {
@@ -424,14 +464,17 @@ impl State {
 
     fn poll(
         &mut self,
-        env: &dyn Env,
+        scan: Option<&Result<SessionScan>>,
         guest: &Arc<dyn Guest>,
         now: Instant,
         deadline: Instant,
         domain_id: Option<u32>,
     ) -> Result<Poll> {
         match self {
-            State::Console(c) => Ok(c.poll(env, domain_id)),
+            State::Console(c) => Ok(match scan {
+                Some(scan) => c.poll(scan, domain_id),
+                None => Poll::Pending,
+            }),
             State::Agent(p) => {
                 if p.take() == Some(true) {
                     return Ok(Poll::Hit {
@@ -439,7 +482,7 @@ impl State {
                         next: None,
                     });
                 }
-                p.start_if_due(now, deadline, guest, |g, t| g.ping(t));
+                p.start_if_due(now, deadline, PROBE_EVERY, guest, |g, t| g.ping(t));
                 Ok(Poll::Pending)
             }
             State::Command(c) => c.poll(now, deadline, guest),
@@ -461,37 +504,38 @@ struct ConsoleState {
 }
 
 impl ConsoleState {
-    fn poll(&mut self, env: &dyn Env, domain_id: Option<u32>) -> Poll {
+    /// Matches this condition against `scan`, a scan that starts at or before `self.from`.
+    fn poll(&mut self, scan: &Result<SessionScan>, domain_id: Option<u32>) -> Poll {
         if domain_id.is_some() && self.domain_id != domain_id {
             return Poll::Closed(
                 "the VM restarted after console_open; open the console again".into(),
             );
         }
-        let scan = match env.scan(Some(self.from), Some(self.generation)) {
-            Ok(s) => s,
+        let scan = match scan {
+            Ok(s) if s.generation == self.generation => s,
+            Ok(_) => return Poll::Closed("the console was reopened during the wait".into()),
             Err(e) => return Poll::Closed(format!("the console session ended: {e:#}")),
         };
-        if scan.scan.dropped > 0 {
-            // The scrollback dropped the oldest output; match from what it still holds.
-            self.from = scan.scan.from;
-        }
-        let data = &scan.scan.data;
-        let end = scan.scan.from + data.len() as u64;
+        // When the scrollback dropped output, match from what it still holds.
+        self.from = self.from.max(scan.scan.from);
+        let skip = usize::try_from(self.from - scan.scan.from).unwrap_or(usize::MAX);
+        let data = scan.scan.data.get(skip..).unwrap_or_default();
+        let end = self.from + data.len() as u64;
         if self.seen_end != Some(end) {
             self.seen_end = Some(end);
-            self.resume = scan.scan.from
+            self.resume = self.from
                 + data
                     .iter()
                     .rposition(|&b| b == b'\n')
                     .map_or(0, |p| p as u64 + 1);
-            if let Some((next, text)) = find(&self.regex, self.strip_ansi, scan.scan.from, data) {
+            if let Some((next, text)) = find(&self.regex, self.strip_ansi, self.from, data) {
                 return Poll::Hit {
                     text,
                     next: Some((next, self.generation)),
                 };
             }
         }
-        match scan.scan.closed {
+        match &scan.scan.closed {
             Some(reason) => Poll::Closed(format!("the console session closed: {reason}")),
             None => Poll::Pending,
         }
@@ -549,12 +593,13 @@ impl<T: Send + 'static> Probe<T> {
         }
     }
 
-    /// Starts `f` on its own thread when no probe is in flight and the last one started a second ago or more. Each
+    /// Starts `f` on its own thread when no probe is in flight and the last one started `every` ago or more. Each
     /// agent call gets the time left, between 1 and 2 s.
     fn start_if_due(
         &mut self,
         now: Instant,
         deadline: Instant,
+        every: Duration,
         guest: &Arc<dyn Guest>,
         f: impl FnOnce(&dyn Guest, i32) -> T + Send + 'static,
     ) {
@@ -576,7 +621,7 @@ impl<T: Send + 'static> Probe<T> {
         if spawned.is_ok() {
             self.inflight = Some(rx);
         }
-        self.next_at = Some(now + PROBE_EVERY);
+        self.next_at = Some(now + every);
     }
 }
 
@@ -592,26 +637,28 @@ struct CommandState {
 /// What one `command` probe found.
 enum CommandStep {
     Windows,
-    /// The agent did not answer, or refused the call.
+    /// The agent did not answer the OS check or the start; nothing was started.
     Unavailable,
+    /// A run is under way, or its status could not be read this time; it is polled again, never started twice.
     Running(i64),
     Exited {
         code: Option<i64>,
         output: Vec<u8>,
     },
+    /// The agent no longer knows the run's PID, so the next probe starts the command again.
+    Gone,
 }
 
 impl CommandState {
-    fn poll(&mut self, now: Instant, deadline: Instant, guest: &Arc<dyn Guest>) -> Result<Poll> {
+    /// Takes in a finished probe's result. Returns a hit when the command exited 0.
+    fn absorb(&mut self) -> Result<Option<Poll>> {
         match self.probe.take() {
             Some(CommandStep::Windows) => bail!(
                 "command conditions are not available for Windows guests yet; they come with Windows job support \
                  (live-interaction run 3)"
             ),
-            Some(CommandStep::Unavailable) => {
-                // A failed status call may mean the process is gone, as after an agent restart; start it again.
-                self.pid = None;
-            }
+            Some(CommandStep::Unavailable) | None => {}
+            Some(CommandStep::Gone) => self.pid = None,
             Some(CommandStep::Running(pid)) => {
                 self.os_checked = true;
                 self.pid = Some(pid);
@@ -621,23 +668,31 @@ impl CommandState {
                 self.pid = None;
                 self.last_code = code;
                 if code == Some(0) {
-                    return Ok(Poll::Hit {
+                    return Ok(Some(Poll::Hit {
                         text: text(&output),
                         next: None,
-                    });
+                    }));
                 }
             }
-            None => {}
+        }
+        Ok(None)
+    }
+
+    fn poll(&mut self, now: Instant, deadline: Instant, guest: &Arc<dyn Guest>) -> Result<Poll> {
+        if let Some(hit) = self.absorb()? {
+            return Ok(hit);
         }
         let (command, os_checked, pid) = (self.command.clone(), self.os_checked, self.pid);
-        self.probe.start_if_due(now, deadline, guest, move |g, t| {
-            command_step(g, &command, os_checked, pid, t)
-        });
+        self.probe
+            .start_if_due(now, deadline, PROBE_EVERY, guest, move |g, t| {
+                command_step(g, &command, os_checked, pid, t)
+            });
         Ok(Poll::Pending)
     }
 }
 
-/// One `command` probe: checks the OS once, starts the command when no run is under way, and asks for its status.
+/// One `command` probe: checks the OS once, starts the command when no run is under way, and asks for its status. A
+/// start whose reply is lost can still leave a run the probe does not know about; nothing else starts a second run.
 fn command_step(
     guest: &dyn Guest,
     command: &str,
@@ -660,9 +715,9 @@ fn command_step(
         },
     };
     match guest.status(pid, timeout_secs) {
-        Ok(ExecState::Running) => CommandStep::Running(pid),
+        Ok(ExecState::Running) | Err(_) => CommandStep::Running(pid),
         Ok(ExecState::Exited { code, output }) => CommandStep::Exited { code, output },
-        Err(_) => CommandStep::Unavailable,
+        Ok(ExecState::Gone) => CommandStep::Gone,
     }
 }
 
@@ -683,8 +738,9 @@ mod tests {
         cursor: Mutex<u64>,
         generation: u64,
         session_domain: Option<u32>,
-        domain: AtomicU32,
         closed_at: Option<Duration>,
+        cancel_at: Option<Duration>,
+        progress: Mutex<Vec<Duration>>,
     }
 
     impl FakeEnv {
@@ -697,8 +753,9 @@ mod tests {
                 cursor: Mutex::new(0),
                 generation: 7,
                 session_domain: Some(1),
-                domain: AtomicU32::new(1),
                 closed_at: None,
+                cancel_at: None,
+                progress: Mutex::default(),
             }
         }
 
@@ -743,7 +800,6 @@ mod tests {
                 scan: ScanResult {
                     data: data[from as usize..].to_vec(),
                     from,
-                    dropped: 0,
                     closed,
                 },
                 generation: self.generation,
@@ -757,28 +813,27 @@ mod tests {
             *c = (*c).max(to);
         }
 
-        fn domain_id(&self) -> Option<u32> {
-            match self.domain.load(Ordering::Relaxed) {
-                0 => None,
-                id => Some(id),
-            }
-        }
-
         fn cancelled(&self) -> bool {
-            false
+            self.cancel_at.is_some_and(|at| self.elapsed() >= at)
         }
 
-        fn progress(&self, _: Duration) {}
+        fn progress(&self, waited: Duration) {
+            self.progress.lock().unwrap().push(waited);
+        }
     }
 
     /// A guest whose agent answers after `ping_after` probes and whose command exits with each code in turn.
     struct FakeGuest {
         os: GuestOs,
+        /// The running domain's ID; 0 means stopped.
+        domain: AtomicU32,
         pings: AtomicU32,
         ping_after: u32,
         codes: Mutex<Vec<i64>>,
         starts: AtomicU32,
-        /// When set, every call blocks until the sender is dropped.
+        /// Status calls that fail, as a timed-out agent call does, before any succeeds.
+        status_errors: AtomicU32,
+        /// When set, every agent call blocks until the sender is dropped.
         hang: Option<Mutex<Receiver<()>>>,
     }
 
@@ -786,10 +841,12 @@ mod tests {
         fn new() -> Self {
             Self {
                 os: GuestOs::Linux,
+                domain: AtomicU32::new(1),
                 pings: AtomicU32::new(0),
                 ping_after: 0,
                 codes: Mutex::new(vec![]),
                 starts: AtomicU32::new(0),
+                status_errors: AtomicU32::new(0),
                 hang: None,
             }
         }
@@ -802,6 +859,13 @@ mod tests {
     }
 
     impl Guest for FakeGuest {
+        fn domain_id(&self) -> Result<Option<u32>> {
+            Ok(match self.domain.load(Ordering::Relaxed) {
+                0 => None,
+                id => Some(id),
+            })
+        }
+
         fn ping(&self, _: i32) -> bool {
             self.block();
             self.pings.fetch_add(1, Ordering::Relaxed) >= self.ping_after
@@ -818,6 +882,11 @@ mod tests {
         }
 
         fn status(&self, _: i64, _: i32) -> Result<ExecState> {
+            let failing = self.status_errors.load(Ordering::Relaxed);
+            if failing > 0 {
+                self.status_errors.store(failing - 1, Ordering::Relaxed);
+                bail!("guest agent 'guest-exec-status' failed: timed out");
+            }
             let mut codes = self.codes.lock().unwrap();
             Ok(if codes.is_empty() {
                 ExecState::Running
@@ -919,15 +988,82 @@ mod tests {
     #[test]
     fn a_restarted_or_stopped_vm_ends_the_wait() {
         let env = FakeEnv::new(vec![]);
-        env.domain.store(2, Ordering::Relaxed);
-        let o = wait(&env, FakeGuest::new(), &[console("login:")], 5);
+        let restarted = FakeGuest::new();
+        restarted.domain.store(2, Ordering::Relaxed);
+        let o = wait(&env, restarted, &[console("login:")], 5);
         assert!(
             matches!(o, Outcome::Closed { index: Some(0), ref reason } if reason.contains("restarted")),
             "{o:?}"
         );
-        env.domain.store(0, Ordering::Relaxed);
-        let o = wait(&env, FakeGuest::new(), &[Condition::Agent], 5);
+        // A stop during the wait is seen by the next VM check, within about half a second.
+        let guest = Arc::new(FakeGuest {
+            ping_after: u32::MAX,
+            ..FakeGuest::new()
+        });
+        let stopper = guest.clone();
+        let checks = validate_conditions(&Config::default(), &[Condition::Agent]).unwrap();
+        let waiter = std::thread::spawn(move || {
+            let env = FakeEnv::new(vec![]);
+            let o = run(&env, guest, checks, Duration::from_secs(30)).unwrap();
+            (o, env.elapsed())
+        });
+        std::thread::sleep(ms(50));
+        stopper.domain.store(0, Ordering::Relaxed);
+        let (o, waited) = waiter.join().unwrap();
         assert!(matches!(o, Outcome::Closed { index: None, .. }), "{o:?}");
+        assert!(waited < Duration::from_secs(30), "{waited:?}");
+    }
+
+    #[test]
+    fn a_slow_status_call_never_starts_a_second_run() {
+        let guest = Arc::new(FakeGuest {
+            status_errors: AtomicU32::new(3),
+            codes: Mutex::new(vec![0]),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let checks = validate_conditions(
+            &Config::default(),
+            &[Condition::Command {
+                command: "true".into(),
+            }],
+        )
+        .unwrap();
+        let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o).0, 0);
+        assert_eq!(guest.starts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_zero_timeout_refuses_probe_conditions_and_checks_the_console_once() {
+        let env = FakeEnv::new(vec![(ms(0), b"login: ")]);
+        let checks = validate_conditions(&Config::default(), &[Condition::Agent]).unwrap();
+        let err = run(&env, Arc::new(FakeGuest::new()), checks, Duration::ZERO)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least 1 s"), "{err}");
+        let o = wait(&env, FakeGuest::new(), &[console("login:")], 0);
+        assert_eq!(matched(&o).0, 0);
+    }
+
+    #[test]
+    fn a_cancelled_wait_stops_polling() {
+        let mut env = FakeEnv::new(vec![]);
+        env.cancel_at = Some(ms(700));
+        let o = wait(&env, FakeGuest::new(), &[console("never")], 30);
+        assert_eq!(o, Outcome::Cancelled);
+        assert!(env.elapsed() < ms(800), "{:?}", env.elapsed());
+    }
+
+    #[test]
+    fn progress_goes_out_every_five_seconds() {
+        let env = FakeEnv::new(vec![]);
+        let o = wait(&env, FakeGuest::new(), &[console("never")], 12);
+        assert!(matches!(o, Outcome::TimedOut { .. }));
+        let sent = env.progress.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0] >= Duration::from_secs(5) && sent[0] < Duration::from_secs(6));
+        assert!(sent[1] >= Duration::from_secs(10) && sent[1] < Duration::from_secs(11));
     }
 
     #[test]

@@ -193,6 +193,38 @@
     "tool": "__time__"
   },
   {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-w",
+      "wait_for_agent_secs": 120
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "nohup sh -c 'sleep 5; poweroff' >/dev/null 2>&1 &"
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "command",
+          "command": "false"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
     "tool": "wait_for",
     "args": {
       "vm": "trial-deb13",

@@ -54,14 +54,14 @@ impl Buffer {
 
     /// Everything from `since` (default: the wait cursor) to the end, without marking it delivered.
     fn scan(&self, since: Option<u64>) -> ScanResult {
-        let from = since.unwrap_or(self.wait_cursor).min(self.end());
-        let dropped = self.start.saturating_sub(from);
-        let from = from.max(self.start);
+        let from = since
+            .unwrap_or(self.wait_cursor)
+            .min(self.end())
+            .max(self.start);
         let skip = usize::try_from(from - self.start).expect("the buffer fits in memory");
         ScanResult {
             data: self.data.iter().skip(skip).copied().collect(),
             from,
-            dropped,
             closed: self.closed.clone(),
         }
     }
@@ -131,10 +131,8 @@ struct Session {
 /// A session's output from an offset, read for a wait without marking it delivered.
 pub struct ScanResult {
     pub data: Vec<u8>,
-    /// Offset of `data[0]`.
+    /// Offset of `data[0]`: the requested offset, or the scrollback's start when output from there was dropped.
     pub from: u64,
-    /// Bytes from the requested offset that were already dropped from the scrollback.
-    pub dropped: u64,
     pub closed: Option<String>,
 }
 
@@ -648,10 +646,10 @@ mod tests {
     }
 
     #[test]
-    fn scan_reports_bytes_dropped_from_scrollback() {
+    fn scan_starts_at_the_scrollback_when_output_was_dropped() {
         let b = buffer(b"Password: ", 13);
         let s = b.scan(Some(5));
-        assert_eq!((s.from, s.dropped), (13, 8));
+        assert_eq!(s.from, 13);
         assert_eq!(s.data, b"Password: ");
     }
 

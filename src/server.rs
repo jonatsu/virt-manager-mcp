@@ -232,7 +232,7 @@ pub struct ConsoleReadParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct WaitForParams {
     pub vm: String,
-    /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks once.
+    /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks console conditions once and is refused with agent or command conditions.
     pub timeout_secs: Option<u64>,
     /// What to wait for, at most 16; the call returns on the first that holds.
     pub conditions: Vec<wait::Condition>,
@@ -911,7 +911,6 @@ impl VirtServer {
             let env = wait::LiveEnv {
                 consoles: &s.consoles,
                 vm: &p.vm,
-                dom: dom.clone(),
                 cancelled: Box::new(|| ct.is_cancelled()),
                 progress: Box::new(notify),
             };
