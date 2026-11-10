@@ -109,8 +109,9 @@ pub enum Condition {
     },
     /// Text read from the screen by OCR matches `pattern`, a regular expression (Rust `regex` syntax), on the
     /// recognised lines joined by newlines. OCR runs on frames captured every 500 ms, only when the screen, or the
-    /// region, changed. All screen conditions of one wait name the same display head. Needs `display.ocr_models`;
-    /// refused in read-only mode.
+    /// region, changed. Each `screen_text` condition runs its own OCR, so one pattern with alternatives (`a|b`) costs
+    /// less than several conditions on the same area. All screen conditions of one wait name the same display head.
+    /// Needs `display.ocr_models`; refused in read-only mode.
     ScreenText {
         pattern: String,
         /// Read only this part of the screen, in pixels of a full-screen image from `screenshot` or a wait's

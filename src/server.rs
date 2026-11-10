@@ -1,6 +1,6 @@
 //! MCP tool definitions.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -1798,10 +1798,9 @@ impl State {
             .ocr_models
             .as_deref()
             .ok_or_else(|| anyhow!(wait::NO_OCR_MODELS))?;
-        let mut ocr = self
-            .ocr
-            .lock()
-            .expect("no thread panics while loading the OCR models");
+        // The cache holds either nothing or a loaded recogniser, both valid, so a load that panicked leaves nothing to
+        // repair and the next call tries again.
+        let mut ocr = self.ocr.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(loaded) = &*ocr {
             return Ok(loaded.clone());
         }
