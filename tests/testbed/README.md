@@ -8,6 +8,7 @@ through scripted tool calls, and the scripts target one Debian 13 guest on `qemu
 | File | Purpose |
 | -- | -- |
 | `mcp_call.py` | Standard-library MCP stdio client. It runs a JSON list of tool calls and prints each reply. |
+| `run-all.sh` | Runs every case with `--check` and the `virsh` steps between them; see "Check a run". |
 | `config.toml` | Server config that allows only `trial-deb13`, caps created VMs at one, and uses `agent-vms`. |
 | `config-templates.toml` | Server config for VMs made from templates: no `trial-deb13`, at most three 1 GiB VMs, four templates. |
 | `preseed.cfg` | Unattended Debian 13 install with `qemu-guest-agent` and a serial getty on `ttyS0`. |
@@ -112,6 +113,32 @@ tool with its input properties, `__sleep__` pauses for `args.secs` seconds, and 
 time between two of them measures the calls in between. A call may also carry `"save": {"name": "field"}`, which keeps
 that field of the reply's JSON under the name; a later argument holding `${name}` gets the value. Saved values persist
 in `vars.json` in the current directory, so a later case file run from there can use them.
+
+## Check a run
+
+With `--check` before the case file, `mcp_call.py` checks each reply against the call's `expect` and exits 1 when a
+check fails; its docstring describes the format. Every case carries expectations taken from its row in the tables
+above. Values that change between runs, such as job IDs, offsets and generations, are matched by pattern. Timings that
+`__time__` lines measure stay unchecked; read them from the output.
+
+`run-all.sh` runs every case with `--check`, from the repository root:
+
+```sh
+tests/testbed/run-all.sh                            # every case
+tests/testbed/run-all.sh templates-reset jobs.json  # a subset
+```
+
+It builds the release binary, then runs the cases in a fixed order and does the `virsh` steps this README describes
+between them. Those steps define `t-listed`, clone and delete `tpl-scratch.qcow2`, shut `trial-deb13` off for
+`console-after-start.json`, and save `t-u`. They also attach the outside disk, wait out expiries, run the `sweep`
+command, and log root out of `ttyS0`. Naming one case of a pair that depends on the other, such as `jobs.json` and
+`jobs-reopen.json`, runs both. Logs go to a new directory under `/tmp`, which the script prints. At the end it
+removes the `t-*` VMs and volumes it created, leaves `trial-deb13` running, prints a summary, and exits 1 if a case
+failed.
+
+It prints `skipped: <reason>` and exits 0 when `virsh` cannot reach `qemu:///system`, or when pool `agent-vms`,
+`trial-deb13` or `tpl-debian13.qcow2` is missing. Without `t-owrt`, it skips the OpenWrt cases. The check that needs
+root, "A failed volume deletion during expiry", stays manual. A full run takes about 11 minutes.
 
 ## Recreate the guest
 
