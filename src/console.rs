@@ -291,21 +291,26 @@ impl Consoles {
         device: Option<&str>,
         force: bool,
     ) -> Result<String> {
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(s) = sessions.get(vm) {
-            // A session counts as live while its reader runs and has not recorded an end. With
-            // `force`, even a live one is replaced: after a power-off its stream may never end.
-            let live = s.buffer.lock().unwrap().closed.is_none()
-                && s.reader.as_ref().is_some_and(|h| !h.is_finished());
-            if live && !force {
-                return Ok(format!(
-                    "console for '{vm}' is already open (device: {}, generation {}); pass force: true to reopen it",
-                    s.device.as_deref().unwrap_or("default"),
-                    s.generation
-                ));
+        // The sessions lock is held only to check and to swap entries: every scan in a wait takes it, so the libvirt
+        // calls below and the old session's drop, which joins its reader and aborts its stream, run without it.
+        let replaced = {
+            let mut sessions = self.sessions.lock().unwrap();
+            if let Some(s) = sessions.get(vm) {
+                // A session counts as live while its reader runs and has not recorded an end. With
+                // `force`, even a live one is replaced: after a power-off its stream may never end.
+                let live = s.buffer.lock().unwrap().closed.is_none()
+                    && s.reader.as_ref().is_some_and(|h| !h.is_finished());
+                if live && !force {
+                    return Ok(format!(
+                        "console for '{vm}' is already open (device: {}, generation {}); pass force: true to reopen it",
+                        s.device.as_deref().unwrap_or("default"),
+                        s.generation
+                    ));
+                }
             }
-            sessions.remove(vm);
-        }
+            sessions.remove(vm)
+        };
+        drop(replaced);
 
         let stream = hv.with_conn(|conn| Ok(Stream::new(conn, sys::VIR_STREAM_NONBLOCK)?))?;
         let flags = if force {
@@ -331,19 +336,23 @@ impl Consoles {
                 .name(format!("console-{vm}"))
                 .spawn(move || read_loop(&stream, &buffer, &stop, cap))?
         };
-        sessions.insert(
-            vm.to_string(),
-            Session {
-                stream,
-                buffer,
-                stop,
-                reader: Some(reader),
-                device: device.map(str::to_string),
-                generation,
-                domain_id: dom.get_id(),
-                writing: Arc::default(),
-            },
-        );
+        let session = Session {
+            stream,
+            buffer,
+            stop,
+            reader: Some(reader),
+            device: device.map(str::to_string),
+            generation,
+            domain_id: dom.get_id(),
+            writing: Arc::default(),
+        };
+        // An open that raced this one and finished first is replaced, as `force` would, and dropped after the lock.
+        let raced = self
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(vm.to_string(), session);
+        drop(raced);
         Ok(format!(
             "console for '{vm}' opened (generation {generation}); output is buffered from now on"
         ))
@@ -476,7 +485,9 @@ impl Consoles {
     }
 
     pub fn close(&self, vm: &str) -> bool {
-        self.sessions.lock().unwrap().remove(vm).is_some()
+        // Bound first, so the guard is released before the session's drop joins its reader and aborts its stream.
+        let removed = self.sessions.lock().unwrap().remove(vm);
+        removed.is_some()
     }
 
     fn session(&self, vm: &str) -> Result<(Arc<Mutex<Buffer>>, u64, Option<u32>)> {
