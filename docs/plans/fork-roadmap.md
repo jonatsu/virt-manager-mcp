@@ -153,23 +153,12 @@ Open questions for the designs:
 
 - Outcome 5: should it bring its own network policy, or wait for outcome 6?
 
-## Current goal
+## Next
 
-Outcome 1 landed in `aacafce` to `b738fee` and was re-verified in full at `aa44f14`; the plan's execution record
-holds the evidence for each criterion. The baseline and the defects are done.
+The baseline, the defects and outcome 1 are done; outcome 1 was re-verified in full at `aa44f14`, and the plan's
+execution record holds its evidence.
 
-- **Objective:** disposable VMs from operator templates work as
-  [`disposable-vms-design.md`](disposable-vms-design.md) describes, built in the order of
-  [`disposable-vms-implementation-plan.md`](disposable-vms-implementation-plan.md).
-- **Success criteria:**
-  - Units 1 to 8 of the plan have landed on local `main`, each with its execution-record row filled.
-  - The gate in `AGENTS.md` and `cargo +1.89 test --locked` exit 0 at the last commit.
-  - Every test-bed case, old and new, shows its expected replies, and no `t-*` VM or volume is left.
-  - A separate conformance review against the design and the plan finds no material mismatch.
-  - The commits are pushed to the fork, under the standing authorization, and CI is green.
-- **Verification:** run the gate, the test-bed cases and the conformance review as the last step, after the last
-  change.
-- **Boundaries:** touch only `trial-deb13` and VMs and volumes named `t-*` or `tpl-*` in the `agent-vms` pool on
-  `qemu:///system`. Never rebuild `tpl-debian13.qcow2` once a VM uses it.
-- **Stop conditions:** stop and ask when cloud-init rejects the `fatfs` seed, when the design needs a change, or when
-  a step needs root, a host or libvirt configuration change, another VM, or a GitHub setting.
+1. **Follow-ups 7 to 9**, as one run before outcome 2. They close the expiry and reset gaps that the final
+   outcome-1 conformance review found, and the design already covers the behaviour they restore, so they need no new
+   design. Each lands with a test that shows the fix, and the reset and expiry test-bed cases pass again.
+2. **Outcome 2**, once its design is approved.
