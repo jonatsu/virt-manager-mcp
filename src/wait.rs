@@ -856,7 +856,8 @@ pub fn attach(
     })
 }
 
-/// Runs `f` on a probe thread, waiting until 2 s past now or past `deadline`, whichever is earlier.
+/// Runs `f` on a probe thread, waiting until 2 s past now or past `deadline`, whichever is earlier, or until the
+/// call is cancelled.
 fn within_margin<T: Send + 'static>(
     env: &dyn Env,
     guest: &Arc<dyn Guest>,
@@ -870,8 +871,11 @@ fn within_margin<T: Send + 'static>(
         bail!("could not start taking the screenshot");
     }
     loop {
-        if let Some(result) = probe.take() {
+        if let Some(result) = probe.take_or_stopped().context("taking the screenshot")? {
             return result;
+        }
+        if env.cancelled() {
+            bail!("the call was cancelled");
         }
         let now = env.now();
         if now >= limit {
@@ -1194,8 +1198,13 @@ impl TextState {
 
     /// Takes in a finished read. Returns a hit when its text matches.
     fn absorb(&mut self) -> Result<Option<Poll>> {
-        let Some(read) = self.probe.take() else {
-            return Ok(None);
+        let read = match self.probe.take_or_stopped() {
+            Ok(Some(read)) => read,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                self.reading = None;
+                return Err(e.context("reading text from the screen"));
+            }
         };
         let frame = self.reading.take().expect("a finished read had a frame");
         let text = read.context("reading text from the screen")?;
@@ -1585,6 +1594,25 @@ impl<T: Send + 'static> Probe<T> {
             Err(TryRecvError::Disconnected) => {
                 self.inflight = None;
                 None
+            }
+        }
+    }
+
+    /// Like [`Probe::take`], but a probe thread that ended without a result, which only a panic does, is an error
+    /// rather than silence.
+    fn take_or_stopped(&mut self) -> Result<Option<T>> {
+        let Some(rx) = self.inflight.as_ref() else {
+            return Ok(None);
+        };
+        match rx.try_recv() {
+            Ok(v) => {
+                self.inflight = None;
+                Ok(Some(v))
+            }
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                self.inflight = None;
+                bail!("its thread stopped without a result")
             }
         }
     }
@@ -2750,6 +2778,29 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_call_stops_waiting_for_the_attachment() {
+        let (tx, rx) = mpsc::channel();
+        let guest = Arc::new(FakeGuest {
+            capture_hang: Some(Mutex::new(rx)),
+            ..FakeGuest::showing(vec![solid(4, 4, 1)])
+        });
+        let env = FakeEnv {
+            cancel_at: Some(ms(500)),
+            ..FakeEnv::new(vec![(ms(100), b"login: ")])
+        };
+        let (o, attachment) = wait_and_attach(&env, &guest, &[console("login:")]);
+        assert_eq!(matched(&o).0, 0);
+        assert!(env.elapsed() < ms(600), "{:?}", env.elapsed());
+        assert_eq!(
+            attachment,
+            Some(Attachment::Failed(
+                "no screenshot attached: the call was cancelled".into()
+            ))
+        );
+        drop(tx);
+    }
+
+    #[test]
     fn an_attachment_capture_ends_with_the_call_margin_after_the_deadline() {
         // A match found at the deadline itself leaves only the 2 s margin.
         let (tx, rx) = mpsc::channel();
@@ -3020,6 +3071,22 @@ mod tests {
         };
         state.reading = Some(Arc::new(solid(4, 4, 1)));
         State::Text(state)
+    }
+
+    #[test]
+    fn a_read_whose_thread_stopped_without_a_result_ends_the_wait_with_an_error() {
+        // A panic in the recogniser drops the probe's sender before it sends, as here.
+        let State::Text(mut state) = finished_read("language", "unused") else {
+            unreachable!()
+        };
+        let (tx, rx) = mpsc::channel::<Result<String>>();
+        drop(tx);
+        state.probe.inflight = Some(rx);
+        let err = at_deadline(&mut [State::Text(state)], None).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "reading text from the screen: its thread stopped without a result"
+        );
     }
 
     #[test]
