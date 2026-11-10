@@ -131,7 +131,8 @@ ID with its start time and the boot ID, and the exit code once the job ends.
 - Linux: `/var/lib/virtmanager-mcp/jobs/<id>/`, created with mode 700; the launcher refuses a parent that is not a
   root-owned directory with mode 700, or is a link, so no guest user can redirect it. The command reaches the guest on
   stdin and is stored as a file. The wrapper that runs it also runs from a file, because systemd expands `$` variables
-  in a unit's command line. A background command starts with SIGINT and SIGQUIT ignored; the wrapper resets them
+  in a unit's command line. A background command starts with SIGINT and SIGQUIT ignored, and systemd ignores SIGPIPE
+  in services; the unit sets `IgnoreSIGPIPE=no`, and the wrapper resets all three
   where the guest's `env` supports `--default-signal`.
 - Windows: `C:\ProgramData\virtmanager-mcp\jobs\<id>\`, started by a launcher sent like `exec` that redirects through
   `cmd /c` to keep the log in bytes.

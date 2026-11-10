@@ -14,10 +14,11 @@ forward() {
 }
 trap forward TERM
 
-# A background command in a non-interactive shell starts with SIGINT and SIGQUIT ignored; reset them where env can.
+# A background command in a non-interactive shell starts with SIGINT and SIGQUIT ignored, and an inherited SIGPIPE
+# ignore would turn an early pipeline end into error output; reset all three where env can.
 set -- /bin/sh "${dir}/cmd"
-if env --default-signal=INT,QUIT true 2> /dev/null; then
-  set -- env --default-signal=INT,QUIT "$@"
+if env --default-signal=INT,QUIT,PIPE true 2> /dev/null; then
+  set -- env --default-signal=INT,QUIT,PIPE "$@"
 fi
 "$@" < /dev/null > "${dir}/out" 2>&1 &
 child=$!

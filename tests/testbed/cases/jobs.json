@@ -91,6 +91,29 @@
     "tool": "job_start",
     "args": {
       "vm": "t-w",
+      "command": "yes | head -c 10"
+    },
+    "save": {
+      "pipe": "job"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${pipe}"
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
       "command": "sleep 300"
     },
     "save": {

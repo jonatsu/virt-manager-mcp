@@ -968,7 +968,8 @@ impl VirtServer {
         it survives an agent restart and a server restart. Its stdout and stderr go to one log; read it with \
         job_read, stop it with job_stop, and find jobs again with job_list. A reset or deletion of the VM removes its \
         jobs. Where the guest's env lacks --default-signal (busybox, coreutils before 9), the job starts with \
-        SIGINT and SIGQUIT ignored."
+        SIGINT and SIGQUIT ignored. Under systemd, SIGPIPE keeps its default action, so pipelines such as \
+        `cmd | head` end quietly."
     )]
     async fn job_start(
         &self,

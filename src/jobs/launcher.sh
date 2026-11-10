@@ -45,7 +45,8 @@ printf '%s\n' "${wrapper}" > "${dir}/run" || {
 }
 
 if [ -d /run/systemd/system ] && command -v systemd-run > /dev/null 2>&1; then
-  if systemd-run --quiet --collect --unit="virtmanager-mcp-job-${id}" \
+  # systemd ignores SIGPIPE in services by default; a job's pipelines need it to end early and quietly.
+  if systemd-run --quiet --collect --unit="virtmanager-mcp-job-${id}" --property=IgnoreSIGPIPE=no \
     /bin/sh "${dir}/run" "${dir}" < /dev/null > /dev/null 2>&1; then
     echo "started with systemd-run"
     exit 0
