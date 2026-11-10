@@ -480,11 +480,19 @@ impl Consoles {
         }
     }
 
-    /// Called once `vm` is shut off. Waits up to `wait` for the session's reader to record that the stream ended, and
-    /// records it as ended when it has not, so a read right after reports the console closed. Its stream may never
-    /// report the end after a power-off.
-    pub fn note_shut_off(&self, vm: &str, wait: Duration) {
-        if let Ok((buffer, _, _)) = self.session(vm) {
+    /// The generation of `vm`'s open session, if it has one.
+    pub fn generation(&self, vm: &str) -> Option<u64> {
+        self.session(vm).ok().map(|(_, generation, _)| generation)
+    }
+
+    /// Called once `vm` is shut off, with the `generation` of the session it had before the stop. Waits up to `wait`
+    /// for that session's reader to record that the stream ended, and records it as ended when it has not, so a read
+    /// right after reports the console closed. Its stream may never report the end after a power-off. A session opened
+    /// since, for a VM started again meanwhile, is left alone.
+    pub fn note_shut_off(&self, vm: &str, generation: Option<u64>, wait: Duration) {
+        if let Ok((buffer, current, _)) = self.session(vm)
+            && Some(current) == generation
+        {
             await_closed(&buffer, wait, SHUT_OFF);
         }
     }

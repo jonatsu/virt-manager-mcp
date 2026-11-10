@@ -795,11 +795,13 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let wait = Duration::from_secs(p.wait_secs.unwrap_or(60).min(300));
+            // Only the session open before the stop is marked, not one a concurrent start and open made meanwhile.
+            let generation = s.consoles.generation(&p.vm);
             let off = s.hv.stop(&p.vm, p.force, wait)?;
             let msg = if off {
                 // Keep any console session, so a later console_read reports the console closed instead of "no
                 // console open"; wait for it to record the end first, so even a read with wait_ms 0 sees it.
-                s.consoles.note_shut_off(&p.vm, CONSOLE_END_WAIT);
+                s.consoles.note_shut_off(&p.vm, generation, CONSOLE_END_WAIT);
                 format!("VM '{}' is shut off", p.vm)
             } else {
                 format!(

@@ -100,8 +100,8 @@ Reviews of earlier work found these. None blocks the server's use.
     removed unwritten.
 05. **Done: `console_read` with `wait_ms: 0` right after `stop_vm` reports the console closed.** The reader records
     the stream's end a moment after the VM stops, so such a read could return `closed: null`. Once the VM is off,
-    `stop_vm` now waits up to 2 s for the session to record the end, and records it itself when the stream never
-    reports it. `console-closed-on-power-off.json` reads with `wait_ms: 0` after its forced `stop_vm`.
+    `stop_vm` now waits up to 2 s for the session open before the stop to record the end, and records it itself when
+    the stream never reports it. `console-closed-on-power-off.json` reads with `wait_ms: 0` after its forced `stop_vm`.
 06. **Convert the existing documents to the short, plain style.** `AGENTS.md` asks for short, plain designs. Bring this
     roadmap, the brainstorm draft, the test-bed README and the research notes into the same style; the research copies
     keep their copied text and change only their own notes.
@@ -127,7 +127,8 @@ Reviews of earlier work found these. None blocks the server's use.
 12. **Done: console conditions share one stripped scan.** Every console condition ran `ansi::strip` over its own span
     on each poll with new output, a cost that grew with `console_buffer_bytes` and the number of conditions. A poll
     now strips its scan once, on first use, and each condition matches from its own start in the result. A unit test
-    checks that this finds the same match and end offset as stripping each span alone.
+    checks that, from every start at a sequence boundary, this finds the same match and end offset as stripping the
+    span alone; from a start inside a sequence, the sequence's tail no longer counts as text.
 13. **Done: an expiry kept after a failed deletion keeps the boot disk.** The manual check for follow-up 7 showed the
     sweep deleting the overlay and seed before it reached the locked disk, so the VM it kept had lost its boot disk.
     The sweep now deletes disks in reverse document order, boot disk last, and stops at the first failure, so the boot
