@@ -64,6 +64,12 @@ agent_timeout_secs = 10             # single guest agent request
 console_buffer_bytes = 262144       # serial console scrollback per VM
 max_wait_secs = 50                  # longest a wait_for or paced console_write may block
 
+# Screen text recognition for wait_for's screen_text condition. Unset (the default) turns it off;
+# screen_settled, screenshots and the mouse work without it. Set it to the absolute directory that
+# scripts/fetch-ocr-models.sh filled; the directory and both model files must exist.
+# [display]
+# ocr_models = "/home/me/.local/share/virtmanager-mcp/ocr-models"
+
 [http]
 bind = "127.0.0.1:8765"
 # Required for --transport http. Can also be set via VIRTMANAGER_MCP_TOKEN.
