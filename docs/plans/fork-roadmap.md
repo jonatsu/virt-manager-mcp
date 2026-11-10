@@ -51,7 +51,7 @@ The fork audit on 2026-11-09 found the items below. None of them changes the ser
    `pre-commit run --all-files` pass changes nothing.
 6. **Done: GitHub settings and CI.** Issues are enabled as the inbox for outside reports; accepted work moves into
    this roadmap. The description and topics name the fork's purpose and its upstream. CI runs the build gate on
-   stable, the tests on the minimum supported Rust version (1.89, the highest among the locked dependencies), the
+   stable, the tests on the minimum supported Rust version (1.94, which the OCR engine of outcome 2 needs), the
    pre-commit hooks, and `cargo deny check advisories` against the RustSec database.
 
 ## Defects
