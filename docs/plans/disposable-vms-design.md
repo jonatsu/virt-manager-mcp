@@ -109,7 +109,8 @@ because it destroys the VM's disk state, and it refuses VMs made by `create_vm`.
    address, vCPUs, memory and network interfaces stay as they are. If this fails, delete the new volumes; the old ones
    are still in place.
 5. Delete the old overlay, the old seed, and every other pool disk an agent attached with `attach_disk`, so nothing of
-   the old state is left. A volume that cannot be deleted is named in the result.
+   the old state is left. A volume that cannot be deleted is named in the result, and a disk outside the pool is
+   detached and left in place.
 6. Start the VM and wait for the agent, as at creation. A UEFI VM starts with its firmware variables reset to the
    template's. The expiry does not change.
 

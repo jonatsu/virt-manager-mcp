@@ -107,9 +107,10 @@ The conformance reviews of the second and third autopilot runs found these. None
 8. **Done: a refused `reset_vm` keeps the console open.** `manage::reset` closes the console only after every check
    has passed, just before it forces the VM off. In `templates-reset-saved.json`, a console opened before a refused
    reset still reads output after it.
-9. **No test shows reset and expiry leaving a disk outside `disk_pool`.** Both reuse `pool_volume`, so the guardrail
-   holds on reading the code. A test-bed step that attaches an out-of-pool file with `virsh`, then resets or expires
-   the VM, would show it.
+9. **Done: a test shows reset and expiry leaving a disk outside `disk_pool`.** `templates-outside-disk.json`, with the
+   steps in the test-bed README, attaches a user-owned file to two VMs with `virsh`; the sweep's expiry and a reset
+   both leave it in place, with its owner and checksum unchanged. A reset now reports such a disk as detached and left
+   in place, rather than as one it could not delete.
 
 ## Outcomes
 

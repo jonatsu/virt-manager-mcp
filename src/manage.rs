@@ -600,21 +600,28 @@ pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Re
         // 5. Remove every pool disk of the old state.
         let mut msg =
             format!("reset VM '{name}' to template '{template_name}' (generation {next})");
-        let mut left = Vec::new();
+        let mut failed = Vec::new();
+        let mut outside = Vec::new();
         for d in &old_disks {
             match pool_volume(conn, &pool, &m.disk_pool, d) {
                 Some(vol) => {
                     if let Err(e) = vol.delete(0) {
-                        left.push(format!("{} ({})", d.source(), e.message()));
+                        failed.push(format!("{} ({})", d.source(), e.message()));
                     }
                 }
-                None => left.push(format!("{} (outside manage.disk_pool)", d.source())),
+                None => outside.push(d.source()),
             }
         }
-        if !left.is_empty() {
+        if !failed.is_empty() {
             msg.push_str(&format!(
                 "; could not delete old disks: {}",
-                left.join(", ")
+                failed.join(", ")
+            ));
+        }
+        if !outside.is_empty() {
+            msg.push_str(&format!(
+                "; detached and left in place, outside manage.disk_pool: {}",
+                outside.join(", ")
             ));
         }
         Ok(msg)

@@ -39,6 +39,7 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-reset-saved.json` | Run after `virsh managedsave t-u`: the reset discards the saved state and boots fresh; a `create_vm` VM named `t-u-g4` holding the next disk name makes the next reset refuse with nothing changed, and the console opened before it still reads output; then both VMs are deleted. |
 | `templates-expiry.json` | `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without one; after 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
 | `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
+| `templates-outside-disk-setup.json`, `templates-outside-disk.json` | A reset and an expiry leave a disk file outside every pool in place; run with the steps below. |
 
 `templates-reset.json` and `templates-expiry.json` need `t-listed`, a VM defined with `virsh` and never started.
 `templates-reset.json` also needs `tpl-scratch.qcow2`, made with
@@ -46,6 +47,29 @@ The template cases below run with `config-templates.toml`. They need the templat
 
 `console-stall.json` rereads from offset 0 with `wait_ms`, as an agent often does. It passes when the reads show the
 `Password:` prompt and a root shell prompt. It leaves root logged in on `ttyS0`; send `exit` to log out.
+
+### Disks outside the pool survive reset and expiry
+
+A reset and an expiry delete only volumes in `manage.disk_pool`. This check shows that a disk file outside every pool
+stays in place:
+
+1. Run `templates-outside-disk-setup.json`. It creates `t-or`, running, and `t-oe`, stopped with a 1-minute lifetime.
+
+2. Make a file you own outside every pool, such as `truncate -s 1M "$DIR/outside.img"`, and note its `sha256sum`.
+
+3. Attach it to both VMs in their stored configuration only, so QEMU never opens it:
+
+   ```sh
+   for vm in t-or t-oe; do
+     virsh -c qemu:///system attach-disk "$vm" "$DIR/outside.img" vdd --config --targetbus virtio \
+       --driver qemu --subdriver raw --mode readonly
+   done
+   ```
+
+4. Once `t-oe` has expired, run `templates-outside-disk.json`. The server's first sweep deletes `t-oe` and logs the
+   outside disk as left in place; the reset of `t-or` reports it detached and left in place; then `t-or` is deleted.
+
+5. Check that the file still exists, with the same owner and checksum.
 
 ### A failed volume deletion during expiry (needs root)
 

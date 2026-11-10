@@ -1,0 +1,44 @@
+[
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-or"
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-or",
+      "wait_for_agent_secs": 0
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-or"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 5
+    }
+  },
+  {
+    "tool": "list_vms",
+    "args": {}
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-or",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-or"
+    }
+  }
+]
