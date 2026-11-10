@@ -130,7 +130,7 @@ before it is built, and each feature from the earlier list sits under one of the
    tool (console text, screen text, a settled screen, the guest agent, a command or a job), the mouse and region
    screenshots, paced console input, long-running jobs on Linux and Windows whose output streams back, and
    expect-style console sessions. `type_text` returns at once, and the trial lost input that way. Design:
-   [`live-interaction-design.md`](live-interaction-design.md), in review.
+   [`live-interaction-design.md`](live-interaction-design.md), accepted.
 3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
    passing them through its context, and reaches services running in the guest. This covers copying from the VM,
    directory sync, the guest's IP address and port forwarding. Each new path out of the guest needs a guardrail.

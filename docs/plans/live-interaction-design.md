@@ -1,6 +1,6 @@
 # Reliable interaction with a live guest: design
 
-Status: draft, revised for a plan-critic review. Once built, the code wins and this design follows it.
+Status: accepted, after a plan-critic review. Once built, the code wins and this design follows it.
 Basis: roadmap outcome 2 in [`fork-roadmap.md`](fork-roadmap.md), with evidence in
 [`2026-11-09-vm-management-mcp-evaluation.md`](../research/2026-11-09-vm-management-mcp-evaluation.md).
 
