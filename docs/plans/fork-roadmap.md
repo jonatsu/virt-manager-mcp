@@ -113,7 +113,8 @@ Reviews of earlier work found these. None blocks the server's use.
     because it is no pool volume, rather than as one it could not delete.
 10. **Done: a slow `console_open` no longer stalls every wait.** Each `wait_for` poll takes the console sessions lock
     to scan. `Consoles::open` and `Consoles::close` now hold that lock only to check and swap entries, and call
-    libvirt and drop a replaced session, which joins its reader and aborts its stream, without it.
+    libvirt and drop a replaced session, which joins its reader and aborts its stream, without it. A separate lock,
+    which waits never take, makes opens run one at a time.
 11. **An unterminated OSC sequence hides the output after it.** `ansi::strip` holds back everything after `ESC ]`
     until a BEL or `ESC \` arrives, so a stray `ESC ]` from line noise stops console waits with `strip_ansi` from
     matching, and hides the rest of a stripped `console_read`. Capping an OSC at a newline or a few KiB would bound
