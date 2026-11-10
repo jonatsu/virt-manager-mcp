@@ -1659,8 +1659,16 @@ mod tests {
         /// When set, every capture blocks until the sender is dropped.
         capture_hang: Option<Mutex<Receiver<()>>>,
         /// When set, the capture with this index stops the domain and fails, as a capture does when the VM stops
-        /// during it.
+        /// during it. It first waits until `stop_after_checks` VM checks have read the domain.
         stops_at_capture: Option<usize>,
+        stop_after_checks: u32,
+        /// The VM checks that have read the domain; `initial_id` is not one.
+        checks: AtomicU32,
+        /// When set, the VM check with this index reads the domain, then blocks until the sender is dropped before
+        /// returning what it read.
+        hold_check: Option<(u32, Mutex<Receiver<()>>)>,
+        /// When set, a VM check of a stopped domain fails, as when libvirt cannot tell.
+        check_fails_once_stopped: bool,
     }
 
     impl FakeGuest {
@@ -1680,6 +1688,18 @@ mod tests {
                 captures: Mutex::new(vec![]),
                 capture_hang: None,
                 stops_at_capture: None,
+                stop_after_checks: 0,
+                checks: AtomicU32::new(0),
+                hold_check: None,
+                check_fails_once_stopped: false,
+            }
+        }
+
+        /// The domain's ID as `domain_id` reports it, without counting a check.
+        fn read_domain(&self) -> Option<u32> {
+            match self.domain.load(Ordering::SeqCst) {
+                0 => None,
+                id => Some(id),
             }
         }
 
@@ -1700,14 +1720,21 @@ mod tests {
 
     impl Guest for FakeGuest {
         fn initial_id(&self) -> Option<u32> {
-            self.domain_id().unwrap()
+            self.read_domain()
         }
 
         fn domain_id(&self) -> Result<Option<u32>> {
-            Ok(match self.domain.load(Ordering::Relaxed) {
-                0 => None,
-                id => Some(id),
-            })
+            let id = self.read_domain();
+            let index = self.checks.fetch_add(1, Ordering::SeqCst);
+            if let Some((held, rx)) = &self.hold_check
+                && *held == index
+            {
+                let _ = rx.lock().unwrap().recv();
+            }
+            if id.is_none() && self.check_fails_once_stopped {
+                bail!("cannot reach libvirt");
+            }
+            Ok(id)
         }
 
         fn ping(&self, _: i32) -> bool {
@@ -1783,7 +1810,15 @@ mod tests {
             let mut captures = self.captures.lock().unwrap();
             captures.push(screen);
             if self.stops_at_capture == Some(captures.len() - 1) {
-                self.domain.store(0, Ordering::Relaxed);
+                let waited = Instant::now();
+                while self.checks.load(Ordering::SeqCst) < self.stop_after_checks {
+                    assert!(
+                        waited.elapsed() < Duration::from_secs(10),
+                        "no VM check read the domain"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                self.domain.store(0, Ordering::SeqCst);
                 bail!("screenshot failed: Requested operation is not valid: domain is not running");
             }
             drop(captures);
@@ -2006,25 +2041,113 @@ mod tests {
         assert!(env.elapsed() < Duration::from_secs(1));
     }
 
+    /// A guest whose second capture, about 510 ms in, waits until the VM check started with it has read the domain
+    /// as running, then stops the domain and fails. That check is held until `release` is dropped.
+    fn stopping_during_a_held_check(release: Receiver<()>) -> FakeGuest {
+        FakeGuest {
+            stops_at_capture: Some(1),
+            stop_after_checks: 2,
+            hold_check: Some((1, Mutex::new(release))),
+            ..FakeGuest::showing(vec![solid(4, 4, 1)])
+        }
+    }
+
+    /// Runs `conditions` for up to `secs` on its own thread, so the test can act on the fake clock meanwhile.
+    fn wait_in_background(
+        env: &Arc<FakeEnv>,
+        guest: &Arc<FakeGuest>,
+        conditions: Vec<Condition>,
+        secs: u64,
+    ) -> std::thread::JoinHandle<Result<Outcome>> {
+        let (env, guest) = (env.clone(), guest.clone());
+        std::thread::spawn(move || wait_on(&env, &guest, &conditions, secs))
+    }
+
+    /// Waits until the failing capture has stopped the domain, then lets the fake clock run `polls` polls further.
+    fn after_the_stop(env: &FakeEnv, guest: &FakeGuest, polls: u32) {
+        let started = Instant::now();
+        while guest.read_domain().is_some() {
+            assert!(started.elapsed() < Duration::from_secs(10), "no stop");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let stopped_at = env.elapsed();
+        while env.elapsed() < stopped_at + POLL * polls {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the clock stalled"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn a_capture_that_fails_as_the_vm_stops_ends_the_wait_as_closed() {
-        // The third capture, about 1 s in, stops the domain and fails; VM checks run every 500 ms.
-        let guest = Arc::new(FakeGuest {
-            stops_at_capture: Some(2),
-            ..FakeGuest::showing(vec![solid(4, 4, 1)])
-        });
-        let env = FakeEnv::new(vec![]);
-        let o = wait_on(&env, &guest, &[settled(None, None)], 10).unwrap();
+        // The VM check that started with the failing capture read the VM as running before the stop. Its answer is
+        // held until 20 polls after the stop, so it arrives after the failure, and must be ignored: only a check
+        // started after the failure, which finds the VM stopped, decides.
+        let (release, held) = mpsc::channel();
+        let guest = Arc::new(stopping_during_a_held_check(held));
+        let env = Arc::new(FakeEnv::new(vec![]));
+        let waiter = wait_in_background(&env, &guest, vec![settled(None, None)], 10);
+        after_the_stop(&env, &guest, 20);
+        drop(release);
+        let o = waiter.join().unwrap().unwrap();
         assert!(
             matches!(o, Outcome::Closed { index: None, ref reason } if reason == "the VM is not running"),
             "{o:?}"
         );
         assert_eq!(
             guest.captures.lock().unwrap().len(),
-            3,
+            2,
             "no capture after the failure"
         );
+        assert_eq!(
+            guest.checks.load(Ordering::SeqCst),
+            3,
+            "the held check, then one started after the failure"
+        );
+    }
+
+    #[test]
+    fn a_vm_check_that_fails_after_a_capture_failure_returns_the_capture_error() {
+        // A check started after the failure cannot tell whether the VM runs, so the capture's own error is returned.
+        let guest = Arc::new(FakeGuest {
+            stops_at_capture: Some(1),
+            check_fails_once_stopped: true,
+            ..FakeGuest::showing(vec![solid(4, 4, 1)])
+        });
+        let env = FakeEnv::new(vec![]);
+        let err = format!(
+            "{:#}",
+            wait_on(&env, &guest, &[settled(None, None)], 10).unwrap_err()
+        );
+        assert!(
+            err.starts_with("capturing display head 0: ") && err.contains("domain is not running"),
+            "{err}"
+        );
         assert!(env.elapsed() < ms(1500), "{:?}", env.elapsed());
+    }
+
+    #[test]
+    fn a_vm_check_hung_across_a_capture_failure_leaves_the_error_for_the_deadline() {
+        let (release, held) = mpsc::channel();
+        let guest = Arc::new(stopping_during_a_held_check(held));
+        let env = FakeEnv::new(vec![]);
+        let err = format!(
+            "{:#}",
+            wait_on(&env, &guest, &[settled(None, None)], 4).unwrap_err()
+        );
+        assert!(
+            err.starts_with("capturing display head 0: ") && err.contains("domain is not running"),
+            "{err}"
+        );
+        assert!(env.elapsed() >= Duration::from_secs(4));
+        assert!(
+            env.elapsed() <= Duration::from_secs(4) + POLL,
+            "{:?}",
+            env.elapsed()
+        );
+        drop(release);
     }
 
     #[test]
