@@ -166,4 +166,5 @@ outside-disk test-bed cases passed with no `t-*` VM or volume left and the templ
 conformance review found no material mismatch. The manual root check for follow-up 7 has not been run yet.
 
 Next is outcome 2, from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each
-with its own plan.
+with its own plan. Run 1 follows
+[`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md).

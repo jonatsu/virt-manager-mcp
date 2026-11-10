@@ -85,9 +85,10 @@ a kernel panic, neither delays the console check nor stretches the call. A call 
 
 ### Console
 
-Console offsets count raw bytes, and each session has a generation number, carried in every offset the tools return.
-A new session (`console_open` with `force`, a power cycle, `reset_vm`, `snapshot_revert`) starts a new generation, and
-an offset from an older one is refused with that reason, instead of being clamped silently as today.
+Console offsets count raw bytes, and each session has a generation number, returned next to every offset the tools
+return. Every `console_open` starts a new generation; `reset_vm` and `snapshot_revert` close the session, so the agent
+opens a new one after them. A read or wait from an offset above 0 must name its generation, and an offset from an
+older one is refused with that reason, instead of being clamped silently as today.
 
 Each session keeps a wait cursor. `console_write` sets it to the buffer's end just before its bytes go out and returns
 that offset, so the echo and the guest's answer fall after it. A match moves the cursor past the match. A `console`
