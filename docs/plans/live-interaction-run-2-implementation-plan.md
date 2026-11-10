@@ -41,17 +41,21 @@ flowchart LR
 - **Frames.** A wait with screen conditions captures the display head they name on a probe thread, every 500 ms (the
   interval the probe calibrated the threshold on), and every screen condition of the wait reads that capture.
 - **`screen_settled`.** `max_changed_pixels` (default 600) and `settle_secs` (default 3, at least 0.5 and at most the
-  call's timeout), with an optional `region`. It holds once no pair of consecutive frames over `settle_secs` differs
-  in more than `max_changed_pixels` pixels, compared exactly. A change of frame size counts as a change.
+  call's timeout less one 0.5 s frame interval), with an optional `region`. It holds once no pair of consecutive
+  frames over `settle_secs` differs in more than `max_changed_pixels` pixels, compared exactly. A change of frame
+  size counts as a change.
 - **`screen_text`.** `pattern` (Rust `regex` syntax), an optional `region` and `screen`. It matches the OCR lines
   joined by newlines; the result returns the matched text. A time-out returns the last OCR text, cut to the result's
   text limit, so an agent can loosen its pattern.
-- **A failed capture,** for example on a VM without graphics, ends the wait with an error naming the cause.
+- **A failed capture,** for example on a VM without graphics, ends the wait with an error naming the cause. Captures
+  stop after it, and a VM check that starts after the failure decides the outcome: a stopped VM ends the wait as
+  `closed`, as the VM check does. A match in the same poll, or found at the deadline, still wins over the error.
 - **Attachment.** `wait_for` gains `screenshot: true`. On a match of any condition it attaches a PNG of display head
   0, or of the matched screen condition's head, downscaled to 1280 pixels wide as `screenshot` does, with its size in
-  the result's JSON. For a non-screen match the capture happens then, bounded by the call's 2 s margin; a failed
-  capture keeps the match and adds a note. Read-only mode refuses it; `wait_for` checks this itself, since
-  `validate_conditions` sees only the conditions.
+  the result's JSON. For a non-screen match the capture happens then. The capture and the encoding together are
+  bounded by the call's 2 s margin, for a screen match's frame too. A failed capture keeps the match and adds a
+  note. Read-only mode refuses it; `wait_for` checks this itself, since `validate_conditions` sees only the
+  conditions.
 - **Read-only mode.** `screen_text`, `screen_settled` and the attachment are refused; `mouse` is hidden with the other
   mutating tools.
 - **Models.** `display.ocr_models` is optional. When it is set, the directory and both model files must exist, or the
@@ -193,16 +197,17 @@ regions at the right and bottom edges, rounding, and the refusals. On the test b
   refusal's message names the screen kinds too.
 - The settle state keeps the previous frame and the time the screen last changed beyond the threshold; a size change
   counts as a change.
-- A failed capture ends the wait with an error naming the cause.
+- A failed capture ends the wait with an error naming the cause, or as `closed` when a VM check started after it
+  finds the VM stopped.
 - On a match with `screenshot: true`, the result gains the image and its size.
 
 **Verification.** Unit tests with fake frames:
 
 - settle timing, including a sequence that changes again just before `settle_secs` and a size change;
 - the threshold at, just below and just above `max_changed_pixels`;
-- `settle_secs` below 0.5 or above the timeout refused;
+- `settle_secs` below 0.5 or above the timeout less 0.5 s refused;
 - a hung capture at the deadline: the wait returns timed out within its bound;
-- a failed capture;
+- a failed capture, and one that fails as the VM stops, with the order of the VM check fixed by the test;
 - the read-only refusals of the condition and the attachment;
 - the attachment on a console match, and a failed attachment capture keeping the match.
 
@@ -354,4 +359,5 @@ The run's goal:
 | 1 Rust 1.94 | `12468ae` | rustup installed 1.94.1. `rust-version` and CI's minimum-version job moved to 1.94; the roadmap's CI item names the new minimum. 116 unit tests pass under the current toolchain and `cargo +1.94`; fmt, clippy with `-D warnings`, `cargo deny check advisories` and pre-commit pass. CI waits for the push | Self-reviewed: a version bump with no code change |
 | 2 OCR engine and models | `d68f37a` (fetch script), `5d92fcc` (recogniser, `display.ocr_models`), `abbd211` (script review fix) | `ocrs` 0.14.0 with `rten` 0.28.0; 22 new crates, all `MIT OR Apache-2.0`; `cargo deny check advisories` clean. Raw OCR without inversion on the probe's 10 saved screens read 25 of 38 key strings exactly, the same as 0.12 there. Through the recogniser with inversion, "Graphical install", "Select a language" and "Windows 11 Setup" were read; "Select your location" has no saved screen and is left to unit 7. Inversion damages the Windows setup screen's small text ("Next" read as "Nex"), a risk for run 3. OCR took 145 to 448 ms per screen with 4 threads. Deviation: `ocrs` runs in `rten`'s process-wide pool, so `main` sets `RTEN_NUM_THREADS=4` before any thread starts instead of using a separate rayon pool; unit 8 adjusts the design's wording. The fetch script downloaded once, kept verified files on a second run, replaced a corrupted file, and with a wrong pinned sum exited 1 leaving no file; ShellCheck and shfmt pass. 119 unit tests pass on both toolchains; the two ignored OCR tests pass with the models and fail without them | `code-reviewer` (Opus): approved both commits; the `set_var` runs before any thread, and `rten` sizes its pool from the variable. Its optional finding, a backslash or leading dash in the models directory, is fixed in `abbd211` |
 | 3 Frames and regions | `56d6ac8` (capture, encoder, `Region`), `0e57352` (`screenshot-region.json`), `133bbfd` (review tightening) | `display::screenshot` is split into `capture(dom, screen)`, which takes its connection from the domain, and `encode_png`, which crops at full resolution before downscaling. `Region` becomes `CheckedRegion` becomes `Rect`, mapped proportionally (start rounded down, end up); an exhaustive test over every span from 1 to 7 pixels shows a crop is never empty and never leaves the frame. `image_width` and `image_height` are required in the schema. 131 unit tests pass on both toolchains. On `trial-deb13`, a full screenshot replied `1280x800`, a top-left-quarter region replied with its 640x400 size, origin and the note that its pixels are not click coordinates, and a region without the image size, one outside the image, and one of zero width were refused | `code-reviewer`: approved, no findings; its optional suggestion to assert the full size is `133bbfd` |
+| 4 Frames in waits and `screen_settled` | `e29d712` (`screen_settled`, attachment), `54a2797` (`screen-settled.json`), `0988102`, `2d704a8`, `9cc1d41`, `a379cac` (review fixes), `668c890`, `b974179` (recheck fixes) | A wait with screen conditions captures once per 500 ms poll on a probe thread, and every screen condition reads that frame. `screen_settled` counts changed pixels exactly, 600 for 3 s by default; `settle_secs` is at least 0.5 and at most the timeout less 0.5 s. `screenshot: true` attaches a PNG of the matched head, with capture and encoding inside the 2 s margin. A capture that fails as the VM stops ends the wait as `closed` once a VM check started after the failure finds it stopped; a match in the same poll or at the deadline still wins over the stored error. A deterministic test holds the pre-failure VM check until after the failure and fails 10 of 10 runs with the ordering guard removed. 178 unit tests pass on both toolchains; `wait::` passed 20 of 20 runs at 80 test threads, 10 of them with every core busy. `run-all.sh screen-settled wait-for` passed 2 of 2 on `trial-deb13`: the screen settled in 3.1 s, the attachment came back at 1280x800, and `settle_secs` 0.1 was refused | `code-reviewer` (Opus): one required finding, a VM stopping mid-capture returned an error instead of `closed` (fixed in `a379cac`), and two optional ones, encoding outside the margin (`2d704a8`) and an unreachable `settle_secs` equal to the timeout (`0988102`). `9cc1d41` fixes a timing flake the encoding change brought into a test. The Opus recheck closed all three, then asked for a deterministic test of the VM-check ordering (`668c890`) and for this plan's text to follow the fixes; `b974179` makes a late match win at the deadline. A second recheck approved both. Its optional finding, that the stop test reports a regression as a 10 s clock stall rather than the wait's result, goes to unit 5's first commit |
 | 6 Mouse | `958ef9e` (`mouse` tool), `61cdb06` (review fixes), `405a70e` (click probe) | On `t-inst` at 1280x800, one `input-send-event` holding the move, press and release only moved the pointer; separate commands 50 ms apart clicked the Debian installer's "Continue" at (1218, 774), axis (31204, 31741), and the installer moved on to "Select your location" (`docs/research/2026-11-10-qmp-click-probe.md`). `src/mouse.rs` builds every action as separate commands with those pauses, maps a pixel to `v * 32767 / (dim - 1)`, checks for a tablet in the live XML, accepts head 0 only, and after a failed step tries once to release a held button. `send_one` refuses any monitor command other than `input-send-event`. `mouse` is hidden in read-only mode and annotated as destructive. 175 unit tests pass on both toolchains; the live refusal case is unit 7's | `code-reviewer` (Opus): approved, no required findings. Its three optional findings are fixed in `61cdb06`: a wrong quotient in a test comment, the `input-send-event` invariant enforced by check rather than convention, and a failed release reported in the error |
