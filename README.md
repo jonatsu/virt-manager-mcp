@@ -5,8 +5,8 @@ adapted for agents that create and destroy throwaway test VMs. Planned work is i
 [docs/plans/fork-roadmap.md](docs/plans/fork-roadmap.md).
 
 An MCP server that gives an AI access to libvirt / virt-manager VMs:
-command execution, file access, copying host files into guests, the serial console, screenshots
-and keyboard input. VMs you opt in can also be started and stopped. Creating, deleting and
+command execution, file access, copying host files into guests, the serial console, screenshots,
+and keyboard and mouse input. VMs you opt in can also be started and stopped. Creating, deleting and
 reconfiguring VMs and snapshots are available too, but are off until you enable them (see
 [VM management](#vm-management)).
 
@@ -20,6 +20,7 @@ Host: Linux. Guests: Linux and Windows.
 | `wait_for` | The console session and the guest agent, polled together | as for the condition's channel |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
+| `mouse` | QEMU monitor `input-send-event` (`virDomainQemuMonitorCommand`) | A graphics device and a USB tablet |
 | `start_vm`, `stop_vm` | libvirt (`virDomainCreate`, `virDomainShutdown`, `virDomainDestroy`) | none (graceful stop needs ACPI or the guest agent) |
 | VM management tools | libvirt domain, storage volume and snapshot APIs | none |
 
@@ -45,6 +46,7 @@ The path is passed as data, never spliced into shell code.
 | `guest_info`: OS, hostname, NICs, filesystems, users, timezone | ❌ |
 | `screenshot` (PNG, downscaled to 1280 px wide by default) | ❌ |
 | `send_keys` (`ctrl+alt+delete`, `win+r`, …), `type_text` (US layout) | ❌ |
+| `mouse`: move, click, double-click, drag or scroll at a point of a full-screen screenshot | ❌ |
 | `create_vm`, `delete_vm` (only with `manage.create` / `manage.delete`) | ❌ |
 | `list_templates`, `create_vm_from_template` (with `manage.create` and a template), `reset_vm` (also `manage.delete`) | ❌ |
 | `configure_vm`, `attach_disk`, `detach_disk`, `set_cdrom`, `attach_nic`, `detach_nic` (only with `manage.reconfigure`) | ❌ |
@@ -297,6 +299,13 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 - `stop_vm` without `force` sends a shutdown request and waits (60 s by default). A guest that
   ignores ACPI and has no guest agent will not shut down; use `force: true` to power it off.
 - `type_text` assumes a US keyboard layout in the guest and supports printable ASCII only.
+- `mouse` takes `x` and `y` in pixels of a full-screen image from `screenshot` without a region, or from a wait's
+  screenshot attachment, with that image's `image_width` and `image_height`. A region screenshot's pixels are not
+  click coordinates. The server maps the point onto the screen proportionally, so a resolution change keeps it at
+  the same relative place. The tool needs a USB tablet (`<input type='tablet' bus='usb'/>`), which VMs from
+  `create_vm` and `create_vm_from_template` have, and supports display head 0 only. It sends QEMU only
+  `input-send-event` commands that it builds itself, through the QEMU monitor; libvirt then marks the domain as
+  tainted (`custom-monitor`).
 - Created VMs reference their disks by file path, like virt-manager. Volume-type disks
   (`<source pool=… volume=…/>`) failed to open under Ubuntu's AppArmor setup.
 - Logs go to stderr; set verbosity with `RUST_LOG` (e.g. `RUST_LOG=debug`).

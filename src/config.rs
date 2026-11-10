@@ -381,6 +381,25 @@ fn project_dir(cwd: PathBuf, home: Option<&Path>) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// `Hypervisor::lookup`, behind every per-VM tool including `mouse`, refuses a VM this check rejects.
+    #[test]
+    fn allowed_vms_admits_only_listed_vms_unless_it_holds_a_star() {
+        assert!(!Config::default().is_allowed("trial-deb13"));
+        let listed = Config {
+            allowed_vms: vec!["trial-deb13".into()],
+            ..Config::default()
+        };
+        assert!(listed.is_allowed("trial-deb13"));
+        for other in ["trial-deb1", "trial-deb13 ", "*", ""] {
+            assert!(!listed.is_allowed(other), "{other:?} is allowed");
+        }
+        let star = Config {
+            allowed_vms: vec!["*".into()],
+            ..Config::default()
+        };
+        assert!(star.is_allowed("anything"));
+    }
+
     #[test]
     fn share_file_stays_inside_share_dirs() {
         let root =

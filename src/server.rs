@@ -22,7 +22,7 @@ use crate::agent::{self, Agent, ExecSpec, GuestOs, powershell};
 use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{ansi, display, fsops, jobs, manage, wait};
+use crate::{ansi, display, fsops, jobs, manage, mouse, wait};
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
@@ -40,6 +40,7 @@ const MUTATING_TOOLS: &[&str] = &[
     "screenshot",
     "send_keys",
     "type_text",
+    "mouse",
     "start_vm",
     "stop_vm",
     "copy_to_vm",
@@ -1300,6 +1301,39 @@ impl VirtServer {
     #[tool(
         annotations(
             read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
+        description = "Move, click, double-click, drag or scroll the VM's mouse, through QEMU's input-send-event on \
+            its USB tablet. Give x and y in pixels of a full-screen image from `screenshot` without a region or from a \
+            wait's screenshot attachment, with that image's size as image_width and image_height; a region image's \
+            pixels are not click coordinates. A drag also takes to_x and to_y, a scroll a direction. A VM without a \
+            USB tablet is refused; VMs from create_vm and create_vm_from_template have one. libvirt marks a domain \
+            that receives QEMU monitor commands as tainted (custom-monitor)."
+    )]
+    async fn mouse(
+        &self,
+        Parameters(p): Parameters<mouse::MouseParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let dom = s.hv.domain(&p.vm)?;
+            let steps = mouse::plan(&p)?;
+            mouse::require_tablet(&dom, &p.vm)?;
+            mouse::send(&dom, &steps)?;
+            Ok(vec![ContentBlock::text(format!(
+                "sent the {} at ({}, {}) as {} input-send-event command(s)",
+                p.action.name(),
+                p.x,
+                p.y,
+                steps.len()
+            ))])
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false
         ),
@@ -1844,7 +1878,7 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 39);
+        assert_eq!(tools.len(), 40);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"
@@ -1920,6 +1954,7 @@ mod tests {
             "console_write",
             "send_keys",
             "type_text",
+            "mouse",
             "wait_for",
         ] {
             let tool = tools.iter().find(|t| t.name == name).unwrap();
@@ -1935,14 +1970,21 @@ mod tests {
             ..Config::default()
         };
         let hidden = hidden_tools(&read_only);
-        for tool in ["job_start", "job_stop", "exec", "console_write"] {
+        for tool in ["job_start", "job_stop", "exec", "console_write", "mouse"] {
             assert!(hidden.contains(&tool), "{tool} stays visible");
         }
         for tool in ["job_read", "job_list", "wait_for", "console_read"] {
             assert!(!hidden.contains(&tool), "{tool} is hidden");
         }
         let writable = hidden_tools(&Config::default());
-        for tool in ["job_start", "job_stop", "job_read", "job_list", "wait_for"] {
+        for tool in [
+            "job_start",
+            "job_stop",
+            "job_read",
+            "job_list",
+            "wait_for",
+            "mouse",
+        ] {
             assert!(!writable.contains(&tool), "{tool} is hidden");
         }
     }
@@ -1980,6 +2022,24 @@ mod tests {
         ] {
             assert!(text.contains(field), "{field} missing from {text}");
         }
+    }
+
+    #[test]
+    fn mouse_requires_coordinates_with_their_image_size() {
+        let schema = serde_json::to_value(schemars::schema_for!(mouse::MouseParams)).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        for field in ["vm", "action", "x", "y", "image_width", "image_height"] {
+            assert!(required.contains(&json!(field)), "{field} is optional");
+        }
+        assert_eq!(
+            schema["$defs"]["Action"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["const"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["move", "click", "double_click", "drag", "scroll"]
+        );
     }
 
     #[test]

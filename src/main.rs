@@ -7,6 +7,7 @@ mod fsops;
 mod hypervisor;
 mod jobs;
 mod manage;
+mod mouse;
 mod seed;
 mod server;
 mod sweep;

@@ -199,6 +199,16 @@ impl ImageSize {
         }
         Ok(Self { width, height })
     }
+
+    /// Width of the image in pixels; at least 1.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height of the image in pixels; at least 1.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
 }
 
 impl fmt::Display for ImageSize {
