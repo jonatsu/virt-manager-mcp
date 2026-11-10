@@ -157,6 +157,8 @@ pub enum ExecState {
 pub trait Guest: Send + Sync + 'static {
     /// The running domain's current ID, `None` once it stopped, or an error when libvirt cannot tell.
     fn domain_id(&self) -> Result<Option<u32>>;
+    /// The domain's ID as the lookup at the start of the call saw it; makes no call.
+    fn initial_id(&self) -> Option<u32>;
     fn ping(&self, timeout_secs: i32) -> bool;
     fn os(&self, timeout_secs: i32) -> Result<GuestOs>;
     fn start(&self, command: &str, timeout_secs: i32) -> Result<i64>;
@@ -167,10 +169,19 @@ pub trait Guest: Send + Sync + 'static {
 pub struct LiveGuest(pub Domain);
 
 impl Guest for LiveGuest {
+    fn initial_id(&self) -> Option<u32> {
+        self.0.get_id()
+    }
+
     fn domain_id(&self) -> Result<Option<u32>> {
         // A `Domain` caches its ID at lookup, so only a fresh lookup sees a stop or a restart.
         let conn = self.0.get_connect()?;
-        let fresh = Domain::lookup_by_uuid_string(&conn, &self.0.get_uuid_string()?)?;
+        let fresh = match Domain::lookup_by_uuid_string(&conn, &self.0.get_uuid_string()?) {
+            Ok(d) => d,
+            // A transient domain that stopped, or one deleted during the wait, is gone.
+            Err(e) if matches!(e.code(), virt::error::ErrorNumber::NoDomain) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         Ok(if fresh.is_active()? {
             fresh.get_id()
         } else {
@@ -322,7 +333,8 @@ pub fn run(
         .collect::<Result<Vec<_>>>()?;
     let mut vm = Probe::<Result<Option<u32>>>::default();
     let mut next_progress = start + PROGRESS_EVERY;
-    let mut domain_id = None;
+    // Seeded from the call's own lookup, so a restart before the call is caught on the first poll.
+    let mut domain_id = guest.initial_id();
     loop {
         let now = env.now();
         if env.cancelled() {
@@ -368,7 +380,7 @@ pub fn run(
             });
         }
         if now >= deadline {
-            return Ok(timed_out(&mut states));
+            return timed_out(&mut states);
         }
         if now >= next_progress {
             env.progress(now - start);
@@ -378,21 +390,28 @@ pub fn run(
     }
 }
 
-fn timed_out(states: &mut [State]) -> Outcome {
+fn timed_out(states: &mut [State]) -> Result<Outcome> {
     let mut resume = Vec::new();
     let mut commands = Vec::new();
     for (index, state) in states.iter_mut().enumerate() {
         match state {
             State::Console(c) => resume.push((index, c.resume, c.generation)),
             State::Command(c) => {
-                // A probe that finished during the last poll may have started a run; report it.
-                let _ = c.absorb();
+                // A probe that finished after the last poll counts: a success still matches, and a new run is reported.
+                if let Some(Poll::Hit { text, next }) = c.absorb()? {
+                    return Ok(Outcome::Matched {
+                        index,
+                        kind: "command",
+                        text,
+                        next,
+                    });
+                }
                 commands.push((index, c.pid, c.last_code));
             }
             State::Agent(_) => {}
         }
     }
-    Outcome::TimedOut { resume, commands }
+    Ok(Outcome::TimedOut { resume, commands })
 }
 
 /// The session's output from the earliest start of any console condition, or `None` without console conditions.
@@ -859,6 +878,10 @@ mod tests {
     }
 
     impl Guest for FakeGuest {
+        fn initial_id(&self) -> Option<u32> {
+            self.domain_id().unwrap()
+        }
+
         fn domain_id(&self) -> Result<Option<u32>> {
             Ok(match self.domain.load(Ordering::Relaxed) {
                 0 => None,
@@ -888,12 +911,19 @@ mod tests {
                 bail!("guest agent 'guest-exec-status' failed: timed out");
             }
             let mut codes = self.codes.lock().unwrap();
-            Ok(if codes.is_empty() {
-                ExecState::Running
-            } else {
-                ExecState::Exited {
-                    code: Some(codes.remove(0)),
-                    output: b"ready\n".to_vec(),
+            Ok(match codes.first().copied() {
+                None => ExecState::Running,
+                // -1 stands for an agent that no longer knows the PID.
+                Some(-1) => {
+                    codes.remove(0);
+                    ExecState::Gone
+                }
+                Some(code) => {
+                    codes.remove(0);
+                    ExecState::Exited {
+                        code: Some(code),
+                        output: b"ready\n".to_vec(),
+                    }
                 }
             })
         }
@@ -1032,6 +1062,25 @@ mod tests {
         let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
         assert_eq!(matched(&o).0, 0);
         assert_eq!(guest.starts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_pid_the_agent_forgot_starts_the_command_again() {
+        let guest = Arc::new(FakeGuest {
+            codes: Mutex::new(vec![-1, 0]),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let checks = validate_conditions(
+            &Config::default(),
+            &[Condition::Command {
+                command: "true".into(),
+            }],
+        )
+        .unwrap();
+        let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o).0, 0);
+        assert_eq!(guest.starts.load(Ordering::Relaxed), 2);
     }
 
     #[test]
