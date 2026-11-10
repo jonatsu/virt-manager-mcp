@@ -683,9 +683,9 @@ impl Attachment {
 }
 
 /// The screenshot a match attaches, downscaled to [`ATTACH_WIDTH`] pixels wide: the frame a screen condition matched
-/// on, or for any other match a capture of display head 0 made now. That capture runs on a probe thread and is given
-/// up 2 s after the match or after `deadline`, the end of the wait, whichever is earlier, so the call still returns
-/// within its timeout plus 2 s. Returns `None` unless `outcome` is a match.
+/// on, or for any other match a capture of display head 0 made now. The capture and the encoding run on a probe
+/// thread and are given up 2 s after the match or after `deadline`, the end of the wait, whichever is earlier, so the
+/// call still returns within its timeout plus 2 s. Returns `None` unless `outcome` is a match.
 pub fn attach(
     env: &dyn Env,
     guest: &Arc<dyn Guest>,
@@ -695,14 +695,21 @@ pub fn attach(
     let Outcome::Matched { frame, .. } = outcome else {
         return None;
     };
-    let (screen, image) = match frame {
-        Some(frame) => (frame.screen, Ok(frame.image.clone())),
-        None => (0, capture_by(env, guest, 0, deadline).map(Arc::new)),
+    let (screen, matched) = match frame {
+        Some(frame) => (frame.screen, Some(frame.image.clone())),
+        None => (0, None),
     };
-    let encoded = image.and_then(|image| {
+    let take = move |g: &dyn Guest| {
+        let image = match matched {
+            Some(image) => image,
+            None => Arc::new(
+                g.capture(screen)
+                    .with_context(|| format!("capturing display head {screen}"))?,
+            ),
+        };
         display::encode_png(&image, None, Some(ATTACH_WIDTH)).context("encoding the screenshot")
-    });
-    Some(match encoded {
+    };
+    Some(match within_margin(env, guest, deadline, take) {
         Ok((png, width, height)) => Attachment::Image {
             png,
             width,
@@ -713,30 +720,27 @@ pub fn attach(
     })
 }
 
-/// Captures display head `screen` on a probe thread, waiting until 2 s past now or past `deadline`, whichever is
-/// earlier.
-fn capture_by(
+/// Runs `f` on a probe thread, waiting until 2 s past now or past `deadline`, whichever is earlier.
+fn within_margin<T: Send + 'static>(
     env: &dyn Env,
     guest: &Arc<dyn Guest>,
-    screen: u32,
     deadline: Instant,
-) -> Result<RgbImage> {
+    f: impl FnOnce(&dyn Guest) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let now = env.now();
     let limit = now.min(deadline) + ATTACH_MARGIN;
     let mut probe = Probe::default();
-    if !probe.start_if_due(now, limit, Duration::ZERO, guest, move |g, _| {
-        g.capture(screen)
-    }) {
-        bail!("could not start capturing display head {screen}");
+    if !probe.start_if_due(now, limit, Duration::ZERO, guest, move |g, _| f(g)) {
+        bail!("could not start taking the screenshot");
     }
     loop {
-        if let Some(image) = probe.take() {
-            return image.with_context(|| format!("capturing display head {screen}"));
+        if let Some(result) = probe.take() {
+            return result;
         }
         let now = env.now();
         if now >= limit {
             bail!(
-                "capturing display head {screen} did not finish within {} s",
+                "taking the screenshot did not finish within {} s",
                 ATTACH_MARGIN.as_secs()
             );
         }
@@ -2098,7 +2102,9 @@ mod tests {
 
     #[test]
     fn a_console_match_attaches_a_downscaled_screenshot_of_head_0() {
-        let guest = Arc::new(FakeGuest::showing(vec![solid(1600, 900, 3)]));
+        // A thin frame: the fake clock runs about 30 times faster than real time, so a full one would take longer than
+        // 2 s of it to encode in a debug build.
+        let guest = Arc::new(FakeGuest::showing(vec![solid(1600, 90, 3)]));
         let env = FakeEnv::new(vec![(ms(200), b"login: ")]);
         let (o, attachment) = wait_and_attach(&env, &guest, &[console("login:")]);
         assert_eq!(matched(&o).0, 0);
@@ -2111,15 +2117,15 @@ mod tests {
         else {
             panic!("expected an image, got {attachment:?}")
         };
-        assert_eq!((*width, *height, *screen), (1280, 720, 0));
+        assert_eq!((*width, *height, *screen), (1280, 72, 0));
         let decoded = image::load_from_memory(png).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (1280, 720));
+        assert_eq!((decoded.width(), decoded.height()), (1280, 72));
         assert_eq!(*guest.captures.lock().unwrap(), [0]);
         let mut json = o.to_json(Duration::ZERO);
         attachment.unwrap().describe(&mut json);
         assert_eq!(
             json["screenshot"],
-            json!({ "width": 1280, "height": 720, "screen": 0 })
+            json!({ "width": 1280, "height": 72, "screen": 0 })
         );
     }
 
@@ -2189,7 +2195,10 @@ mod tests {
         let Some(Attachment::Failed(note)) = attachment else {
             panic!("expected a note, got {attachment:?}")
         };
-        assert!(note.contains("did not finish within 2 s"), "{note}");
+        assert_eq!(
+            note,
+            "no screenshot attached: taking the screenshot did not finish within 2 s"
+        );
         drop(tx);
     }
 
