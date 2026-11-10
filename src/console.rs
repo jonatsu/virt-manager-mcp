@@ -266,6 +266,8 @@ pub struct ReadResult {
 
 pub struct Consoles {
     sessions: Mutex<HashMap<String, Session>>,
+    /// Serializes opens, so two never both pass the "already open" check. Scans and writes never take it.
+    opening: Mutex<()>,
     /// The last generation handed out.
     generation: AtomicU64,
 }
@@ -277,6 +279,7 @@ impl Default for Consoles {
             .map_or(0, |d| d.as_secs());
         Self {
             sessions: Mutex::default(),
+            opening: Mutex::default(),
             generation: AtomicU64::new(first_generation(now)),
         }
     }
@@ -291,6 +294,7 @@ impl Consoles {
         device: Option<&str>,
         force: bool,
     ) -> Result<String> {
+        let _opening = self.opening.lock().unwrap();
         // The sessions lock is held only to check and to swap entries: every scan in a wait takes it, so the libvirt
         // calls below and the old session's drop, which joins its reader and aborts its stream, run without it.
         let replaced = {
@@ -346,7 +350,7 @@ impl Consoles {
             domain_id: dom.get_id(),
             writing: Arc::default(),
         };
-        // An open that raced this one and finished first is replaced, as `force` would, and dropped after the lock.
+        // Opens are serialized, so nothing should be here; anything that is gets dropped after the lock.
         let raced = self
             .sessions
             .lock()
