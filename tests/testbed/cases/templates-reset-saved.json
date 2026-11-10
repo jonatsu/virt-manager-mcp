@@ -3,6 +3,12 @@
     "tool": "reset_vm",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "contains": [
+        "reset VM 't-u' to template 'debian13-uefi' (generation 3)",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -10,6 +16,9 @@
     "args": {
       "vm": "t-u",
       "command": "test -d /sys/firmware/efi && echo uefi; hostname"
+    },
+    "expect": {
+      "contains": "uefi\nt-u\n"
     }
   },
   {
@@ -20,18 +29,31 @@
       "vcpus": 1,
       "memory_mib": 256,
       "disk_gib": 1
+    },
+    "expect": {
+      "contains": "created VM 't-u-g4'"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "matches": "console for 't-u' opened \\(generation \\d+\\)"
     }
   },
   {
     "tool": "reset_vm",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "volume 't-u-g4.qcow2' already exists in the disk pool",
+        "nothing was changed"
+      ]
     }
   },
   {
@@ -39,6 +61,9 @@
     "args": {
       "vm": "t-u",
       "text": ""
+    },
+    "expect": {
+      "contains": "sent 1 bytes"
     }
   },
   {
@@ -47,28 +72,51 @@
       "vm": "t-u",
       "since": 0,
       "wait_ms": 3000
+    },
+    "expect": {
+      "matches": "\"closed\":null,.*\"next\":[1-9]"
     }
   },
   {
     "tool": "console_close",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "contains": "console closed"
     }
   },
   {
     "tool": "list_vms",
-    "args": {}
+    "args": {},
+    "expect": {
+      "matches": "\"name\": \"t-u\",\\s+\"os\": \"linux\",\\s+\"power_control\": true,\\s+\"state\": \"running\""
+    }
   },
   {
     "tool": "describe_vm",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "contains": [
+        "t-u-g3.qcow2",
+        "t-u-g3-seed.img",
+        "\"firmware\": \"uefi\""
+      ],
+      "absent": "t-u-g4"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-u-g4"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-u-g4'",
+        "t-u-g4.qcow2"
+      ]
     }
   },
   {
@@ -76,12 +124,22 @@
     "args": {
       "vm": "t-u",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-u' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-u'",
+        "t-u-g3.qcow2",
+        "t-u-g3-seed.img"
+      ]
     }
   }
 ]

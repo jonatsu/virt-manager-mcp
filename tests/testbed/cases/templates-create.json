@@ -1,16 +1,34 @@
 [
   {
-    "tool": "__list__"
+    "tool": "__list__",
+    "expect": {
+      "contains": [
+        "- create_vm_from_template(",
+        "- reset_vm(",
+        "- list_templates("
+      ]
+    }
   },
   {
     "tool": "list_templates",
-    "args": {}
+    "args": {},
+    "expect": {
+      "contains": [
+        "\"name\": \"debian13\"",
+        "\"name\": \"debian13-uefi\""
+      ],
+      "absent": "\"name\": \"missing\""
+    }
   },
   {
     "tool": "create_vm_from_template",
     "args": {
       "name": "t-vm0",
       "template": "missing"
+    },
+    "expect": {
+      "error": true,
+      "contains": "template volume 'tpl-missing.qcow2' is not in pool 'agent-vms'"
     }
   },
   {
@@ -22,6 +40,12 @@
       "name": "t-vm1",
       "template": "debian13",
       "vcpus": 2
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-vm1' from template 'debian13' (2 vCPUs, 1024 MiB",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -32,6 +56,12 @@
     "args": {
       "vm": "t-vm1",
       "command": "hostname; cloud-init status; nproc; findmnt -no SIZE /"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "t-vm1\nstatus: done\n2\n"
+      ]
     }
   },
   {
@@ -39,6 +69,12 @@
     "args": {
       "name": "t-vm2",
       "template": "debian13"
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-vm2' from template 'debian13'",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -46,6 +82,12 @@
     "args": {
       "name": "t-uefi",
       "template": "debian13-uefi"
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-uefi' from template 'debian13-uefi'",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -53,6 +95,9 @@
     "args": {
       "vm": "t-uefi",
       "command": "hostname; test -d /sys/firmware/efi && echo uefi"
+    },
+    "expect": {
+      "contains": "t-uefi\nuefi"
     }
   },
   {
@@ -60,6 +105,10 @@
     "args": {
       "name": "Bad_Name",
       "template": "debian13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "named like a hostname"
     }
   },
   {
@@ -68,6 +117,10 @@
       "name": "t-vm4",
       "template": "debian13",
       "memory_mib": 2048
+    },
+    "expect": {
+      "error": true,
+      "contains": "memory_mib must be between 256 and 1024"
     }
   },
   {
@@ -76,6 +129,10 @@
       "name": "t-vm4",
       "template": "debian13",
       "lifetime_minutes": 61
+    },
+    "expect": {
+      "error": true,
+      "contains": "lifetime_minutes must be between 1 and 60"
     }
   },
   {
@@ -83,6 +140,10 @@
     "args": {
       "name": "t-vm4",
       "template": "debian13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "manage.max_vms = 3"
     }
   },
   {
@@ -90,17 +151,26 @@
     "args": {
       "vm": "t-vm1",
       "size_gib": 1
+    },
+    "expect": {
+      "contains": "attached new 1 GiB disk agent-vms/t-vm1-vdc.qcow2 to 't-vm1' as vdc"
     }
   },
   {
     "tool": "list_templates",
-    "args": {}
+    "args": {},
+    "expect": {
+      "matches": "\"name\": \"debian13\",\\s+\"os\": \"linux\",\\s+\"vms_using_it\": 2.*\"name\": \"debian13-uefi\",\\s+\"os\": \"linux\",\\s+\"vms_using_it\": 1"
+    }
   },
   {
     "tool": "stop_vm",
     "args": {
       "vm": "t-vm1",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-vm1' is shut off"
     }
   },
   {
@@ -108,6 +178,9 @@
     "args": {
       "vm": "t-vm2",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-vm2' is shut off"
     }
   },
   {
@@ -115,24 +188,49 @@
     "args": {
       "vm": "t-uefi",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-uefi' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-vm1"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-vm1'",
+        "t-vm1-g1.qcow2",
+        "t-vm1-g1-seed.img",
+        "t-vm1-vdc.qcow2"
+      ]
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-vm2"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-vm2'",
+        "t-vm2-g1.qcow2",
+        "t-vm2-g1-seed.img"
+      ]
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-uefi"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-uefi'",
+        "t-uefi-g1.qcow2",
+        "t-uefi-g1-seed.img"
+      ]
     }
   }
 ]

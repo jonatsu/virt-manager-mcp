@@ -6,6 +6,12 @@
       "template": "debian13",
       "lifetime_minutes": 1,
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-exp' from template 'debian13'",
+        "in 1 minutes"
+      ]
     }
   },
   {
@@ -13,6 +19,9 @@
     "args": {
       "vm": "t-exp",
       "size_gib": 1
+    },
+    "expect": {
+      "contains": "attached new 1 GiB disk agent-vms/t-exp-vdc.qcow2 to 't-exp' as vdc"
     }
   },
   {
@@ -21,6 +30,12 @@
       "name": "t-keep",
       "template": "debian13",
       "start": false
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-keep' from template 'debian13'",
+        "it does not expire"
+      ]
     }
   },
   {
@@ -37,12 +52,26 @@
   },
   {
     "tool": "list_vms",
-    "args": {}
+    "args": {},
+    "expect": {
+      "contains": [
+        "\"name\": \"t-keep\"",
+        "\"name\": \"t-listed\""
+      ],
+      "absent": "\"name\": \"t-exp\""
+    }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-keep"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-keep'",
+        "t-keep-g1.qcow2",
+        "t-keep-g1-seed.img"
+      ]
     }
   }
 ]

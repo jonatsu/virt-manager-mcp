@@ -3,6 +3,12 @@
     "tool": "describe_vm",
     "args": {
       "vm": "t-or"
+    },
+    "expect": {
+      "contains": [
+        "t-or-g1.qcow2",
+        "/outside.img\""
+      ]
     }
   },
   {
@@ -10,12 +16,25 @@
     "args": {
       "vm": "t-or",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "matches": "reset VM 't-or' to template 'debian13' \\(generation 2\\); not deleted, because they are not volumes in manage\\.disk_pool [^:]*: \\S*/outside\\.img; started"
     }
   },
   {
     "tool": "describe_vm",
     "args": {
       "vm": "t-or"
+    },
+    "expect": {
+      "contains": [
+        "t-or-g2.qcow2",
+        "t-or-g2-seed.img"
+      ],
+      "absent": [
+        "outside.img",
+        "t-or-g1"
+      ]
     }
   },
   {
@@ -26,19 +45,34 @@
   },
   {
     "tool": "list_vms",
-    "args": {}
+    "args": {},
+    "expect": {
+      "contains": "\"name\": \"t-or\"",
+      "absent": "\"name\": \"t-oe\""
+    }
   },
   {
     "tool": "stop_vm",
     "args": {
       "vm": "t-or",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-or' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-or"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-or'",
+        "t-or-g2.qcow2",
+        "t-or-g2-seed.img"
+      ],
+      "absent": "outside.img"
     }
   }
 ]

@@ -5,12 +5,18 @@
       "name": "t-g",
       "template": "debian13",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "created VM 't-g' from template 'debian13'"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "t-g"
+    },
+    "expect": {
+      "matches": "console for 't-g' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -24,6 +30,9 @@
     "args": {
       "vm": "t-g",
       "text": ""
+    },
+    "expect": {
+      "contains": "sent 1 bytes"
     }
   },
   {
@@ -32,6 +41,12 @@
       "vm": "t-g",
       "since": 0,
       "wait_ms": 3000
+    },
+    "expect": {
+      "contains": [
+        "\"closed\":null",
+        "Linux version"
+      ]
     }
   },
   {
@@ -39,6 +54,9 @@
     "args": {
       "vm": "t-g",
       "force": true
+    },
+    "expect": {
+      "matches": "console for 't-g' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -47,6 +65,10 @@
       "vm": "t-g",
       "since": 10,
       "generation": 1
+    },
+    "expect": {
+      "error": true,
+      "contains": "offset from an earlier console session (generation 1"
     }
   },
   {
@@ -54,6 +76,10 @@
     "args": {
       "vm": "t-g",
       "since": 10
+    },
+    "expect": {
+      "error": true,
+      "contains": "since 10 needs the generation of the read that returned it"
     }
   },
   {
@@ -61,6 +87,9 @@
     "args": {
       "vm": "t-g",
       "since": 0
+    },
+    "expect": {
+      "matches": "\"closed\":null,\"dropped_bytes\":0,\"generation\":\\d+,\"next\":\\d+"
     }
   },
   {
@@ -68,6 +97,9 @@
     "args": {
       "vm": "t-g",
       "snapshot": "s1"
+    },
+    "expect": {
+      "contains": "created snapshot 's1' of 't-g'"
     }
   },
   {
@@ -75,6 +107,12 @@
     "args": {
       "vm": "t-g",
       "snapshot": "s1"
+    },
+    "expect": {
+      "contains": [
+        "reverted 't-g' to snapshot 's1'",
+        "its console session was closed"
+      ]
     }
   },
   {
@@ -82,6 +120,10 @@
     "args": {
       "vm": "t-g",
       "since": 0
+    },
+    "expect": {
+      "error": true,
+      "contains": "no console open for 't-g'"
     }
   },
   {
@@ -89,12 +131,22 @@
     "args": {
       "vm": "t-g",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-g' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-g"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-g'",
+        "t-g-g1.qcow2",
+        "t-g-g1-seed.img"
+      ]
     }
   }
 ]

@@ -5,6 +5,13 @@
       "name": "t-r",
       "template": "debian13",
       "lifetime_minutes": 60
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-r' from template 'debian13'",
+        "in 60 minutes",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -12,6 +19,13 @@
     "args": {
       "vm": "t-r",
       "command": "cat /sys/class/dmi/id/product_uuid; ip -o link | grep -o 'ether [0-9a-f:]*'; hostname"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "ether 52:54:00:",
+        "\nt-r\n"
+      ]
     }
   },
   {
@@ -20,6 +34,9 @@
       "vm": "t-r",
       "path": "/root/marker",
       "content": "old state\n"
+    },
+    "expect": {
+      "contains": "wrote 10 bytes to /root/marker"
     }
   },
   {
@@ -27,6 +44,9 @@
     "args": {
       "vm": "t-r",
       "snapshot": "s1"
+    },
+    "expect": {
+      "contains": "created snapshot 's1' of 't-r'"
     }
   },
   {
@@ -34,6 +54,9 @@
     "args": {
       "vm": "t-r",
       "size_gib": 1
+    },
+    "expect": {
+      "contains": "attached new 1 GiB disk agent-vms/t-r-vdc.qcow2 to 't-r' as vdc"
     }
   },
   {
@@ -43,6 +66,12 @@
     "tool": "reset_vm",
     "args": {
       "vm": "t-r"
+    },
+    "expect": {
+      "contains": [
+        "reset VM 't-r' to template 'debian13' (generation 2)",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -53,24 +82,50 @@
     "args": {
       "vm": "t-r",
       "command": "test -e /root/marker && echo marker-present || echo marker-gone; cat /sys/class/dmi/id/product_uuid; ip -o link | grep -o 'ether [0-9a-f:]*'; hostname; cloud-init status"
+    },
+    "expect": {
+      "contains": [
+        "marker-gone",
+        "\nt-r\n",
+        "status: done"
+      ],
+      "absent": "marker-present"
     }
   },
   {
     "tool": "snapshot_list",
     "args": {
       "vm": "t-r"
+    },
+    "expect": {
+      "matches": "^\\[\\]$"
     }
   },
   {
     "tool": "describe_vm",
     "args": {
       "vm": "t-r"
+    },
+    "expect": {
+      "contains": [
+        "t-r-g2.qcow2",
+        "t-r-g2-seed.img",
+        "\"state\": \"running\""
+      ],
+      "absent": [
+        "t-r-g1",
+        "t-r-vdc"
+      ]
     }
   },
   {
     "tool": "reset_vm",
     "args": {
       "vm": "t-listed"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 't-listed' was not created by this server"
     }
   },
   {
@@ -81,18 +136,29 @@
       "vcpus": 1,
       "memory_mib": 512,
       "disk_gib": 1
+    },
+    "expect": {
+      "contains": "created VM 't-plain'"
     }
   },
   {
     "tool": "reset_vm",
     "args": {
       "vm": "t-plain"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 't-plain' was not made from a template"
     }
   },
   {
     "tool": "reset_vm",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
     }
   },
   {
@@ -101,6 +167,9 @@
       "name": "t-s",
       "template": "scratch",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "created VM 't-s' from template 'scratch'"
     }
   }
 ]

@@ -4,6 +4,12 @@
     "args": {
       "name": "t-u",
       "template": "debian13-uefi"
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-u' from template 'debian13-uefi'",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -12,18 +18,30 @@
       "vm": "t-u",
       "path": "/root/marker",
       "content": "old state\n"
+    },
+    "expect": {
+      "contains": "wrote 10 bytes to /root/marker"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "matches": "console for 't-u' opened \\(generation \\d+\\)"
     }
   },
   {
     "tool": "reset_vm",
     "args": {
       "vm": "t-u"
+    },
+    "expect": {
+      "contains": [
+        "reset VM 't-u' to template 'debian13-uefi' (generation 2)",
+        "guest agent is responding"
+      ]
     }
   },
   {
@@ -31,6 +49,10 @@
     "args": {
       "vm": "t-u",
       "since": 0
+    },
+    "expect": {
+      "error": true,
+      "contains": "no console open for 't-u'"
     }
   },
   {
@@ -38,6 +60,12 @@
     "args": {
       "vm": "t-u",
       "command": "test -d /sys/firmware/efi && echo uefi; test -e /root/marker && echo marker-present || echo marker-gone"
+    },
+    "expect": {
+      "contains": [
+        "uefi\nmarker-gone"
+      ],
+      "absent": "marker-present"
     }
   }
 ]

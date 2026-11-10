@@ -5,6 +5,12 @@
       "name": "t-or",
       "template": "debian13",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-or' from template 'debian13'",
+        "it does not expire; started"
+      ]
     }
   },
   {
@@ -14,6 +20,13 @@
       "template": "debian13",
       "lifetime_minutes": 1,
       "start": false
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-oe' from template 'debian13'",
+        "in 1 minutes",
+        "it is shut off"
+      ]
     }
   }
 ]

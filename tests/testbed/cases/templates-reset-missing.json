@@ -3,12 +3,24 @@
     "tool": "reset_vm",
     "args": {
       "vm": "t-s"
+    },
+    "expect": {
+      "error": true,
+      "contains": "template volume 'tpl-scratch.qcow2' is not in pool 'agent-vms'"
     }
   },
   {
     "tool": "describe_vm",
     "args": {
       "vm": "t-s"
+    },
+    "expect": {
+      "contains": [
+        "t-s-g1.qcow2",
+        "t-s-g1-seed.img",
+        "\"state\": \"running\""
+      ],
+      "absent": "t-s-g2"
     }
   },
   {
@@ -16,12 +28,22 @@
     "args": {
       "vm": "t-s",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-s' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-s"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-s'",
+        "t-s-g1.qcow2",
+        "t-s-g1-seed.img"
+      ]
     }
   },
   {
@@ -29,18 +51,34 @@
     "args": {
       "vm": "t-r",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-r' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-r"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-r'",
+        "t-r-g2.qcow2",
+        "t-r-g2-seed.img"
+      ]
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-plain"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-plain'",
+        "t-plain.qcow2"
+      ]
     }
   }
 ]
