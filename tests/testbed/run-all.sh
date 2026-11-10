@@ -96,11 +96,25 @@ wait_until() { # timeout_secs command...
 is_state() { [[ $(vsh domstate "$1" 2> /dev/null) == "$2" ]]; }
 agent_answers() { vsh qemu-agent-command "$1" '{"execute":"guest-ping"}' > /dev/null 2>&1; }
 
+# Whether systemd in VM $1 has finished booting. The guest agent answers before it has, while the getty and the
+# shutdown path a case relies on may still be starting.
+boot_finished() {
+  local pid state
+  pid=$(vsh qemu-agent-command "$1" \
+    '{"execute":"guest-exec","arguments":{"path":"/bin/systemctl","arg":["is-system-running"],"capture-output":true}}' \
+    2> /dev/null | jq -r '.return.pid') || return 1
+  [[ ${pid} =~ ^[0-9]+$ ]] || return 1
+  sleep 1
+  state=$(vsh qemu-agent-command "$1" "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":${pid}}}" \
+    2> /dev/null | jq -r '.return["out-data"] // ""' | base64 -d 2> /dev/null)
+  [[ ${state} == running* || ${state} == degraded* ]]
+}
+
 trial_ready() {
   if ! is_state trial-deb13 running; then
     vsh start trial-deb13 > /dev/null || return 1
   fi
-  wait_until 180 agent_answers trial-deb13
+  wait_until 180 agent_answers trial-deb13 && wait_until 180 boot_finished trial-deb13
 }
 
 trial_shut_off() {
