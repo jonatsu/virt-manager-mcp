@@ -340,3 +340,4 @@ overview and any detail the build settled differently. The roadmap marks run 2 d
 
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
+| 1 Rust 1.94 | `12468ae` | rustup installed 1.94.1. `rust-version` and CI's minimum-version job moved to 1.94; the roadmap's CI item names the new minimum. 116 unit tests pass under the current toolchain and `cargo +1.94`; fmt, clippy with `-D warnings`, `cargo deny check advisories` and pre-commit pass. CI waits for the push | Self-reviewed: a version bump with no code change |
