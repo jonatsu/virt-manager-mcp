@@ -69,14 +69,30 @@ pub enum GuestOs {
     Windows,
 }
 
+/// Where agent commands go: a libvirt domain, or a scripted guest in tests.
+pub trait Channel {
+    /// Sends one JSON command and returns the raw JSON reply, or the transport's error message.
+    fn command(&self, request: &str, timeout_secs: i32) -> std::result::Result<String, String>;
+}
+
+impl Channel for Domain {
+    fn command(&self, request: &str, timeout_secs: i32) -> std::result::Result<String, String> {
+        self.qemu_agent_command(request, timeout_secs, 0)
+            .map_err(|e| e.message().to_string())
+    }
+}
+
 pub struct Agent<'a> {
-    dom: &'a Domain,
+    channel: &'a dyn Channel,
     timeout_secs: i32,
 }
 
 impl<'a> Agent<'a> {
-    pub fn new(dom: &'a Domain, timeout_secs: i32) -> Self {
-        Self { dom, timeout_secs }
+    pub fn new(channel: &'a dyn Channel, timeout_secs: i32) -> Self {
+        Self {
+            channel,
+            timeout_secs,
+        }
     }
 
     /// Sends one agent command and returns its `return` value.
@@ -86,9 +102,9 @@ impl<'a> Agent<'a> {
             req["arguments"] = args;
         }
         let reply = self
-            .dom
-            .qemu_agent_command(&req.to_string(), self.timeout_secs, 0)
-            .map_err(|e| anyhow!("guest agent '{execute}' failed: {}", e.message()))?;
+            .channel
+            .command(&req.to_string(), self.timeout_secs)
+            .map_err(|e| anyhow!("guest agent '{execute}' failed: {e}"))?;
         let mut v: Value = serde_json::from_str(&reply).context("invalid guest agent reply")?;
         if let Some(err) = v.get("error") {
             bail!("guest agent '{execute}' error: {err}");
@@ -295,7 +311,8 @@ impl<'a> Agent<'a> {
     ///
     /// The guest agent creates files world-writable (mode 666). On Linux guests a file this call
     /// creates gets `mode`, or `DEFAULT_FILE_MODE`, before any data is written; an existing file
-    /// keeps its mode unless `mode` is given. Windows guests have no mode bits and reject `mode`.
+    /// keeps its mode unless `mode` is given, and gets it before it is opened, so a failed `chmod`
+    /// leaves its contents alone. Windows guests have no mode bits and reject `mode`.
     pub fn write_from(
         &self,
         path: &str,
@@ -313,15 +330,17 @@ impl<'a> Agent<'a> {
         } else {
             None
         };
+        if existed && let Some(m) = new_mode {
+            self.chmod(path, m)?;
+        }
         let handle = self.open(path, if append { "ab" } else { "wb" })?;
-        if let Some(m) = new_mode
+        if !existed
+            && let Some(m) = new_mode
             && let Err(e) = self.chmod(path, m)
         {
             self.close(handle);
-            if !existed {
-                // Do not leave an empty world-writable file behind.
-                let _ = self.exec(&ExecSpec::new("rm", ["-f", "--", path]), HELPER_TIMEOUT, 0);
-            }
+            // Do not leave an empty world-writable file behind.
+            let _ = self.exec(&ExecSpec::new("rm", ["-f", "--", path]), HELPER_TIMEOUT, 0);
             return Err(e);
         }
         let result = (|| {
@@ -478,6 +497,160 @@ mod mode_tests {
     fn explicit_mode_applies_to_new_and_existing_files() {
         assert_eq!(mode_to_set(false, Some(0o600)), Some(0o600));
         assert_eq!(mode_to_set(true, Some(0o640)), Some(0o640));
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    /// A Linux guest that logs each step a write takes: `exec <program> <args>`, `open <mode>`, `write`, `flush`
+    /// and `close`.
+    struct FakeGuest {
+        exists: bool,
+        chmod_exit: i64,
+        log: RefCell<Vec<String>>,
+        exits: RefCell<Vec<i64>>,
+    }
+
+    impl FakeGuest {
+        fn new(exists: bool, chmod_exit: i64) -> Self {
+            Self {
+                exists,
+                chmod_exit,
+                log: RefCell::default(),
+                exits: RefCell::default(),
+            }
+        }
+
+        fn steps(&self) -> Vec<String> {
+            self.log.borrow().clone()
+        }
+    }
+
+    impl Channel for FakeGuest {
+        fn command(&self, request: &str, _: i32) -> std::result::Result<String, String> {
+            let req: Value = serde_json::from_str(request).unwrap();
+            let args = &req["arguments"];
+            let ret = match req["execute"].as_str().unwrap() {
+                "guest-get-osinfo" => json!({ "id": "debian" }),
+                "guest-exec" => {
+                    let program = args["path"].as_str().unwrap();
+                    let argv: Vec<&str> = args["arg"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| a.as_str().unwrap())
+                        .collect();
+                    self.log
+                        .borrow_mut()
+                        .push(format!("exec {program} {}", argv.join(" ")));
+                    let code = match program {
+                        "test" => i64::from(!self.exists),
+                        "chmod" => self.chmod_exit,
+                        _ => 0,
+                    };
+                    self.exits.borrow_mut().push(code);
+                    json!({ "pid": self.exits.borrow().len() - 1 })
+                }
+                "guest-exec-status" => {
+                    let pid = args["pid"].as_u64().unwrap() as usize;
+                    json!({ "exited": true, "exitcode": self.exits.borrow()[pid] })
+                }
+                "guest-file-open" => {
+                    self.log
+                        .borrow_mut()
+                        .push(format!("open {}", args["mode"].as_str().unwrap()));
+                    json!(7)
+                }
+                "guest-file-write" => {
+                    self.log.borrow_mut().push("write".into());
+                    let n = B64.decode(args["buf-b64"].as_str().unwrap()).unwrap().len();
+                    json!({ "count": n })
+                }
+                other => {
+                    self.log
+                        .borrow_mut()
+                        .push(other.trim_start_matches("guest-file-").into());
+                    Value::Null
+                }
+            };
+            Ok(json!({ "return": ret }).to_string())
+        }
+    }
+
+    fn write(guest: &FakeGuest, mode: Option<u32>) -> Result<u64> {
+        Agent::new(guest, 5).write_from("/f", &b"data"[..], false, mode)
+    }
+
+    #[test]
+    fn a_failed_chmod_never_truncates_an_existing_file() {
+        let guest = FakeGuest::new(true, 1);
+        assert!(write(&guest, Some(0o600)).is_err());
+        assert_eq!(
+            guest.steps(),
+            ["exec test -e /f", "exec chmod 600 -- /f"],
+            "the file is never opened"
+        );
+    }
+
+    #[test]
+    fn an_existing_file_gets_its_mode_before_it_is_opened() {
+        let guest = FakeGuest::new(true, 0);
+        assert_eq!(write(&guest, Some(0o600)).unwrap(), 4);
+        assert_eq!(
+            guest.steps(),
+            [
+                "exec test -e /f",
+                "exec chmod 600 -- /f",
+                "open wb",
+                "write",
+                "flush",
+                "close"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_existing_file_without_a_mode_keeps_its_mode() {
+        let guest = FakeGuest::new(true, 0);
+        write(&guest, None).unwrap();
+        assert!(!guest.steps().iter().any(|s| s.starts_with("exec chmod")));
+    }
+
+    #[test]
+    fn a_new_file_gets_its_mode_before_any_data() {
+        let guest = FakeGuest::new(false, 0);
+        write(&guest, None).unwrap();
+        assert_eq!(
+            guest.steps(),
+            [
+                "exec test -e /f",
+                "open wb",
+                "exec chmod 644 -- /f",
+                "write",
+                "flush",
+                "close"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_file_whose_chmod_fails_is_removed_unwritten() {
+        let guest = FakeGuest::new(false, 1);
+        assert!(write(&guest, Some(0o600)).is_err());
+        assert_eq!(
+            guest.steps(),
+            [
+                "exec test -e /f",
+                "open wb",
+                "exec chmod 600 -- /f",
+                "close",
+                "exec rm -f -- /f"
+            ]
+        );
     }
 }
 

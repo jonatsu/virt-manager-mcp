@@ -92,10 +92,12 @@ Reviews of earlier work found these. None blocks the server's use.
 02. **Done: the README says file writes need `guest-exec`.** `write_file` and `copy_to_vm` run `test`, `chmod` and
     `rm` through `guest-exec` on Linux guests, so a guest agent that blocks `guest-exec` but allows file operations
     fails on writes.
-03. **An overwrite with `mode` truncates first.** `write_from` opens with `wb` before `chmod`, so a failed `chmod`
-    leaves an existing file empty. Either set the mode after the first write or document it.
-04. **No test covers `write_from`'s ordering.** Only the pure helpers are unit-tested; setting the mode before the
-    data, and the clean-up after a failed `chmod`, rest on the test bed. A seam over the agent calls would allow it.
+03. **Done: an overwrite with `mode` no longer truncates first.** `write_from` opened with `wb` before `chmod`, so a
+    failed `chmod` left an existing file empty. An existing file now gets its mode before it is opened.
+04. **Done: unit tests cover `write_from`'s ordering.** `Agent` sends its commands through a `Channel`, which a
+    libvirt domain implements, so tests drive it with a scripted guest. They show that a failed `chmod` never opens
+    an existing file, that a new file gets its mode before any data, and that a new file whose `chmod` fails is
+    removed unwritten.
 05. **`console_read` with `wait_ms: 0` right after `stop_vm`** can return `closed: null`, because the reader records
     the stream's end a moment later. A non-zero wait reports it.
 06. **Convert the existing documents to the short, plain style.** `AGENTS.md` asks for short, plain designs. Bring this
