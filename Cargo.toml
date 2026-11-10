@@ -12,6 +12,7 @@ base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "pnm"] }
+regex = "1.13"
 rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 roxmltree = "0.21.1"
 schemars = "1.2.3"

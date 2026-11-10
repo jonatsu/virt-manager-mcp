@@ -8,8 +8,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
-use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ProgressNotificationParam, ServerCapabilities,
+    ServerConfig,
+};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -17,12 +21,12 @@ use serde_json::{Value, json};
 use crate::agent::{self, Agent, ExecSpec, GuestOs, powershell};
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{ansi, display, fsops, manage};
+use crate::{ansi, display, fsops, manage, wait};
 
-/// Tools hidden in read-only mode.
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
 
+/// Tools hidden in read-only mode.
 const MUTATING_TOOLS: &[&str] = &[
     "guest_info",
     "exec",
@@ -223,6 +227,15 @@ pub struct ConsoleReadParams {
     pub wait_ms: u64,
     /// Remove ANSI escape sequences (colors, cursor movement). Default true.
     pub strip_ansi: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WaitForParams {
+    pub vm: String,
+    /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks once.
+    pub timeout_secs: Option<u64>,
+    /// What to wait for, at most 16; the call returns on the first that holds.
+    pub conditions: Vec<wait::Condition>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -853,6 +866,60 @@ impl VirtServer {
                 "no console was open"
             };
             Ok(vec![ContentBlock::text(msg)])
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Wait until the first of several conditions holds on a VM, and return which one. Kinds: \
+        `console` (the open console session's output matches a regex; ANSI-stripped by default), `agent` (the guest \
+        agent answers) and `command` (a shell command run through the guest agent exits 0; Linux guests, not in \
+        read-only mode). Results: `matched` with the condition's index and the matched text (lowest index wins a \
+        tie; console matches add `next` and `generation`, and move the session's wait cursor past the match); \
+        `closed` when the VM stops or restarts or the console session ends; `timed_out` with a resume point per \
+        console condition (pass it back as `since` and `generation` to keep matching output that arrived in \
+        between) and each command's running PID. A console condition without `since` starts where the last \
+        console_write began, so write first, then wait. A wait never changes what console_read returns."
+    )]
+    async fn wait_for(
+        &self,
+        Parameters(p): Parameters<WaitForParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ct = ctx.ct.clone();
+        let progress = ctx
+            .meta
+            .get_progress_token()
+            .map(|token| (token, ctx.peer.clone()));
+        let runtime = tokio::runtime::Handle::current();
+        self.blocking(move |s| {
+            let checks = wait::validate_conditions(&s.hv.config, &p.conditions)?;
+            let dom = s.hv.domain(&p.vm)?;
+            let max = s.hv.config.limits.max_wait_secs;
+            let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(max).min(max));
+            let notify = |waited: Duration| {
+                if let Some((token, peer)) = &progress {
+                    let mut param =
+                        ProgressNotificationParam::new(token.clone(), waited.as_secs_f64());
+                    param.total = Some(timeout.as_secs_f64());
+                    let peer = peer.clone();
+                    runtime.spawn(async move {
+                        let _ = peer.notify_progress(param).await;
+                    });
+                }
+            };
+            let env = wait::LiveEnv {
+                consoles: &s.consoles,
+                vm: &p.vm,
+                dom: dom.clone(),
+                cancelled: Box::new(|| ct.is_cancelled()),
+                progress: Box::new(notify),
+            };
+            let started = std::time::Instant::now();
+            let outcome = wait::run(&env, Arc::new(wait::LiveGuest(dom)), checks, timeout)?;
+            Ok(vec![ContentBlock::text(
+                outcome.to_json(started.elapsed()).to_string(),
+            )])
         })
         .await
     }

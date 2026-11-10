@@ -16,10 +16,6 @@ pub struct Stripped {
 
 impl Stripped {
     /// The raw index just past the stripped byte range ending at `end` (exclusive).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wait_for uses it from run 1 unit 4")
-    )]
     pub fn raw_end(&self, end: usize) -> usize {
         match end.checked_sub(1) {
             Some(last) => self.origin[last] + 1,

@@ -1,0 +1,59 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-owrt",
+      "wait_for_agent_secs": 0
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-owrt"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-owrt",
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "Please press Enter to activate this console"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "t-owrt",
+      "text": ""
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-owrt",
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "root@\\S+:\\S*# "
+        }
+      ]
+    }
+  },
+  {
+    "tool": "console_close",
+    "args": {
+      "vm": "t-owrt"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-owrt",
+      "force": true
+    }
+  }
+]

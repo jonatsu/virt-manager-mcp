@@ -9,6 +9,7 @@ mod manage;
 mod seed;
 mod server;
 mod sweep;
+mod wait;
 
 use std::path::PathBuf;
 use std::sync::Arc;

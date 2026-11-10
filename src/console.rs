@@ -53,10 +53,6 @@ impl Buffer {
     }
 
     /// Everything from `since` (default: the wait cursor) to the end, without marking it delivered.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wait_for uses it from run 1 unit 4")
-    )]
     fn scan(&self, since: Option<u64>) -> ScanResult {
         let from = since.unwrap_or(self.wait_cursor).min(self.end());
         let dropped = self.start.saturating_sub(from);
@@ -133,7 +129,6 @@ struct Session {
 }
 
 /// A session's output from an offset, read for a wait without marking it delivered.
-#[expect(dead_code, reason = "wait_for uses it from run 1 unit 4")]
 pub struct ScanResult {
     pub data: Vec<u8>,
     /// Offset of `data[0]`.
@@ -144,7 +139,6 @@ pub struct ScanResult {
 }
 
 /// A scan with the session it came from.
-#[expect(dead_code, reason = "wait_for uses it from run 1 unit 4")]
 pub struct SessionScan {
     pub scan: ScanResult,
     pub generation: u64,
@@ -449,7 +443,6 @@ impl Consoles {
 
     /// The output from `since` (default: the wait cursor) to the end, for a wait. Marks nothing delivered, so
     /// `console_read` sees the same output afterwards.
-    #[expect(dead_code, reason = "wait_for uses it from run 1 unit 4")]
     pub fn scan(
         &self,
         vm: &str,
@@ -464,6 +457,16 @@ impl Consoles {
             generation: current,
             domain_id,
         })
+    }
+
+    /// Moves the wait cursor of session `generation` to `to`, after a wait matched just before it. The cursor never
+    /// moves back, so a write made during the wait keeps its answer ahead of the cursor.
+    pub fn advance_cursor(&self, vm: &str, generation: u64, to: u64) {
+        let sessions = self.sessions.lock().unwrap();
+        if let Some(s) = sessions.get(vm).filter(|s| s.generation == generation) {
+            let mut b = s.buffer.lock().unwrap();
+            b.wait_cursor = b.wait_cursor.max(to.min(b.end()));
+        }
     }
 
     pub fn is_open(&self, vm: &str) -> bool {

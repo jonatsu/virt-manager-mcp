@@ -1,0 +1,231 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-w",
+      "template": "debian13",
+      "wait_for_agent_secs": 0
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-w"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "agent"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "console_write",
+    "args": {
+      "vm": "t-w",
+      "text": ""
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "login:"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-w",
+      "max_bytes": 200
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "timeout_secs": 3,
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "login:"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "timeout_secs": 5,
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "marker-42"
+        },
+        {
+          "kind": "command",
+          "command": "test -e /tmp/ready"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "touch /tmp/ready; echo marker-42 > /dev/ttyS0"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "timeout_secs": 10,
+      "conditions": [
+        {
+          "kind": "command",
+          "command": "test -e /tmp/ready && echo ready"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "timeout_secs": 5,
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "marker-\\d+"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "nohup sh -c 'sleep 3; echo c > /proc/sysrq-trigger' >/dev/null 2>&1 &"
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "login:"
+        },
+        {
+          "kind": "console",
+          "pattern": "Kernel panic"
+        },
+        {
+          "kind": "command",
+          "command": "false"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-w",
+      "force": true
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-w",
+      "wait_for_agent_secs": 120
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-w",
+      "force": true
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "nohup sh -c 'sleep 5; poweroff' >/dev/null 2>&1 &"
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "this never appears"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "conditions": [
+        {
+          "kind": "agent"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "("
+        }
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-w",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-w"
+    }
+  }
+]
