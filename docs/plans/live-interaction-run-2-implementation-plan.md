@@ -61,9 +61,10 @@ flowchart LR
 - **Models.** `display.ocr_models` is optional. When it is set, the directory and both model files must exist, or the
   server refuses to start. When it is unset, `screen_text` is refused with that reason before the wait starts;
   `screen_settled` needs no models.
-- **OCR load.** OCR runs in its own thread pool of 4 threads, so a wait on a busy screen does not take every core of
-  the host, which also runs the user's VMs. A cancelled wait stops polling and drops a running OCR's result; `ocrs`
-  cannot interrupt a run in progress.
+- **OCR load.** OCR runs in `rten`'s process-wide pool, which `main` sizes to 4 threads with `RTEN_NUM_THREADS`
+  before any thread starts, so a wait on a busy screen does not take every core of the host, which also runs the
+  user's VMs. A cancelled wait stops polling and drops a running OCR's result; `ocrs` cannot interrupt a run in
+  progress.
 - **Mouse.** Each action is a sequence of `input-send-event` commands with pauses: a press and its release go as
   separate commands about 50 ms apart, because QEMU's USB tablet merges events sent in one command; a double-click
   spaces its two clicks within a guest's double-click interval; a drag presses, moves in steps, then releases. Run 2
