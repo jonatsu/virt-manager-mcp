@@ -620,7 +620,7 @@ pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Re
         }
         if !outside.is_empty() {
             msg.push_str(&format!(
-                "; detached and left in place, outside manage.disk_pool: {}",
+                "; not deleted, because they are not volumes in manage.disk_pool (already deleted, or outside it): {}",
                 outside.join(", ")
             ));
         }
@@ -797,7 +797,7 @@ fn expiry_report(name: &str, uuid: &str, outcomes: &[(String, DiskDeletion)]) ->
         match o {
             DiskDeletion::Deleted => msg.push_str(&format!("; deleted disk {source}")),
             DiskDeletion::NotInPool => msg.push_str(&format!(
-                "; disk {source} is not a volume in manage.disk_pool (already deleted, or outside it) and was left in place"
+                "; disk {source} is not a volume in manage.disk_pool (already deleted, or outside it), so it was not deleted"
             )),
             DiskDeletion::Failed(_) => {}
         }
@@ -2006,7 +2006,7 @@ mod tests {
         let msg = expiry_report("t", "u-1", &outcomes).unwrap();
         assert!(msg.starts_with("expired VM 't' (u-1) deleted; deleted disk /pool/t-g1.qcow2"));
         assert!(msg.contains("disk /home/u/extra.img is not a volume in manage.disk_pool"));
-        assert!(msg.ends_with("left in place"));
+        assert!(msg.ends_with("so it was not deleted"));
     }
 
     #[test]

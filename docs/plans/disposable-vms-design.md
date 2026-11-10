@@ -186,3 +186,6 @@ These follow from the design and the code as it stands:
   cover a missing template at create and at reset, and a template in use as a disk. A failed upload, a failed define,
   a start failure after define and two processes sweeping one VM rest on code review: the test bed cannot inject
   those faults, or would need a memory overcommit the host cannot afford.
+- A failed volume deletion during expiry keeps the VM: unit tests cover the decision, and the test-bed README lists a
+  manual check that needs root. `templates-outside-disk.json` shows reset and expiry leaving a disk outside the pool
+  in place, and the reset cases show a refused reset keeping the console open and a reset that goes ahead closing it.

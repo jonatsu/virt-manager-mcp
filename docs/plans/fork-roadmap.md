@@ -104,13 +104,13 @@ The conformance reviews of the second and third autopilot runs found these. None
 7. **Done: an expiry no longer hides a failed volume deletion.** A volume that cannot be deleted keeps the domain, the
    expiry counts as failed so `virtmanager-mcp sweep` exits non-zero, and the next sweep retries it. Unit tests cover
    the decision; producing the failure needs root, so the test-bed README lists the manual check.
-8. **Done: a refused `reset_vm` keeps the console open.** `manage::reset` closes the console only after every check
-   has passed, just before it forces the VM off. In `templates-reset-saved.json`, a console opened before a refused
-   reset still reads output after it.
+8. **Done: a refused `reset_vm` keeps the console open.** `reset_vm` closes the console only once `manage::reset` has
+   passed every check, just before it forces the VM off. In `templates-reset-saved.json`, a console opened before a
+   refused reset still reads output after it; in `templates-reset-uefi.json`, a reset that goes ahead closes it.
 9. **Done: a test shows reset and expiry leaving a disk outside `disk_pool`.** `templates-outside-disk.json`, with the
    steps in the test-bed README, attaches a user-owned file to two VMs with `virsh`; the sweep's expiry and a reset
-   both leave it in place, with its owner and checksum unchanged. A reset now reports such a disk as detached and left
-   in place, rather than as one it could not delete.
+   both leave it in place, with its owner and checksum unchanged. A reset now reports such a disk as not deleted
+   because it is no pool volume, rather than as one it could not delete.
 
 ## Outcomes
 

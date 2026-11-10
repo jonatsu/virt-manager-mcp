@@ -35,7 +35,7 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-create.json` | `list_templates` hiding a missing volume; three VMs from templates, one UEFI, timed to a responding agent; hostname, size and lifetime refusals and `max_vms`; deletion of overlays, seeds and attached disks. |
 | `templates-reset.json` | Resets a VM with a marker file, a snapshot and an attached disk; refuses the unowned `t-listed`, a `create_vm` VM and `trial-deb13`; leaves `t-s` running on the `scratch` template. |
 | `templates-reset-missing.json` | Run after `virsh vol-delete --pool agent-vms tpl-scratch.qcow2`: the reset of `t-s` fails with its disks in place, then the case deletes its VMs. |
-| `templates-reset-uefi.json` | Creates `t-u` from `debian13-uefi` and resets it; it boots under UEFI with its marker file gone. |
+| `templates-reset-uefi.json` | Creates `t-u` from `debian13-uefi` and resets it; the reset closes the console opened before it, and the VM boots under UEFI with its marker file gone. |
 | `templates-reset-saved.json` | Run after `virsh managedsave t-u`: the reset discards the saved state and boots fresh; a `create_vm` VM named `t-u-g4` holding the next disk name makes the next reset refuse with nothing changed, and the console opened before it still reads output; then both VMs are deleted. |
 | `templates-expiry.json` | `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without one; after 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
 | `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`: it deletes `t-exp2` and its volumes and exits 0. |
@@ -55,7 +55,8 @@ stays in place:
 
 1. Run `templates-outside-disk-setup.json`. It creates `t-or`, running, and `t-oe`, stopped with a 1-minute lifetime.
 
-2. Make a file you own outside every pool, such as `truncate -s 1M "$DIR/outside.img"`, and note its `sha256sum`.
+2. Set `DIR` to a directory you own outside every pool, make a file there with `truncate -s 1M "$DIR/outside.img"`,
+   and note its `sha256sum`.
 
 3. Attach it to both VMs in their stored configuration only, so QEMU never opens it:
 
@@ -67,7 +68,7 @@ stays in place:
    ```
 
 4. Once `t-oe` has expired, run `templates-outside-disk.json`. The server's first sweep deletes `t-oe` and logs the
-   outside disk as left in place; the reset of `t-or` reports it detached and left in place; then `t-or` is deleted.
+   outside disk as not deleted; the reset of `t-or` reports it not deleted either; then `t-or` is deleted.
 
 5. Check that the file still exists, with the same owner and checksum.
 
