@@ -17,7 +17,7 @@ Host: Linux. Guests: Linux and Windows.
 | Capability | Mechanism | Guest requirement |
 | -- | -- | -- |
 | `exec`, `read_file`, `write_file`, `copy_to_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs need a Linux guest |
-| `wait_for` | The console session and the guest agent, polled together | as for the condition's channel |
+| `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs `display.ocr_models` |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
 | `mouse` | QEMU monitor `input-send-event` (`virDomainQemuMonitorCommand`) | A graphics device and a USB tablet |
@@ -35,7 +35,7 @@ The path is passed as data, never spliced into shell code.
 | `list_vms`: allowed VMs, power state, agent status, OS family | ✅ |
 | `read_file`, `list_dir`, `stat_path` | ✅ |
 | `console_open`, `console_read`, `console_close` | ✅ |
-| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern) | ✅ (no `command` conditions) |
+| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text) | ✅ (no `command` or screen conditions, no screenshot attachment) |
 | `job_read`, `job_list`: a background job's output and state | ✅ |
 | `job_start`, `job_stop`: run a long command detached in a Linux guest, and stop it | ❌ |
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
