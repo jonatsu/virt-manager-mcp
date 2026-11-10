@@ -1,14 +1,27 @@
 [
   {
-    "tool": "__list__"
+    "tool": "__list__",
+    "expect": {
+      "contains": [
+        "- wait_for(",
+        "- job_start(",
+        "- exec("
+      ]
+    }
   },
   {
-    "tool": "list_vms"
+    "tool": "list_vms",
+    "expect": {
+      "contains": "\"name\": \"trial-deb13\""
+    }
   },
   {
     "tool": "guest_info",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": "\"host-name\": \"trial-deb13\""
     }
   },
   {
@@ -16,6 +29,12 @@
     "args": {
       "vm": "trial-deb13",
       "command": "cloud-init status; uname -r; id"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "uid=0(root)"
+      ]
     }
   },
   {
@@ -24,6 +43,9 @@
       "vm": "trial-deb13",
       "path": "/tmp/hello.txt",
       "content": "hello from mcp\n"
+    },
+    "expect": {
+      "contains": "wrote 15 bytes to /tmp/hello.txt"
     }
   },
   {
@@ -31,6 +53,9 @@
     "args": {
       "vm": "trial-deb13",
       "path": "/tmp/hello.txt"
+    },
+    "expect": {
+      "contains": "hello from mcp"
     }
   },
   {
@@ -38,6 +63,9 @@
     "args": {
       "vm": "trial-deb13",
       "path": "/tmp"
+    },
+    "expect": {
+      "contains": "\"name\": \"hello.txt\""
     }
   },
   {
@@ -46,12 +74,21 @@
       "vm": "trial-deb13",
       "command": "sleep 5",
       "timeout_secs": 2
+    },
+    "expect": {
+      "contains": [
+        "\"timed_out\":true",
+        "did not finish within 2s"
+      ]
     }
   },
   {
     "tool": "list_vms",
     "args": {
       "vm": "nonexistent"
+    },
+    "expect": {
+      "contains": "trial-deb13"
     }
   },
   {
@@ -59,6 +96,10 @@
     "args": {
       "vm": "not-allowed-vm",
       "command": "id"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not in allowed_vms"
     }
   }
 ]
