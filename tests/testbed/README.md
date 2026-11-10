@@ -224,9 +224,12 @@ prompt after Enter; then it powers the VM off. This ran with OpenWrt 25.12.6, wh
 `/usr/bin/python3 /usr/bin/virt-install ... --print-xml` and are kept as generated.
 
 - `t-inst.xml`: 1 GiB, 2 vCPUs, UEFI on q35, no network, a USB tablet, SPICE with virtio video, the Debian 13 netinst
-  ISO `tpl-debian13-netinst.iso` as its CD-ROM, and the 8 GiB disk `t-inst.qcow2`.
+  ISO `tpl-debian13-netinst.iso` as its CD-ROM, and the 8 GiB disk `t-inst.qcow2`. It also has the emulated TPM 2.0,
+  random number generator and guest-agent channel that `virt-install` adds.
 - `t-win.xml`: 4 GiB, 2 vCPUs, UEFI with Secure Boot and SMM, an emulated TPM 2.0, a USB tablet, SPICE with virtio
-  video, the Windows 11 ISO `tpl-win11-26h2.iso` as its CD-ROM, and no disk. The TPM needs `swtpm` on the host.
+  video, the Windows 11 ISO `tpl-win11-26h2.iso` as its CD-ROM, and no disk.
+
+Both guests' TPMs need `swtpm` on the host.
 
 Both ISOs are volumes in `agent-vms`. Define the guests by hand as follows; `run-all.sh` does the same when they are
 missing:
