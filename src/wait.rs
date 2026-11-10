@@ -20,6 +20,8 @@ use crate::agent::{Agent, ExecSpec, GuestOs};
 use crate::ansi;
 use crate::config::Config;
 use crate::console::{Consoles, SessionScan};
+use crate::jobs;
+use uuid::Uuid;
 
 /// How often the loop polls.
 const POLL: Duration = Duration::from_millis(30);
@@ -33,6 +35,8 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(5);
 const MAX_TEXT: usize = 4096;
 /// Most conditions one call may name.
 const MAX_CONDITIONS: usize = 16;
+/// Most bytes of a job's output one `job_output` probe reads.
+const MAX_JOB_READ: usize = 1024 * 1024;
 
 /// One thing to wait for.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -54,6 +58,19 @@ pub enum Condition {
     /// A shell command run through the guest agent exits 0. It runs once, and runs again after a non-zero exit; it
     /// is never killed. Linux guests only. Refused in read-only mode.
     Command { command: String },
+    /// A job has exited, or has ended without writing its status. Linux guests only.
+    JobDone {
+        /// The job ID that job_start returned.
+        job: String,
+    },
+    /// A job's output from `since` matches `pattern`, a regular expression (Rust `regex` syntax). Linux guests only.
+    JobOutput {
+        /// The job ID that job_start returned.
+        job: String,
+        pattern: String,
+        /// Byte offset in the job's output to match from, such as `next` from an earlier result. Default 0.
+        since: Option<u64>,
+    },
 }
 
 impl Condition {
@@ -63,6 +80,8 @@ impl Condition {
             Condition::Console { .. } => "console",
             Condition::Agent => "agent",
             Condition::Command { .. } => "command",
+            Condition::JobDone { .. } => "job_done",
+            Condition::JobOutput { .. } => "job_output",
         }
     }
 }
@@ -77,6 +96,12 @@ pub enum Check {
     },
     Agent,
     Command(String),
+    JobDone(Uuid),
+    JobOutput {
+        job: Uuid,
+        regex: Regex,
+        since: u64,
+    },
 }
 
 /// Refuses a list of conditions the server will not wait for, before any libvirt call: an empty or overlong list, a
@@ -124,6 +149,19 @@ pub fn validate_conditions(config: &Config, conditions: &[Condition]) -> Result<
                     }
                     Check::Command(command.clone())
                 }
+                Condition::JobDone { job } => {
+                    Check::JobDone(jobs::parse_id(job).map_err(|e| anyhow!("condition {i}: {e}"))?)
+                }
+                Condition::JobOutput {
+                    job,
+                    pattern,
+                    since,
+                } => Check::JobOutput {
+                    job: jobs::parse_id(job).map_err(|e| anyhow!("condition {i}: {e}"))?,
+                    regex: Regex::new(pattern)
+                        .map_err(|e| anyhow!("condition {i}: bad pattern: {e}"))?,
+                    since: since.unwrap_or(0),
+                },
             })
         })
         .collect()
@@ -163,6 +201,14 @@ pub trait Guest: Send + Sync + 'static {
     fn os(&self, timeout_secs: i32) -> Result<GuestOs>;
     fn start(&self, command: &str, timeout_secs: i32) -> Result<i64>;
     fn status(&self, pid: i64, timeout_secs: i32) -> Result<ExecState>;
+    /// A job's state and up to `max_bytes` of its output from `since`, or `None` when the guest has no such job.
+    fn job_read(
+        &self,
+        job: &Uuid,
+        since: u64,
+        max_bytes: usize,
+        timeout_secs: i32,
+    ) -> Result<Option<jobs::Read>>;
 }
 
 /// The guest agent of a real domain.
@@ -213,6 +259,16 @@ impl Guest for LiveGuest {
             Err(e) => Err(e),
         }
     }
+
+    fn job_read(
+        &self,
+        job: &Uuid,
+        since: u64,
+        max_bytes: usize,
+        timeout_secs: i32,
+    ) -> Result<Option<jobs::Read>> {
+        jobs::read(&Agent::new(&self.0, timeout_secs), job, since, max_bytes)
+    }
 }
 
 /// The real environment of a wait on `vm`.
@@ -256,16 +312,19 @@ pub enum Outcome {
         index: usize,
         kind: &'static str,
         text: String,
-        /// For a console condition: the raw offset just past the match, and its generation.
-        next: Option<(u64, u64)>,
+        /// For a console or job_output condition: the offset just past the match.
+        next: Option<u64>,
+        /// For a console condition: the session's generation, to pass with `next`.
+        generation: Option<u64>,
     },
     Closed {
         index: Option<usize>,
         reason: String,
     },
     TimedOut {
-        /// Each console condition's resume point: the start of its last unfinished line, and the generation.
-        resume: Vec<(usize, u64, u64)>,
+        /// Each console and job_output condition's resume point: the start of its last unfinished line, and for a
+        /// console condition the generation.
+        resume: Vec<(usize, u64, Option<u64>)>,
         /// Each command condition's process still running, or the exit code of its last run.
         commands: Vec<(usize, Option<i64>, Option<i64>)>,
     },
@@ -281,12 +340,15 @@ impl Outcome {
                 kind,
                 text,
                 next,
+                generation,
             } => {
                 let mut v = json!({
                     "result": "matched", "index": index, "kind": kind, "text": text, "waited_ms": waited_ms,
                 });
-                if let Some((next, generation)) = next {
+                if let Some(next) = next {
                     v["next"] = json!(next);
+                }
+                if let Some(generation) = generation {
                     v["generation"] = json!(generation);
                 }
                 v
@@ -298,7 +360,11 @@ impl Outcome {
                 "result": "timed_out",
                 "waited_ms": waited_ms,
                 "resume": resume.iter().map(|(index, since, generation)| {
-                    json!({ "index": index, "since": since, "generation": generation })
+                    let mut point = json!({ "index": index, "since": since });
+                    if let Some(generation) = generation {
+                        point["generation"] = json!(generation);
+                    }
+                    point
                 }).collect::<Vec<_>>(),
                 "commands": commands.iter().map(|(index, pid, code)| {
                     json!({ "index": index, "running_pid": pid, "last_exit_code": code })
@@ -316,13 +382,9 @@ pub fn run(
     checks: Vec<Check>,
     timeout: Duration,
 ) -> Result<Outcome> {
-    if timeout.is_zero()
-        && checks
-            .iter()
-            .any(|c| matches!(c, Check::Agent | Check::Command(_)))
-    {
+    if timeout.is_zero() && checks.iter().any(|c| !matches!(c, Check::Console { .. })) {
         bail!(
-            "timeout_secs 0 checks console conditions once; agent and command conditions need at least 1 s"
+            "timeout_secs 0 checks console conditions once; agent, command and job conditions need at least 1 s"
         );
     }
     let start = env.now();
@@ -357,8 +419,12 @@ pub fn run(
         for (index, state) in states.iter_mut().enumerate() {
             match state.poll(scan.as_ref(), &guest, now, deadline, domain_id)? {
                 Poll::Pending => {}
-                Poll::Hit { text, next } => {
-                    if let Some((to, generation)) = next {
+                Poll::Hit {
+                    text,
+                    next,
+                    generation,
+                } => {
+                    if let (Some(to), Some(generation)) = (next, generation) {
                         env.advance_cursor(generation, to);
                     }
                     return Ok(Outcome::Matched {
@@ -366,6 +432,7 @@ pub fn run(
                         kind: state.kind(),
                         text,
                         next,
+                        generation,
                     });
                 }
                 Poll::Closed(reason) => {
@@ -395,15 +462,31 @@ fn timed_out(states: &mut [State]) -> Result<Outcome> {
     let mut commands = Vec::new();
     for (index, state) in states.iter_mut().enumerate() {
         match state {
-            State::Console(c) => resume.push((index, c.resume, c.generation)),
+            State::Console(c) => resume.push((index, c.resume, Some(c.generation))),
+            State::Job(j) => {
+                // As for commands below, a read that finished after the last poll still counts.
+                if let Some(Poll::Hit { text, next, .. }) = j.absorb()? {
+                    return Ok(Outcome::Matched {
+                        index,
+                        kind: j.kind(),
+                        text,
+                        next,
+                        generation: None,
+                    });
+                }
+                if j.output.is_some() {
+                    resume.push((index, j.from, None));
+                }
+            }
             State::Command(c) => {
                 // A probe that finished after the last poll counts: a success still matches, and a new run is reported.
-                if let Some(Poll::Hit { text, next }) = c.absorb()? {
+                if let Some(Poll::Hit { text, .. }) = c.absorb()? {
                     return Ok(Outcome::Matched {
                         index,
                         kind: "command",
                         text,
-                        next,
+                        next: None,
+                        generation: None,
                     });
                 }
                 commands.push((index, c.pid, c.last_code));
@@ -430,15 +513,27 @@ enum Poll {
     Pending,
     Hit {
         text: String,
-        next: Option<(u64, u64)>,
+        next: Option<u64>,
+        generation: Option<u64>,
     },
     Closed(String),
+}
+
+impl Poll {
+    fn hit(text: String) -> Self {
+        Poll::Hit {
+            text,
+            next: None,
+            generation: None,
+        }
+    }
 }
 
 enum State {
     Console(ConsoleState),
     Agent(Probe<bool>),
     Command(CommandState),
+    Job(JobState),
 }
 
 impl State {
@@ -470,6 +565,10 @@ impl State {
                 last_code: None,
                 probe: Probe::default(),
             }),
+            Check::JobDone(job) => State::Job(JobState::new(job, None, 0)),
+            Check::JobOutput { job, regex, since } => {
+                State::Job(JobState::new(job, Some(regex), since))
+            }
         })
     }
 
@@ -478,6 +577,7 @@ impl State {
             State::Console(_) => "console",
             State::Agent(_) => "agent",
             State::Command(_) => "command",
+            State::Job(j) => j.kind(),
         }
     }
 
@@ -496,16 +596,141 @@ impl State {
             }),
             State::Agent(p) => {
                 if p.take() == Some(true) {
-                    return Ok(Poll::Hit {
-                        text: "the guest agent answered".into(),
-                        next: None,
-                    });
+                    return Ok(Poll::hit("the guest agent answered".into()));
                 }
                 p.start_if_due(now, deadline, PROBE_EVERY, guest, |g, t| g.ping(t));
                 Ok(Poll::Pending)
             }
             State::Command(c) => c.poll(now, deadline, guest),
+            State::Job(j) => j.poll(now, deadline, guest),
         }
+    }
+}
+
+/// A `job_done` condition, or with `output` a `job_output` condition. Each probe reads the job's files once.
+struct JobState {
+    job: Uuid,
+    output: Option<Regex>,
+    /// Where the next read of the job's output starts: the start of the last unfinished line read so far.
+    from: u64,
+    os_checked: bool,
+    probe: Probe<JobStep>,
+}
+
+/// What one job probe found.
+enum JobStep {
+    Windows,
+    Missing,
+    /// The agent did not answer; the next probe tries again.
+    Unavailable,
+    Read {
+        state: jobs::State,
+        data: Vec<u8>,
+        from: u64,
+    },
+}
+
+impl JobState {
+    fn new(job: Uuid, output: Option<Regex>, since: u64) -> Self {
+        Self {
+            job,
+            output,
+            from: since,
+            os_checked: false,
+            probe: Probe::default(),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        if self.output.is_some() {
+            "job_output"
+        } else {
+            "job_done"
+        }
+    }
+
+    /// Takes in a finished probe's result. Returns a hit when the condition holds.
+    fn absorb(&mut self) -> Result<Option<Poll>> {
+        let Some(step) = self.probe.take() else {
+            return Ok(None);
+        };
+        let (state, data, from) = match step {
+            JobStep::Windows => bail!(
+                "job conditions are not available for Windows guests yet; they come with Windows job support \
+                 (live-interaction run 3)"
+            ),
+            JobStep::Missing => bail!("no job {} in this guest", self.job),
+            JobStep::Unavailable => return Ok(None),
+            JobStep::Read { state, data, from } => (state, data, from),
+        };
+        self.os_checked = true;
+        let Some(regex) = &self.output else {
+            return Ok(match state {
+                jobs::State::Exited(code) => Some(Poll::hit(format!("exited with code {code}"))),
+                jobs::State::EndedWithoutStatus => Some(Poll::hit("ended without status".into())),
+                jobs::State::Starting | jobs::State::Running => None,
+            });
+        };
+        if let Some(m) = regex.find(&data) {
+            return Ok(Some(Poll::Hit {
+                text: text(m.as_bytes()),
+                next: Some(from + m.end() as u64),
+                generation: None,
+            }));
+        }
+        // Read on from the last unfinished line, so a match split across reads is found. A full read with no line
+        // end moves past it, so one long line cannot hold the reads in place.
+        self.from = match data.iter().rposition(|&b| b == b'\n') {
+            Some(p) => from + p as u64 + 1,
+            None if data.len() >= MAX_JOB_READ => from + data.len() as u64,
+            None => from,
+        };
+        Ok(None)
+    }
+
+    fn poll(&mut self, now: Instant, deadline: Instant, guest: &Arc<dyn Guest>) -> Result<Poll> {
+        if let Some(hit) = self.absorb()? {
+            return Ok(hit);
+        }
+        let (job, from, os_checked) = (self.job, self.from, self.os_checked);
+        // job_done needs only the state; reading one byte keeps its probe cheap.
+        let max = if self.output.is_some() {
+            MAX_JOB_READ
+        } else {
+            1
+        };
+        self.probe
+            .start_if_due(now, deadline, PROBE_EVERY, guest, move |g, t| {
+                job_step(g, &job, from, max, os_checked, t)
+            });
+        Ok(Poll::Pending)
+    }
+}
+
+/// One job probe: checks the OS once, then reads the job's state and output from `from`.
+fn job_step(
+    guest: &dyn Guest,
+    job: &Uuid,
+    from: u64,
+    max: usize,
+    os_checked: bool,
+    timeout_secs: i32,
+) -> JobStep {
+    if !os_checked {
+        match guest.os(timeout_secs) {
+            Ok(GuestOs::Windows) => return JobStep::Windows,
+            Ok(GuestOs::Linux) => {}
+            Err(_) => return JobStep::Unavailable,
+        }
+    }
+    match guest.job_read(job, from, max, timeout_secs) {
+        Ok(Some(r)) => JobStep::Read {
+            state: r.state,
+            data: r.data,
+            from,
+        },
+        Ok(None) => JobStep::Missing,
+        Err(_) => JobStep::Unavailable,
     }
 }
 
@@ -550,7 +775,8 @@ impl ConsoleState {
             if let Some((next, text)) = find(&self.regex, self.strip_ansi, self.from, data) {
                 return Poll::Hit {
                     text,
-                    next: Some((next, self.generation)),
+                    next: Some(next),
+                    generation: Some(self.generation),
                 };
             }
         }
@@ -687,10 +913,7 @@ impl CommandState {
                 self.pid = None;
                 self.last_code = code;
                 if code == Some(0) {
-                    return Ok(Some(Poll::Hit {
-                        text: text(&output),
-                        next: None,
-                    }));
+                    return Ok(Some(Poll::hit(text(&output))));
                 }
             }
         }
@@ -854,6 +1077,10 @@ mod tests {
         status_errors: AtomicU32,
         /// When set, every agent call blocks until the sender is dropped.
         hang: Option<Mutex<Receiver<()>>>,
+        /// The job's state and whole output as each read sees it; the last entry repeats. Empty means no job.
+        job: Mutex<Vec<(jobs::State, &'static [u8])>>,
+        /// The `since` of each job read.
+        job_reads: Mutex<Vec<u64>>,
     }
 
     impl FakeGuest {
@@ -867,6 +1094,8 @@ mod tests {
                 starts: AtomicU32::new(0),
                 status_errors: AtomicU32::new(0),
                 hang: None,
+                job: Mutex::new(vec![]),
+                job_reads: Mutex::new(vec![]),
             }
         }
 
@@ -927,6 +1156,34 @@ mod tests {
                 }
             })
         }
+
+        fn job_read(
+            &self,
+            _: &Uuid,
+            since: u64,
+            max_bytes: usize,
+            _: i32,
+        ) -> Result<Option<jobs::Read>> {
+            self.job_reads.lock().unwrap().push(since);
+            let mut job = self.job.lock().unwrap();
+            let Some(&(state, output)) = job.first() else {
+                return Ok(None);
+            };
+            if job.len() > 1 {
+                job.remove(0);
+            }
+            let from = (since as usize).min(output.len());
+            let data = output[from..(from + max_bytes).min(output.len())].to_vec();
+            Ok(Some(jobs::Read {
+                state,
+                next: since + data.len() as u64,
+                data,
+            }))
+        }
+    }
+
+    fn job(id: &Uuid) -> String {
+        id.hyphenated().to_string()
     }
 
     fn ms(n: u64) -> Duration {
@@ -951,7 +1208,7 @@ mod tests {
         match o {
             Outcome::Matched {
                 index, text, next, ..
-            } => (*index, text.as_str(), next.map(|n| n.0)),
+            } => (*index, text.as_str(), *next),
             other => panic!("expected a match, got {other:?}"),
         }
     }
@@ -977,7 +1234,7 @@ mod tests {
         let Outcome::TimedOut { resume, .. } = o else {
             panic!("expected a timeout, got {o:?}")
         };
-        assert_eq!(resume, vec![(0, 9, 7)]);
+        assert_eq!(resume, vec![(0, 9, Some(7))]);
         // The next call resumes there and matches the prompt split across the two calls.
         let again = Condition::Console {
             pattern: "login:".into(),
@@ -1062,6 +1319,100 @@ mod tests {
         let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
         assert_eq!(matched(&o).0, 0);
         assert_eq!(guest.starts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn job_output_reads_on_from_the_last_unfinished_line() {
+        let id = Uuid::new_v4();
+        let guest = Arc::new(FakeGuest {
+            job: Mutex::new(vec![
+                (jobs::State::Running, b"step 1\nstep 3 is"),
+                (jobs::State::Running, b"step 1\nstep 3 is done\n"),
+            ]),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let cond = Condition::JobOutput {
+            job: job(&id),
+            pattern: "step 3 is done".into(),
+            since: None,
+        };
+        let checks = validate_conditions(&Config::default(), &[cond]).unwrap();
+        let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o), (0, "step 3 is done", Some(21)));
+        assert_eq!(*guest.job_reads.lock().unwrap(), [0, 7]);
+    }
+
+    #[test]
+    fn a_job_output_timeout_returns_a_resume_point_without_a_generation() {
+        let id = Uuid::new_v4();
+        let guest = Arc::new(FakeGuest {
+            job: Mutex::new(vec![(jobs::State::Running, b"line\npart")]),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let cond = Condition::JobOutput {
+            job: job(&id),
+            pattern: "never".into(),
+            since: Some(0),
+        };
+        let checks = validate_conditions(&Config::default(), &[cond]).unwrap();
+        let o = run(&env, guest, checks, Duration::from_secs(3)).unwrap();
+        let Outcome::TimedOut { resume, .. } = &o else {
+            panic!("expected a timeout, got {o:?}")
+        };
+        assert_eq!(resume, &[(0, 5, None)]);
+        let json = o.to_json(Duration::from_secs(3));
+        assert!(json["resume"][0].get("generation").is_none(), "{json}");
+    }
+
+    #[test]
+    fn job_done_reports_the_exit_code_and_refuses_an_unknown_job() {
+        let id = Uuid::new_v4();
+        let guest = Arc::new(FakeGuest {
+            job: Mutex::new(vec![
+                (jobs::State::Running, b""),
+                (jobs::State::Exited(3), b""),
+            ]),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let done = Condition::JobDone { job: job(&id) };
+        let checks = validate_conditions(&Config::default(), std::slice::from_ref(&done)).unwrap();
+        let o = run(&env, guest, checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o), (0, "exited with code 3", None));
+        let checks = validate_conditions(&Config::default(), &[done]).unwrap();
+        let err = run(
+            &env,
+            Arc::new(FakeGuest::new()),
+            checks,
+            Duration::from_secs(5),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no job"), "{err}");
+    }
+
+    #[test]
+    fn job_conditions_pass_read_only_mode_and_need_a_job_id() {
+        let read_only = Config {
+            read_only: true,
+            ..Config::default()
+        };
+        let id = job(&Uuid::new_v4());
+        let conds = [
+            Condition::JobDone { job: id.clone() },
+            Condition::JobOutput {
+                job: id,
+                pattern: "x".into(),
+                since: None,
+            },
+        ];
+        assert!(validate_conditions(&read_only, &conds).is_ok());
+        let bad = Condition::JobDone {
+            job: "../etc".into(),
+        };
+        assert!(validate_conditions(&read_only, &[bad]).is_err());
     }
 
     #[test]

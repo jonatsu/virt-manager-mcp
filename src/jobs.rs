@@ -250,10 +250,11 @@ pub struct Read {
 }
 
 /// Reads job `id`'s output from `since`, at most `max_bytes`, and its state, through the agent's file calls.
-pub fn read(agent: &Agent, id: &Uuid, since: u64, max_bytes: usize) -> Result<Read> {
+/// Returns `None` when the guest has no such job.
+pub fn read(agent: &Agent, id: &Uuid, since: u64, max_bytes: usize) -> Result<Option<Read>> {
     let dir = job_dir(id);
     if small_file(agent, &format!("{dir}/cmd"))?.is_none() {
-        bail!("no job {id} in this guest");
+        return Ok(None);
     }
     // The state comes first: output read after an exit code is complete.
     let exit = small_file(agent, &format!("{dir}/exit"))?;
@@ -280,11 +281,11 @@ pub fn read(agent: &Agent, id: &Uuid, since: u64, max_bytes: usize) -> Result<Re
         Err(e) => return Err(e),
     };
     data.truncate(whole_chars(&data, data.len() >= max_bytes));
-    Ok(Read {
+    Ok(Some(Read {
         state,
         next: since + data.len() as u64,
         data,
-    })
+    }))
 }
 
 /// A small file's text, or `None` when it does not exist.

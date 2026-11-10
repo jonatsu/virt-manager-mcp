@@ -1,0 +1,110 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-w",
+      "template": "debian13",
+      "wait_for_agent_secs": 120
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-w"
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
+      "command": "i=0; while [ $i -lt 30 ]; do echo step $i; i=$((i+1)); sleep 1; done"
+    },
+    "save": {
+      "steps": "job"
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${steps}",
+          "pattern": "step 3"
+        },
+        {
+          "kind": "console",
+          "pattern": "Kernel panic"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "__time__"
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
+      "command": "sleep 3; exit 5"
+    },
+    "save": {
+      "short": "job"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "job_done",
+          "job": "${short}"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "timeout_secs": 3,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${steps}",
+          "pattern": "never printed"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-w",
+      "conditions": [
+        {
+          "kind": "job_done",
+          "job": "00000000-0000-4000-8000-000000000000"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-w",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-w"
+    }
+  }
+]

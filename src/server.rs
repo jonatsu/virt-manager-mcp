@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -910,13 +910,15 @@ impl VirtServer {
     #[tool(
         description = "Wait until the first of several conditions holds on a VM, and return which one. Kinds: \
         `console` (the open console session's output matches a regex; ANSI-stripped by default), `agent` (the guest \
-        agent answers) and `command` (a shell command run through the guest agent exits 0; Linux guests, not in \
-        read-only mode). Results: `matched` with the condition's index and the matched text (lowest index wins a \
-        tie; console matches add `next` and `generation`, and move the session's wait cursor past the match); \
-        `closed` when the VM stops or restarts or the console session ends; `timed_out` with a resume point per \
-        console condition (pass it back as `since` and `generation` to keep matching output that arrived in \
-        between) and each command's running PID. A console condition without `since` starts where the last \
-        console_write began, so write first, then wait. A wait never changes what console_read returns."
+        agent answers), `command` (a shell command run through the guest agent exits 0; Linux guests, not in \
+        read-only mode), `job_done` (a job from job_start has ended) and `job_output` (a job's output from `since` \
+        matches a regex); job conditions work on Linux guests, read-only mode included. Results: `matched` with the \
+        condition's index and the matched text (lowest index wins a tie; console and job_output matches add `next`, \
+        console matches also `generation`, and a console match moves the session's wait cursor past it); `closed` \
+        when the VM stops or restarts or the console session ends; `timed_out` with a resume point per console and \
+        job_output condition (pass it back as `since`, with `generation` for a console, to keep matching output that \
+        arrived in between) and each command's running PID. A console condition without `since` starts where the \
+        last console_write began, so write first, then wait. A wait never changes what console_read returns."
     )]
     async fn wait_for(
         &self,
@@ -999,7 +1001,8 @@ impl VirtServer {
             let agent = s.agent(&dom);
             jobs::require_linux(&agent)?;
             let max = p.max_bytes.unwrap_or(s.hv.config.limits.max_output_bytes);
-            let r = jobs::read(&agent, &id, p.since, max)?;
+            let r = jobs::read(&agent, &id, p.since, max)?
+                .ok_or_else(|| anyhow!("no job {id} in this guest"))?;
             let meta = json!({
                 "job": p.job,
                 "state": r.state.name(),
