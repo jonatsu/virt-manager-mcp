@@ -103,7 +103,8 @@ Reviews of earlier work found these. None blocks the server's use.
     keep their copied text and change only their own notes.
 07. **Done: an expiry no longer hides a failed volume deletion.** A volume that cannot be deleted keeps the domain, the
     expiry counts as failed so `virtmanager-mcp sweep` exits non-zero, and the next sweep retries it. Unit tests cover
-    the decision; producing the failure needs root, so the test-bed README lists the manual check.
+    the decision. Producing the failure needs root, so the test-bed README lists a manual check; it passed at
+    `1f4d8ed`, and the run 1 execution record holds its result.
 08. **Done: a refused `reset_vm` keeps the console open.** `reset_vm` closes the console only once `manage::reset` has
     passed every check, just before it forces the VM off. In `templates-reset-saved.json`, a console opened before a
     refused reset still reads output after it; in `templates-reset-uefi.json`, a reset that goes ahead closes it.
@@ -180,7 +181,7 @@ The baseline, the defects, outcome 1 and follow-ups 7 to 9 are done. Outcome 1 w
 and the plan's execution record holds its evidence. Follow-ups 7 to 9 landed in `63e28ab`, `31bb732`, `805a5d9` and
 `3a64f86`. At `3a64f86`, the gate and `cargo +1.89 test --locked` passed (52 tests), and the reset, expiry and
 outside-disk test-bed cases passed with no `t-*` VM or volume left and the template checksum unchanged. A separate
-conformance review found no material mismatch. The manual root check for follow-up 7 has not been run yet.
+conformance review found no material mismatch. The manual root check for follow-up 7 passed at `1f4d8ed`.
 
 Outcome 2 comes from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each with
 its own plan. Run 1 is done, per
