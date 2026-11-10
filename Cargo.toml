@@ -2,7 +2,7 @@
 name = "virtmanager-mcp"
 version = "0.1.0"
 edition = "2024"
-# The minimum Rust version; CI builds with it.
+# The minimum Rust version, which rten 0.28 (used by ocrs 0.14) requires; CI builds with it.
 rust-version = "1.94"
 
 [dependencies]
@@ -12,9 +12,13 @@ base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "pnm"] }
+ocrs = "0.14"
+rayon = "1.12.0"
 regex = "1.13"
 rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 roxmltree = "0.21.1"
+# ONNX loading comes from ocrs's default `onnx` feature.
+rten = { version = "0.28", default-features = false }
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

@@ -79,8 +79,17 @@ enum Command {
     Sweep,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // SAFETY: the tokio runtime, and with it every other thread, starts below.
+    unsafe { display::limit_ocr_threads() };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the tokio runtime")?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     // stdout carries the MCP protocol in stdio mode, so log to stderr.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)

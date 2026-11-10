@@ -1,15 +1,137 @@
-//! Graphical console: screenshots and keyboard input.
+//! Graphical console: screenshots, keyboard input and text recognition.
 
+use std::borrow::Cow;
 use std::io::Cursor;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use image::{ImageFormat, imageops::FilterType};
+use image::{ImageFormat, RgbImage, imageops::FilterType};
+use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use virt::domain::Domain;
 use virt::stream::Stream;
 use virt::sys;
 
+use crate::config::{OCR_DETECTION_MODEL, OCR_RECOGNITION_MODEL};
 use crate::hypervisor::Hypervisor;
+
+/// Threads that OCR runs on, so that a wait on a busy screen leaves the host's other cores to its VMs.
+pub const OCR_THREADS: usize = 4;
+
+/// Sizes the thread pool that OCR runs in to [`OCR_THREADS`].
+///
+/// `ocrs` runs its models and its line recognition in rten's process-wide rayon pool, and takes no other pool: a
+/// `rayon::ThreadPool::install` around a call does not bound that work. rten sizes its pool once, on first use, from
+/// `RTEN_NUM_THREADS`. Nothing else in the server uses rten, so that pool is OCR's own.
+///
+/// # Safety
+///
+/// Call it before the process starts any other thread, as [`std::env::set_var`] requires.
+pub unsafe fn limit_ocr_threads() {
+    // SAFETY: the caller guarantees that no other thread runs yet.
+    unsafe { std::env::set_var("RTEN_NUM_THREADS", OCR_THREADS.to_string()) };
+}
+
+/// Reads text lines from screen frames with the `ocrs` models in `display.ocr_models`. It is built once, and probe
+/// threads share it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
+)]
+pub struct Recognizer {
+    engine: OcrEngine,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
+)]
+impl Recognizer {
+    /// Loads both models from `dir`, which `Config::validate` has checked.
+    pub fn load(dir: &Path) -> Result<Self> {
+        let load = |name: &str| {
+            let path = dir.join(name);
+            rten::Model::load_file(&path)
+                .with_context(|| format!("loading OCR model {}", path.display()))
+        };
+        let engine = OcrEngine::new(OcrEngineParams {
+            detection_model: Some(load(OCR_DETECTION_MODEL)?),
+            recognition_model: Some(load(OCR_RECOGNITION_MODEL)?),
+            ..OcrEngineParams::default()
+        })
+        .context("building the OCR engine")?;
+        let threads = rten::thread_pool().run(rayon::current_num_threads);
+        tracing::info!(threads, "loaded the OCR models from {}", dir.display());
+        Ok(Self { engine })
+    }
+
+    /// Returns the text lines of `frame`, inverting a dark frame first.
+    pub fn read_lines(&self, frame: &RgbImage) -> Result<Vec<String>> {
+        self.recognise(&prepared(frame))
+    }
+
+    /// Returns the text lines of `image` as it is.
+    fn recognise(&self, image: &RgbImage) -> Result<Vec<String>> {
+        let source = ImageSource::from_bytes(image.as_raw(), image.dimensions())
+            .context("preparing a frame for OCR")?;
+        let input = self.engine.prepare_input(source)?;
+        let words = self.engine.detect_words(&input)?;
+        let lines = self.engine.find_text_lines(&input, &words);
+        let texts = self.engine.recognize_text(&input, &lines)?;
+        Ok(texts
+            .into_iter()
+            .flatten()
+            .map(|line| line.to_string())
+            .filter(|text| !text.trim().is_empty())
+            .collect())
+    }
+}
+
+// Probe threads share one recogniser behind an `Arc`.
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<Recognizer>();
+};
+
+/// Returns `frame` ready for OCR: inverted when its mean luminance is below one half, because `ocrs` misreads light
+/// text on a dark background, as on a text console.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
+)]
+fn prepared(frame: &RgbImage) -> Cow<'_, RgbImage> {
+    if is_dark(frame) {
+        let mut inverted = frame.clone();
+        image::imageops::invert(&mut inverted);
+        Cow::Owned(inverted)
+    } else {
+        Cow::Borrowed(frame)
+    }
+}
+
+/// Whether the mean luminance of `image`, with the Rec. 709 weights on the encoded values, is below one half. The
+/// sum is exact integer arithmetic, so a frame at exactly one half is not dark. An empty image is not dark.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by screen_text in run 2 unit 5")
+)]
+fn is_dark(image: &RgbImage) -> bool {
+    // Rec. 709 luma weights in units of 1/10000; they sum to 10000.
+    const WEIGHTS: [u64; 3] = [2126, 7152, 722];
+    let pixels = u64::from(image.width()) * u64::from(image.height());
+    let sum: u64 = image
+        .pixels()
+        .map(|p| {
+            WEIGHTS
+                .iter()
+                .zip(p.0)
+                .map(|(w, c)| w * u64::from(c))
+                .sum::<u64>()
+        })
+        .sum();
+    // mean = sum / (pixels * 255 * 10000) < 1/2
+    2 * sum < pixels * 255 * 10_000
+}
 
 /// Takes a screenshot and returns it as PNG bytes plus the final (width, height).
 pub fn screenshot(
@@ -275,5 +397,218 @@ mod tests {
         assert_eq!(char_to_keys('|'), Some(vec![KEY_LEFTSHIFT, 43]));
         assert_eq!(char_to_keys('\n'), Some(vec![28]));
         assert_eq!(char_to_keys('é'), None);
+    }
+
+    /// A `width`x1 image whose first `white` pixels are white and the rest black.
+    fn stripe(width: u32, white: u32) -> RgbImage {
+        RgbImage::from_fn(width, 1, |x, _| {
+            if x < white {
+                image::Rgb([255, 255, 255])
+            } else {
+                image::Rgb([0, 0, 0])
+            }
+        })
+    }
+
+    #[test]
+    fn only_frames_darker_than_one_half_are_inverted() {
+        let dark = stripe(10, 4);
+        let inverted = prepared(&dark);
+        assert!(matches!(inverted, Cow::Owned(_)));
+        let expected = RgbImage::from_fn(10, 1, |x, _| {
+            if x < 4 {
+                image::Rgb([0, 0, 0])
+            } else {
+                image::Rgb([255, 255, 255])
+            }
+        });
+        assert_eq!(*inverted, expected);
+
+        // Exactly one half is not below it.
+        assert!(matches!(prepared(&stripe(10, 5)), Cow::Borrowed(_)));
+        assert!(matches!(prepared(&stripe(10, 9)), Cow::Borrowed(_)));
+        assert!(matches!(prepared(&RgbImage::new(0, 0)), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn luminance_weights_green_most() {
+        let solid = |rgb| RgbImage::from_pixel(2, 2, image::Rgb(rgb));
+        assert!(!is_dark(&solid([255, 255, 255])));
+        assert!(is_dark(&solid([0, 0, 0])));
+        // Pure green is light and pure red and blue are dark, so a blue screen is inverted and a green one is not.
+        assert!(!is_dark(&solid([0, 255, 0])));
+        assert!(is_dark(&solid([255, 0, 0])));
+        assert!(is_dark(&solid([0, 0, 255])));
+        // Mid-grey: 128 is just above one half of 255, 127 just below.
+        assert!(!is_dark(&solid([128, 128, 128])));
+        assert!(is_dark(&solid([127, 127, 127])));
+    }
+
+    // Tests with the OCR models. They read the probe's screenshots in docs/research/2026-11-10-ocr-probe/. Run them
+    // with `VIRTMANAGER_OCR_MODELS=<dir> RTEN_NUM_THREADS=4 cargo test -- --ignored --nocapture`; the second variable
+    // gives rten the pool size the server sets, so the printed times match the server's.
+
+    fn models_recognizer() -> Recognizer {
+        let dir = std::env::var_os("VIRTMANAGER_OCR_MODELS").expect(
+            "set VIRTMANAGER_OCR_MODELS to the directory scripts/fetch-ocr-models.sh filled",
+        );
+        Recognizer::load(Path::new(&dir)).unwrap()
+    }
+
+    fn probe_screen(name: &str) -> RgbImage {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/research/2026-11-10-ocr-probe")
+            .join(name);
+        image::open(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .into_rgb8()
+    }
+
+    /// The probe's key strings for each saved screenshot, with the number that `ocrs` 0.12.2 read exactly on the
+    /// full frame, from the recognition table of docs/research/2026-11-10-ocr-probe.md. The location and keyboard
+    /// screens of the installer have no saved screenshot, so their six strings, all read exactly, are left out.
+    const PROBE_KEYS: [(&str, usize, &[&str]); 10] = [
+        (
+            "deb13-console-login.png",
+            1,
+            &["Debian GNU/Linux 13", "trial-deb13 login:", "tty1"],
+        ),
+        (
+            "vga-text-boot.png",
+            0,
+            &[
+                "SeaBIOS",
+                "Booting from Hard Disk...",
+                "GRUB loading.",
+                "Welcome to GRUB!",
+            ],
+        ),
+        (
+            "deb-installer-grub.png",
+            1,
+            &[
+                "Debian GNU/Linux 13.7.0",
+                "UEFI Installer menu",
+                "Graphical install",
+                "Advanced options ...",
+                "Install with speech synthesis",
+                "GRUB Command line",
+            ],
+        ),
+        (
+            "deb-installer-language.png",
+            4,
+            &["Select a language", "English", "Continue", "Go Back"],
+        ),
+        (
+            "deb-installer-progress.png",
+            3,
+            &[
+                "Load installer components from installation media",
+                "Loading additional components",
+                "Retrieving grub-installer",
+            ],
+        ),
+        (
+            "deb-installer-hostname.png",
+            2,
+            &["Hostname:", "debianxxxxxxxxxx", "Continue"],
+        ),
+        (
+            "win11-press-any-key.png",
+            1,
+            &["Press any key to boot from CD or DVD"],
+        ),
+        (
+            "win11-setup-language.png",
+            5,
+            &[
+                "Windows 11 Setup",
+                "Select language settings",
+                "Language to install",
+                "English (United States)",
+                "Next",
+            ],
+        ),
+        (
+            "win11-setup-keyboard.png",
+            4,
+            &[
+                "Select keyboard settings",
+                "Keyboard or input method",
+                "US",
+                "Next",
+            ],
+        ),
+        (
+            "win11-setup-option.png",
+            4,
+            &[
+                "Select setup option",
+                "Install Windows 11",
+                "Repair my PC",
+                "I agree everything will be deleted",
+                "Next",
+            ],
+        ),
+    ];
+
+    /// `ocrs` 0.12.2 read 25 of the 38 key strings on these 10 screens exactly (31 of 44 with the two screens left
+    /// out). The engine must read at least as many without inversion. A read is exact when the string occurs,
+    /// case-sensitively, in the recognised lines joined by newlines, as `screen_text` matches them.
+    #[test]
+    #[ignore = "needs the OCR models; set VIRTMANAGER_OCR_MODELS"]
+    fn raw_reads_match_ocrs_0_12_on_the_probe_screens() {
+        const BASELINE_0_12: usize = 25;
+        assert_eq!(
+            PROBE_KEYS.iter().map(|(_, n, _)| n).sum::<usize>(),
+            BASELINE_0_12
+        );
+        let recognizer = models_recognizer();
+        println!(
+            "rten pool: {} threads",
+            rten::thread_pool().run(rayon::current_num_threads)
+        );
+        let mut total = 0;
+        for (name, baseline, keys) in PROBE_KEYS {
+            let frame = probe_screen(name);
+            let started = std::time::Instant::now();
+            let text = recognizer.recognise(&frame).unwrap().join("\n");
+            let elapsed = started.elapsed();
+            let missed: Vec<_> = keys.iter().filter(|k| !text.contains(*k)).collect();
+            let exact = keys.len() - missed.len();
+            total += exact;
+            println!(
+                "{name}: {exact} of {} exact (0.12: {baseline}), {} ms; missed {missed:?}\n  {text:?}",
+                keys.len(),
+                elapsed.as_millis()
+            );
+        }
+        println!("total: {total} exact (0.12: {BASELINE_0_12})");
+        assert!(
+            total >= BASELINE_0_12,
+            "read {total} key strings exactly, below ocrs 0.12's {BASELINE_0_12}"
+        );
+    }
+
+    /// Every string a run-2 test-bed case waits for on a saved screenshot, read through the recogniser with
+    /// inversion. "Select your location" has no saved screenshot; the live case of run 2 unit 7 checks it.
+    #[test]
+    #[ignore = "needs the OCR models; set VIRTMANAGER_OCR_MODELS"]
+    fn recognizer_reads_the_case_strings() {
+        let recognizer = models_recognizer();
+        for (name, wanted) in [
+            ("deb-installer-grub.png", "Graphical install"),
+            ("deb-installer-language.png", "Select a language"),
+            ("win11-setup-language.png", "Windows 11 Setup"),
+        ] {
+            let started = std::time::Instant::now();
+            let text = recognizer
+                .read_lines(&probe_screen(name))
+                .unwrap()
+                .join("\n");
+            println!("{name}: {} ms\n  {text:?}", started.elapsed().as_millis());
+            assert!(text.contains(wanted), "{name}: no {wanted:?} in {text:?}");
+        }
     }
 }

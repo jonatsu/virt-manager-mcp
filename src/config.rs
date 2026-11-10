@@ -29,7 +29,22 @@ pub struct Config {
     pub limits: Limits,
     pub http: Http,
     pub manage: Manage,
+    pub display: DisplayOptions,
 }
+
+/// Graphical display settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DisplayOptions {
+    /// Absolute directory holding the `ocrs` models that `scripts/fetch-ocr-models.sh` downloads. Unset turns
+    /// screen text recognition off; set, the directory and both model files must exist.
+    pub ocr_models: Option<PathBuf>,
+}
+
+/// File name of the `ocrs` text detection model in `display.ocr_models`.
+pub const OCR_DETECTION_MODEL: &str = "text-detection.onnx";
+/// File name of the `ocrs` text recognition model in `display.ocr_models`.
+pub const OCR_RECOGNITION_MODEL: &str = "text-recognition.onnx";
 
 /// VM management (create, delete, reconfigure, snapshots). Everything is off by default.
 #[derive(Debug, Clone, Deserialize)]
@@ -136,6 +151,7 @@ impl Default for Config {
             limits: Limits::default(),
             http: Http::default(),
             manage: Manage::default(),
+            display: DisplayOptions::default(),
         }
     }
 }
@@ -225,6 +241,9 @@ impl Config {
         }
         canonicalize_dirs(&mut self.host_share_dirs, "host_share_dirs")?;
         canonicalize_dirs(&mut self.manage.iso_dirs, "manage.iso_dirs")?;
+        if let Some(dir) = &mut self.display.ocr_models {
+            *dir = ocr_models_dir(dir)?;
+        }
         let m = &self.manage;
         if m.create && m.disk_pool.is_empty() {
             bail!("manage.create needs manage.disk_pool");
@@ -308,6 +327,26 @@ fn canonicalize_dirs(dirs: &mut [PathBuf], key: &str) -> Result<()> {
         *dir = real;
     }
     Ok(())
+}
+
+/// Checks that `dir` is an absolute directory holding both OCR models, and returns it resolved.
+fn ocr_models_dir(dir: &Path) -> Result<PathBuf> {
+    const KEY: &str = "display.ocr_models";
+    if !dir.is_absolute() {
+        bail!("{KEY}: {} must be an absolute path", dir.display());
+    }
+    let mut dirs = [dir.to_path_buf()];
+    canonicalize_dirs(&mut dirs, KEY)?;
+    let [real] = dirs;
+    for model in [OCR_DETECTION_MODEL, OCR_RECOGNITION_MODEL] {
+        if !real.join(model).is_file() {
+            bail!(
+                "{KEY}: {} has no {model}; scripts/fetch-ocr-models.sh downloads it",
+                dir.display()
+            );
+        }
+    }
+    Ok(real)
 }
 
 fn file_in(dirs: &[PathBuf], path: &str, key: &str) -> Result<PathBuf> {
@@ -491,6 +530,36 @@ mod tests {
         ] {
             assert!(!is_hostname(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn ocr_models_must_hold_both_models_when_set() {
+        assert_eq!(parse("").unwrap().display.ocr_models, None);
+
+        let root =
+            std::env::temp_dir().join(format!("virtmanager-mcp-ocr-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_for =
+            |dir: &Path| format!("[display]\nocr_models = {:?}", dir.to_str().unwrap());
+        let refusal = |dir: &Path| parse(&config_for(dir)).unwrap_err().to_string();
+
+        let err = refusal(&root.join("missing"));
+        assert!(err.contains("display.ocr_models"), "{err}");
+        let err = refusal(Path::new("relative/models"));
+        assert!(err.contains("absolute"), "{err}");
+        std::fs::write(root.join(OCR_DETECTION_MODEL), "").unwrap();
+        let err = refusal(&root);
+        assert!(err.contains(OCR_RECOGNITION_MODEL), "{err}");
+        let err = refusal(&root.join(OCR_DETECTION_MODEL));
+        assert!(err.contains("not a directory"), "{err}");
+
+        std::fs::write(root.join(OCR_RECOGNITION_MODEL), "").unwrap();
+        let config = parse(&config_for(&root)).unwrap();
+        assert_eq!(
+            config.display.ocr_models,
+            Some(root.canonicalize().unwrap())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
