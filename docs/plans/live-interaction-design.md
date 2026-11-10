@@ -1,0 +1,217 @@
+# Reliable interaction with a live guest: design
+
+Status: draft, revised for a plan-critic review. Once built, the code wins and this design follows it.
+Basis: roadmap outcome 2 in [`fork-roadmap.md`](fork-roadmap.md), with evidence in
+[`2026-11-09-vm-management-mcp-evaluation.md`](../research/2026-11-09-vm-management-mcp-evaluation.md).
+
+## Summary
+
+An agent can drive any guest, with or without a guest agent, without losing input and without guessing when the guest
+is ready. One new tool, `wait_for`, blocks until the first of several conditions holds: console output, screen text, a
+settled screen, the guest agent, a command, or a background job. A mouse tool and region screenshots complete the
+screen as a channel. Job tools run long commands in agent-equipped guests and read their output as it grows. The
+outcome lands in three runs: waits, console and Linux jobs; then OCR, screen and mouse; then Windows.
+
+## Decisions
+
+| Decision | Chosen | Why | Status |
+| -- | -- | -- | -- |
+| Guests served | Agentless guests on equal footing with agent-equipped ones: installers, bootloaders, kernels, Windows, appliances | These are planned test targets, and the console and screen are their only channels | resolved |
+| Reading screen text | OCR in the server with `ocrs`, plus a wait until the screen settles | A server-side match lets an agent wait without receiving repeated images | provisional: a probe on GRUB, Debian installer and Windows setup screenshots decides between `ocrs` and Tesseract |
+| Mouse | QEMU monitor `input-send-event`, sent through libvirt, with a USB tablet for absolute positions | Works with SPICE and VNC displays; the server builds the one command form itself | resolved |
+| Waiting | One `wait_for` tool with a list of conditions, returning on the first that holds | An agent waiting for success must also stop at a failure such as a kernel panic, across channels | resolved |
+| Call length | At most `limits.max_wait_secs` (default 50 s) per wait; a wait that runs out returns resume points | Codex and some Claude Code paths cut calls at 60 s | resolved |
+| Expect-style sessions | The agent composes `console_write`, `type_text` or `send_keys` with `wait_for`; no script tool | Each step's result lets the agent react; `jonatsu/serial-mcp-server`'s script runner is the model if one is wanted later | resolved |
+| Input pacing and layout | `console_write` gains per-character or per-chunk pacing with a cap, as in `serial-mcp-server`; `type_text` stays US layout | Waiting removes the main input loss; `send_keys` reaches any key | resolved |
+| Long jobs | `job_start`, `job_read`, `job_stop`, `job_list`, with output in a log file per job in the guest | `guest-exec-status` returns output only after the process exits (QEMU guest agent protocol reference) | resolved |
+| Job platforms | Linux and Windows, both within this outcome | Windows is a named target | resolved |
+| Test guests | Debian netinst, OpenWrt x86, a kernel-panic boot on a template VM, Windows 11 Pro | Covers every channel and both job platforms | provisional: the Windows guest agent needs the `virtio-win` serial driver and `qemu-ga`, untried on this host |
+| Delivery | Three runs, each landed and pushed before the next | Each run is a safe stopping point; `wait_for` is proven before later runs extend it | resolved |
+| Test-guest memory | Watched and kept reasonable, with no strict cap; Windows may use more | No builds run on the host now | resolved |
+
+Three defaults follow from the guardrails. The operator downloads the OCR models with a script and names their path in
+the config; the server never fetches from the network. Patterns use the `regex` crate, which matches in linear time, so
+no pattern can stall a wait. The server sends only `input-send-event` commands it builds itself; no tool accepts raw
+monitor text.
+
+## Behaviour
+
+```mermaid
+flowchart LR
+  W[wait_for] --> C[console pattern]
+  W --> S[screen text / settled]
+  W --> A[guest agent answers]
+  W --> X[command succeeds]
+  W --> J[job ended / job output]
+  C --> CS[console session buffer]
+  S --> SS[virDomainScreenshot + OCR]
+  A --> GA[guest-ping]
+  X --> GA2[guest-exec]
+  J --> GF[job files in the guest]
+```
+
+### `wait_for`
+
+It takes a VM, a timeout and a list of conditions. The timeout is capped by `limits.max_wait_secs`, which must be
+above 0. The call returns one of three results:
+
+- **matched:** the index and kind of the first condition that holds, the matched text, and, for console and job
+  conditions, `next`, the offset just past the match. When several hold in the same poll, the lowest index wins. On
+  request the result adds a screenshot taken at the match.
+- **closed:** a console condition's session ended, or the VM stopped. The result says which, at once, instead of
+  running to the timeout.
+- **timed out:** the result returns each console and job condition's resume point, the start of the last unfinished
+  line, so the next call still matches output that arrived in between, including a prompt split across the two calls.
+
+Condition kinds, by run:
+
+| Kind | Holds when | Run |
+| -- | -- | -- |
+| `console` | the console session's output from `since` matches a pattern | 1 |
+| `agent` | the guest agent answers `guest-ping` | 1 |
+| `command` | a command run through the agent exits 0 | 1 (Linux), 3 (Windows) |
+| `job_done` | a job has exited, or has ended without writing its status | 1 (Linux), 3 (Windows) |
+| `job_output` | a job's output from `since` matches a pattern | 1 (Linux), 3 (Windows) |
+| `screen_text` | OCR of the screen, or of a region, matches a pattern | 2 |
+| `screen_settled` | the share of changed pixels stays below a threshold for a given time | 2 |
+
+Read-only mode refuses `command`, `screen_text`, `screen_settled` and the screenshot attachment, because it disables
+command execution and screenshots today. `wait_for` checks the client's cancellation on every poll, so a cancelled
+wait stops its polling and its OCR. It sends progress notifications when the client sends a progress token.
+
+Each agent probe is bounded by the time left, at most 2 s, and runs on its own thread, so a hung guest agent, as after
+a kernel panic, neither delays the console check nor stretches the call. A call therefore returns within
+`max_wait_secs` plus 2 s. A `command` that is still running at the end is left to finish in the guest and reported.
+
+### Console
+
+Console offsets count raw bytes, and each session has a generation number, carried in every offset the tools return.
+A new session (`console_open` with `force`, a power cycle, `reset_vm`, `snapshot_revert`) starts a new generation, and
+an offset from an older one is refused with that reason, instead of being clamped silently as today.
+
+Each session keeps a wait cursor. `console_write` sets it to the buffer's end just before its bytes go out and returns
+that offset, so the echo and the guest's answer fall after it. A match moves the cursor past the match. A `console`
+condition without `since` starts at the cursor, so a write followed by a wait neither misses the answer nor matches an
+old prompt again.
+
+Patterns match ANSI-stripped text by default, as `console_read` returns it, with positions mapped back to raw offsets.
+A wait never changes what `console_read` returns or waits for: it reads the buffer without marking output delivered.
+
+`console_write` gains `inter_char_delay_ms`, or `chunk_size` with `chunk_delay_ms`, each up to 1000 ms. It refuses a
+write whose paced duration would exceed `limits.max_wait_secs`. `type_text` keeps `delay_ms` and its US layout.
+
+### Screen and mouse (run 2)
+
+Screen coordinates are pixels of an image the agent got from `screenshot`, whose result states that image's width and
+height. `mouse`, a `region` on `screenshot`, and the region of `screen_text` and `screen_settled` take `x` and `y`
+with that `image_width` and `image_height`, and `screen` for the display head. The server maps them proportionally:
+to QEMU's absolute axis range of 0 to 32767 for the mouse, and to the current framebuffer for a region, which it crops
+at full resolution before any downscaling. A resolution change between the screenshot and the call therefore keeps the
+click at the same relative place, and the agent takes a new screenshot when the layout changed.
+
+`mouse` moves, clicks (left, right, middle), double-clicks, drags and scrolls, through `input-send-event` on the
+domain's USB tablet. A VM without a tablet is refused with that reason; VMs made by `create_vm` and
+`create_vm_from_template` have one. libvirt marks a domain that receives monitor commands as tainted
+(`custom-monitor`), and the tool description and the README say so.
+
+OCR runs only when the frame's hash has changed, on the region when one is given. One capture per VM and poll serves
+every wait on that VM. The models live at `display.ocr_models`, and `scripts/fetch-ocr-models.sh` downloads them and
+checks SHA-256 sums pinned in the script. Without models, `screen_text` is refused with that reason. The
+`screen_settled` threshold, which must tolerate a blinking cursor or a spinner, is set by the run-2 probe.
+
+### Jobs
+
+`job_start` returns a UUID v4 job ID; the tools refuse any other form, so an ID never becomes a path. The job runs
+detached from the guest agent's own service, so restarting `qemu-guest-agent` does not end it: through `systemd-run`
+where systemd exists, otherwise `setsid`. Its directory holds the merged stdout and stderr as bytes, the root process
+ID with its start time, and the exit code once the job ends.
+
+- Linux: `/var/lib/virtmanager-mcp/jobs/<id>/`, created with mode 700; the launcher refuses a parent that is not a
+  root-owned directory, so no guest user can redirect it.
+- Windows: `C:\ProgramData\virtmanager-mcp\jobs\<id>\`, started by a launcher sent like `exec` that redirects through
+  `cmd /c` to keep the log in bytes.
+
+`job_read` returns output from an offset, up to `max_output_bytes`, the next offset, and the exit code once the job
+has ended. A job whose process is gone without an exit code, after a reboot or a kill, reads as "ended without
+status"; the start time guards against a reused process ID. `job_stop` signals the job's process group on Linux and
+ends its process tree from the recorded root ID on Windows. `job_list` lists the jobs in the guest, so an agent finds
+its jobs again after losing context. The jobs live in the guest, so they outlive a server restart, and a reset or
+deletion of the VM removes them.
+
+## Invariants
+
+- Every new tool obeys `allowed_vms`. `job_start`, `job_stop` and `mouse` are hidden in read-only mode with the other
+  mutating tools, and `wait_for` refuses there the conditions that run commands or take screenshots.
+- The server sends the QEMU monitor nothing but `input-send-event` commands it builds.
+- The server makes no network request. OCR models come from the operator.
+- A `wait_for` call returns within `max_wait_secs` plus 2 s. Calls that existed before, such as `start_vm` and
+  `exec`, keep their own limits.
+- A wait never changes what `console_read` returns.
+
+## Code changes
+
+- `src/console.rs`: session generation, wait cursor, a scan that does not mark output delivered, and the closed state
+  reported to waits.
+- `src/server.rs`: `wait_for`, the job tools and `mouse`, with `RequestContext` passed to `wait_for` for cancellation
+  and progress; `screenshot` with `region`; gating in `MUTATING_TOOLS` and the read-only refusals.
+- `src/display.rs`: frame capture shared by waits, coordinate mapping, OCR, and the monitor command.
+- A new `src/jobs.rs` for the Linux and Windows launchers and the job file layout; `src/config.rs` gains
+  `limits.max_wait_secs` and `display.ocr_models`.
+
+## Test bed
+
+Each run adds cases to `tests/testbed/`, with guests from official sources, checksum-verified where a checksum is
+published.
+
+- Run 1:
+  - `wait_for` on a template VM for the agent, a command and console `login:`.
+  - A kernel panic forced with `echo c > /proc/sysrq-trigger` stops a `[login:, Kernel panic]` wait at its second
+    condition, with `__time__` showing the call bound while the hung agent probe runs.
+  - A `console_read` after a wait returns the same output.
+  - A VM stopped during a wait ends it as closed, and an offset from before a `force` reopen is refused.
+  - An OpenWrt x86 image, uploaded into `agent-vms` with `virsh vol-upload` and defined with `virsh`, boots to a
+    console-only shell.
+  - Paced writes reach the OpenWrt shell intact. Where an unpaced long line at the GRUB command line loses characters,
+    the case shows that loss and the paced write fixing it; otherwise pacing is shown harmless.
+  - A Linux job streams output and is stopped. A second case file, run as a new server process, reads the same job
+    after the restart and lists it.
+- Run 2:
+  - The OCR probe on screenshots of GRUB, the Debian installer and Windows 11 setup is recorded in `docs/research/`.
+    It picks the engine and the settle threshold, and checks that the engine builds on Rust 1.89 and passes
+    `cargo deny`.
+  - The Windows ISO is uploaded into `agent-vms` in this run, because QEMU on `qemu:///system` cannot read the user's
+    home directory, and a VM boots it to the setup screen.
+  - The Debian netinst installer is driven by screen waits, keys and the mouse to its partitioning screen.
+  - A VM without a tablet refuses `mouse`.
+- Run 3:
+  - A Windows 11 Pro VM, installed unattended from the 26H2 business editions ISO in `~/Downloads`. It uses UEFI
+    with Secure Boot and Microsoft's enrolled keys, an emulated TPM 2.0, 4 GiB of memory, and Microsoft's public KMS
+    client key for Pro, so it stays unactivated with a watermark.
+  - Its setup also loads the `virtio-win` serial driver and installs `qemu-ga`.
+  - Windows jobs, the `command` condition, screen waits and the mouse are checked on it.
+
+## Checks
+
+- Unit tests cover:
+  - the read-only refusals of `command`, the screen conditions and the screenshot attachment;
+  - the refusal of a malformed job ID and of a VM outside `allowed_vms` for every new tool;
+  - console resume points, the wait cursor, generations and the tie-break;
+  - the paced-write duration;
+  - the coordinate mapping.
+- Cancellation and progress rest on unit tests and code review: the test-bed client sends neither.
+- Each run passes the gate in `AGENTS.md` and its test-bed cases.
+
+## Risks
+
+1. OCR may misread low-resolution text-mode fonts. The run-2 probe measures it before the engine is fixed; Tesseract is
+   the fallback, at the cost of system libraries in the build and in CI.
+2. Hardened hosts may deny monitor access. The mouse then fails with libvirt's reason; keyboard input still works.
+3. The Windows guest agent depends on drivers no setup on this host has tried. Run 3 may need a design change there.
+4. A guest that fills its disk can lose job output. Job logs are not capped in the guest.
+
+## Open questions
+
+| Question | Kind | Recommendation |
+| -- | -- | -- |
+| `ocrs` or Tesseract | Settled by the run-2 probe | `ocrs`, unless it misreads the probe screens or fails the Rust 1.89 build |
+| How the Windows guest agent gets its driver | Settled in run 3 | Load the `virtio-win` serial driver and `qemu-ga` MSI from the `virtio-win` ISO in the unattended setup |

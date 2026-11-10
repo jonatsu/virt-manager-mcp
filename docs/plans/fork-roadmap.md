@@ -125,9 +125,12 @@ before it is built, and each feature from the earlier list sits under one of the
    each unit's commits, test-bed results and reviews, built from
    [`disposable-vms-design.md`](disposable-vms-design.md) and
    [`2026-11-10-fatfs-seed-boot.md`](../research/2026-11-10-fatfs-seed-boot.md).
-2. **Reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input. This
-   covers the wait tool (console text, screen text or the guest agent), long-running processes whose output streams
-   back, and expect-style console sessions. `type_text` returns at once, and the trial lost input that way.
+2. **Reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input, on
+   guests with or without a guest agent: installers, bootloaders, kernels, Windows and appliances. This covers the wait
+   tool (console text, screen text, a settled screen, the guest agent, a command or a job), the mouse and region
+   screenshots, paced console input, long-running jobs on Linux and Windows whose output streams back, and
+   expect-style console sessions. `type_text` returns at once, and the trial lost input that way. Design:
+   [`live-interaction-design.md`](live-interaction-design.md), in review.
 3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
    passing them through its context, and reaches services running in the guest. This covers copying from the VM,
    directory sync, the guest's IP address and port forwarding. Each new path out of the guest needs a guardrail.
