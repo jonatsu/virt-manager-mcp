@@ -20,6 +20,9 @@ use crate::hypervisor::{self, Hypervisor};
 use crate::{ansi, display, fsops, manage};
 
 /// Tools hidden in read-only mode.
+/// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
+const WRITE_MARGIN: Duration = Duration::from_secs(10);
+
 const MUTATING_TOOLS: &[&str] = &[
     "guest_info",
     "exec",
@@ -229,13 +232,13 @@ pub struct ConsoleWriteParams {
     pub text: String,
     /// Append a carriage return (Enter). Default true.
     pub press_enter: Option<bool>,
-    /// Pause this many milliseconds (at most 1000) after each byte, for receivers that drop input sent back to
-    /// back, such as firmware and bootloaders.
+    /// Pause this many milliseconds (at most 1000) between bytes, for receivers that drop input sent back to
+    /// back, such as firmware and bootloaders. All pauses together may take at most `limits.max_wait_secs`.
     pub inter_char_delay_ms: Option<u64>,
-    /// Send in chunks of this many bytes, pausing `chunk_delay_ms` after each. Use instead of
+    /// Send in chunks of this many bytes, pausing `chunk_delay_ms` between them. Use instead of
     /// `inter_char_delay_ms`.
     pub chunk_size: Option<usize>,
-    /// Pause after each chunk, in milliseconds (at most 1000).
+    /// Pause between chunks, in milliseconds (at most 1000).
     pub chunk_delay_ms: Option<u64>,
 }
 
@@ -804,7 +807,10 @@ impl VirtServer {
 
     #[tool(
         description = "Send text to an open serial console (by default followed by Enter). Returns the offset and \
-        generation where the guest's answer starts; wait_for and console_read can start there."
+        generation where the guest's answer starts; wait_for and console_read can start there. For a receiver that \
+        drops input sent back to back, pace the write: inter_char_delay_ms pauses between bytes, or chunk_size with \
+        chunk_delay_ms pauses between chunks. The pauses may total at most limits.max_wait_secs. One write runs at \
+        a time per console; a second one is refused while the first is still sending."
     )]
     async fn console_write(
         &self,
@@ -816,14 +822,17 @@ impl VirtServer {
             if p.press_enter.unwrap_or(true) {
                 data.push(b'\r');
             }
+            let max_wait = Duration::from_secs(s.hv.config.limits.max_wait_secs);
             let pacing = Pacing::from_options(
                 p.inter_char_delay_ms,
                 p.chunk_size,
                 p.chunk_delay_ms,
                 data.len(),
-                Duration::from_secs(s.hv.config.limits.max_wait_secs),
+                max_wait,
             )?;
-            let (offset, generation) = s.consoles.write(&p.vm, &data, pacing)?;
+            // The pauses fit in max_wait; the margin leaves room for a slow guest to take the bytes.
+            let budget = max_wait + WRITE_MARGIN;
+            let (offset, generation) = s.consoles.write(&p.vm, &data, pacing, budget)?;
             Ok(vec![ContentBlock::text(format!(
                 "sent {} bytes; the answer starts at offset {offset} (generation {generation})",
                 data.len()

@@ -19,6 +19,9 @@ use crate::hypervisor::Hypervisor;
 
 const POLL: Duration = Duration::from_millis(30);
 
+/// How long one segment of a write may wait for room on a full stream.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How long output must pause before a waiting read returns. A guest answers
 /// in bursts (echo, then a prompt), so returning on the first byte would split
 /// one answer across reads.
@@ -125,6 +128,8 @@ struct Session {
     generation: u64,
     /// The running domain's ID when the session opened; a stop and start gives the domain a new one.
     domain_id: Option<u32>,
+    /// Held for the length of a write, so two writes cannot interleave their bytes.
+    writing: Arc<Mutex<()>>,
 }
 
 /// A session's output from an offset, read for a wait without marking it delivered.
@@ -160,18 +165,21 @@ pub enum Pacing {
 }
 
 impl Pacing {
-    /// The segments a write of `len` bytes goes out in, as byte ranges, and the pause between them.
-    fn segments(self, len: usize) -> (Vec<std::ops::Range<usize>>, Duration) {
-        let (size, delay) = match self {
+    /// The segment size for a write of `len` bytes, and the pause between segments.
+    fn shape(self, len: usize) -> (usize, Duration) {
+        match self {
             Pacing::None => (len.max(1), Duration::ZERO),
             Pacing::PerByte(delay) => (1, delay),
             Pacing::Chunks { size, delay } => (size.max(1), delay),
-        };
-        let ranges = (0..len)
+        }
+    }
+
+    /// The segments a write of `len` bytes goes out in, as byte ranges.
+    fn segments(self, len: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+        let (size, _) = self.shape(len);
+        (0..len)
             .step_by(size)
-            .map(|at| at..(at + size).min(len))
-            .collect();
-        (ranges, delay)
+            .map(move |at| at..at.saturating_add(size).min(len))
     }
 
     /// Pacing from a write's options, refused when both modes are given, a delay exceeds 1000 ms, a chunk is
@@ -217,9 +225,9 @@ impl Pacing {
 
     /// The pauses a write of `len` bytes spends, not counting the time the bytes take to send.
     pub fn duration(self, len: usize) -> Duration {
-        let (ranges, delay) = self.segments(len);
-        let pauses = u32::try_from(ranges.len().saturating_sub(1)).unwrap_or(u32::MAX);
-        delay.saturating_mul(pauses)
+        let (size, delay) = self.shape(len);
+        let pauses = len.div_ceil(size).saturating_sub(1);
+        delay.saturating_mul(u32::try_from(pauses).unwrap_or(u32::MAX))
     }
 }
 
@@ -341,6 +349,7 @@ impl Consoles {
                 device: device.map(str::to_string),
                 generation,
                 domain_id: dom.get_id(),
+                writing: Arc::default(),
             },
         );
         Ok(format!(
@@ -385,28 +394,52 @@ impl Consoles {
     }
 
     /// Sends `data` and returns the offset the guest's answer starts at, with the session's generation. That offset
-    /// becomes the wait cursor, so a wait without `since` looks at the answer only.
-    pub fn write(&self, vm: &str, data: &[u8], pacing: Pacing) -> Result<(u64, u64)> {
-        let (stream, offset, generation) = {
+    /// becomes the wait cursor, so a wait without `since` looks at the answer only. One write at a time runs per
+    /// session, and the whole write ends within `budget`; pauses are scheduled from its start, so they do not drift.
+    pub fn write(
+        &self,
+        vm: &str,
+        data: &[u8],
+        pacing: Pacing,
+        budget: Duration,
+    ) -> Result<(u64, u64)> {
+        let start = Instant::now();
+        let (stream, buffer, writing, generation) = {
             let sessions = self.sessions.lock().unwrap();
             let s = sessions
                 .get(vm)
                 .ok_or_else(|| anyhow!("no console open for '{vm}'; call console_open first"))?;
-            let mut b = s.buffer.lock().unwrap();
+            (
+                s.stream.clone(),
+                s.buffer.clone(),
+                s.writing.clone(),
+                s.generation,
+            )
+        };
+        let _writing = writing.try_lock().map_err(|_| {
+            anyhow!(
+                "another write to the console of '{vm}' is still running; wait for it to finish"
+            )
+        })?;
+        let offset = {
+            let mut b = buffer.lock().unwrap();
             if let Some(reason) = &b.closed {
                 bail!("console for '{vm}' is closed: {reason}");
             }
-            (s.stream.clone(), b.begin_write(), s.generation)
+            b.begin_write()
         };
-        let (segments, delay) = pacing.segments(data.len());
-        for (i, segment) in segments.iter().enumerate() {
-            if i > 0 {
-                std::thread::sleep(delay);
+        let (_, delay) = pacing.shape(data.len());
+        let overall = start + budget;
+        for (i, segment) in pacing.segments(data.len()).enumerate() {
+            let due = start + delay.saturating_mul(u32::try_from(i).unwrap_or(u32::MAX));
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
             }
-            send_all(&stream, &data[segment.clone()]).map_err(|e| {
+            let deadline = (Instant::now() + SEND_TIMEOUT).min(overall);
+            send_all(&stream, &data[segment.clone()], deadline).map_err(|(sent, e)| {
                 e.context(format!(
                     "{} of {} bytes were sent; any answer starts at offset {offset} (generation {generation})",
-                    segment.start,
+                    segment.start + sent,
                     data.len()
                 ))
             })?;
@@ -455,10 +488,10 @@ impl Consoles {
     }
 }
 
-/// Sends all of `data` on a non-blocking stream, waiting up to 10 s for room while the stream is full.
-fn send_all(stream: &Stream, data: &[u8]) -> Result<()> {
+/// Sends all of `data` on a non-blocking stream, waiting for room while the stream is full, until `deadline`. On
+/// failure, returns how many bytes of `data` were sent.
+fn send_all(stream: &Stream, data: &[u8], deadline: Instant) -> Result<(), (usize, anyhow::Error)> {
     let mut sent = 0;
-    let deadline = Instant::now() + Duration::from_secs(10);
     while sent < data.len() {
         let rest = &data[sent..];
         let n =
@@ -466,11 +499,16 @@ fn send_all(stream: &Stream, data: &[u8]) -> Result<()> {
         match n {
             n if n >= 0 => sent += n as usize,
             -2 if Instant::now() < deadline => std::thread::sleep(POLL),
-            -2 => bail!("timed out writing to console"),
-            _ => bail!(
-                "console write failed: {}",
-                virt::error::Error::last_error().message()
-            ),
+            -2 => return Err((sent, anyhow!("timed out writing to console"))),
+            _ => {
+                return Err((
+                    sent,
+                    anyhow!(
+                        "console write failed: {}",
+                        virt::error::Error::last_error().message()
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -619,21 +657,17 @@ mod tests {
     #[test]
     fn pacing_splits_writes_into_segments() {
         let ms = Duration::from_millis;
-        let (one, pause) = Pacing::None.segments(5);
-        assert_eq!(
-            (one.len(), one[0].clone(), pause),
-            (1, 0..5, Duration::ZERO)
-        );
-        assert_eq!(
-            Pacing::PerByte(ms(8)).segments(3),
-            (vec![0..1, 1..2, 2..3], ms(8))
-        );
+        let all = |p: Pacing, len| p.segments(len).collect::<Vec<_>>();
+        let one = all(Pacing::None, 5);
+        assert_eq!((one.len(), one[0].clone()), (1, 0..5));
+        assert_eq!(all(Pacing::PerByte(ms(8)), 3), vec![0..1, 1..2, 2..3]);
         let chunks = Pacing::Chunks {
             size: 4,
             delay: ms(20),
         };
-        assert_eq!(chunks.segments(10), (vec![0..4, 4..8, 8..10], ms(20)));
-        assert!(Pacing::None.segments(0).0.is_empty());
+        assert_eq!(all(chunks, 10), vec![0..4, 4..8, 8..10]);
+        assert_eq!(chunks.shape(10), (4, ms(20)));
+        assert!(all(Pacing::None, 0).is_empty());
     }
 
     #[test]
