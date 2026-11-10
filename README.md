@@ -16,7 +16,8 @@ Host: Linux. Guests: Linux and Windows.
 
 | Capability | Mechanism | Guest requirement |
 | -- | -- | -- |
-| `exec`, `read_file`, `write_file`, `copy_to_vm`, `list_dir`, `stat_path`, `guest_info` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running |
+| `exec`, `read_file`, `write_file`, `copy_to_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs need a Linux guest |
+| `wait_for` | The console session and the guest agent, polled together | as for the condition's channel |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
 | `start_vm`, `stop_vm` | libvirt (`virDomainCreate`, `virDomainShutdown`, `virDomainDestroy`) | none (graceful stop needs ACPI or the guest agent) |
@@ -33,11 +34,14 @@ The path is passed as data, never spliced into shell code.
 | `list_vms`: allowed VMs, power state, agent status, OS family | ✅ |
 | `read_file`, `list_dir`, `stat_path` | ✅ |
 | `console_open`, `console_read`, `console_close` | ✅ |
+| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern) | ✅ (no `command` conditions) |
+| `job_read`, `job_list`: a background job's output and state | ✅ |
+| `job_start`, `job_stop`: run a long command detached in a Linux guest, and stop it | ❌ |
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
 | `write_file` (overwrite/append, text or base64) | ❌ |
 | `copy_to_vm`: copy a host file into the guest (only with `host_share_dirs`) | ❌ |
 | `start_vm`, `stop_vm` (graceful or `force`) (only for VMs in `power_vms`) | ❌ |
-| `console_write` | ❌ |
+| `console_write`, optionally paced per byte or per chunk | ❌ |
 | `guest_info`: OS, hostname, NICs, filesystems, users, timezone | ❌ |
 | `screenshot` (PNG, downscaled to 1280 px wide by default) | ❌ |
 | `send_keys` (`ctrl+alt+delete`, `win+r`, …), `type_text` (US layout) | ❌ |
@@ -262,6 +266,19 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 - `console_read` returns output received since `console_open`. Earlier output (e.g. boot logs) is
   not available. Only one client can hold a console: if virt-manager's serial console view
   is open, `console_open` fails unless `force: true`, which disconnects the other client.
+- Every `console_open` starts a new console generation, and every offset a console tool returns comes with its
+  `generation`. A `console_read` or console wait from an offset above 0 must pass that generation back, so an offset
+  from an earlier session is refused instead of misread. `reset_vm` and `snapshot_revert` close the session.
+- `wait_for` returns within `limits.max_wait_secs` (default 50 s, below the 60 s at which some clients cut a call)
+  plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
+  between. A console condition without `since` starts where the last `console_write` began, and a match moves that
+  point past it. A wait never changes what `console_read` returns.
+- `console_write` can pause between bytes (`inter_char_delay_ms`) or between chunks (`chunk_size` with
+  `chunk_delay_ms`), up to 1000 ms each, for firmware and bootloaders that drop input sent back to back. A write
+  whose pauses would exceed `limits.max_wait_secs` is refused.
+- Jobs keep their files in `/var/lib/virtmanager-mcp/jobs/<id>/` in the guest and run under `systemd-run`, or
+  `setsid` without systemd, so they survive an agent restart and a server restart. The launcher refuses a job
+  directory parent that is not a root-owned directory with mode 700. Windows guests are refused for now.
 - `copy_to_vm` streams the file in 64 KiB guest-agent requests, so the data never passes through
   the conversation. The host path is resolved (symlinks, `..`) before the `host_share_dirs`
   check, so links pointing outside a share are refused. On a Linux guest a new file gets mode 644

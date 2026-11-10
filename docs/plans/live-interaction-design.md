@@ -53,7 +53,8 @@ flowchart LR
 ### `wait_for`
 
 It takes a VM, a timeout and a list of conditions. The timeout is capped by `limits.max_wait_secs`, which must be
-above 0. The call returns one of three results:
+above 0. A timeout of 0 checks console conditions once, and is refused with any other kind, which needs at least one
+probe. The call returns one of three results:
 
 - **matched:** the index and kind of the first condition that holds, the matched text, and, for console and job
   conditions, `next`, the offset just past the match. When several hold in the same poll, the lowest index wins. On
@@ -125,19 +126,22 @@ checks SHA-256 sums pinned in the script. Without models, `screen_text` is refus
 `job_start` returns a UUID v4 job ID; the tools refuse any other form, so an ID never becomes a path. The job runs
 detached from the guest agent's own service, so restarting `qemu-guest-agent` does not end it: through `systemd-run`
 where systemd exists, otherwise `setsid`. Its directory holds the merged stdout and stderr as bytes, the root process
-ID with its start time, and the exit code once the job ends.
+ID with its start time and the boot ID, and the exit code once the job ends.
 
 - Linux: `/var/lib/virtmanager-mcp/jobs/<id>/`, created with mode 700; the launcher refuses a parent that is not a
-  root-owned directory, so no guest user can redirect it.
+  root-owned directory with mode 700, or is a link, so no guest user can redirect it. The command reaches the guest on
+  stdin and is stored as a file. The wrapper that runs it also runs from a file, because systemd expands `$` variables
+  in a unit's command line. A background command starts with SIGINT and SIGQUIT ignored; the wrapper resets them
+  where the guest's `env` supports `--default-signal`.
 - Windows: `C:\ProgramData\virtmanager-mcp\jobs\<id>\`, started by a launcher sent like `exec` that redirects through
   `cmd /c` to keep the log in bytes.
 
 `job_read` returns output from an offset, up to `max_output_bytes`, the next offset, and the exit code once the job
 has ended. A job whose process is gone without an exit code, after a reboot or a kill, reads as "ended without
-status"; the start time guards against a reused process ID. `job_stop` signals the job's process group on Linux and
-ends its process tree from the recorded root ID on Windows. `job_list` lists the jobs in the guest, so an agent finds
-its jobs again after losing context. The jobs live in the guest, so they outlive a server restart, and a reset or
-deletion of the VM removes them.
+status"; the start time and the boot ID guard against a reused process ID. `job_stop` signals the job's process
+group on Linux and ends its process tree from the recorded root ID on Windows. `job_list` lists the jobs in the
+guest, so an agent finds its jobs again after losing context. The jobs live in the guest, so they outlive a server
+restart, and a reset or deletion of the VM removes them.
 
 ## Invariants
 
