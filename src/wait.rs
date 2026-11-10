@@ -98,7 +98,7 @@ pub enum Condition {
         /// Most pixels two consecutive frames may differ in while the screen counts as still. Default 600, which
         /// lets a blinking text cursor through.
         max_changed_pixels: Option<u32>,
-        /// Seconds the screen must hold still; at least 0.5 and at most the call's timeout. Default 3.
+        /// Seconds the screen must hold still; at least 0.5 and at most the call's timeout less 0.5. Default 3.
         settle_secs: Option<f64>,
         /// Compare only this part of the screen, in pixels of a full-screen image from `screenshot` or a wait's
         /// attachment, with that image's size.
@@ -260,17 +260,20 @@ pub fn validate_conditions(
         .collect()
 }
 
-/// Checks `settle_secs`: at least one frame interval and at most the call's `timeout`. A zero timeout is left to
-/// [`run`], whose refusal says that screen conditions need at least 1 s.
+/// Checks `settle_secs`: at least one frame interval, and at most the call's `timeout` less one frame interval,
+/// because every frame of the wait starts before its end. A zero timeout is left to [`run`], whose refusal says that
+/// screen conditions need at least 1 s.
 fn settle_duration(settle_secs: Option<f64>, timeout: Duration) -> Result<Duration> {
     let secs = settle_secs.unwrap_or(DEFAULT_SETTLE_SECS);
     if secs.is_nan() || secs < MIN_SETTLE_SECS {
         bail!("settle_secs must be at least {MIN_SETTLE_SECS}, got {secs}");
     }
-    if !timeout.is_zero() && secs > timeout.as_secs_f64() {
+    let most = timeout.saturating_sub(FRAME_EVERY).as_secs_f64();
+    if !timeout.is_zero() && secs > most {
         bail!(
-            "settle_secs {secs} is above the call's timeout of {} s",
-            timeout.as_secs()
+            "settle_secs {secs} is above {most}, the call's timeout of {} s less one {} s frame interval",
+            timeout.as_secs(),
+            FRAME_EVERY.as_secs_f64()
         );
     }
     Duration::try_from_secs_f64(secs).map_err(|e| anyhow!("settle_secs {secs}: {e}"))
@@ -1988,11 +1991,24 @@ mod tests {
         };
         let err = refused(10, &[settled(None, Some(0.49))]);
         assert!(err.contains("settle_secs must be at least 0.5"), "{err}");
-        let err = refused(10, &[settled(None, Some(10.5))]);
-        assert!(err.contains("above the call's timeout of 10 s"), "{err}");
-        // The default of 3 s is above a 2 s timeout too.
-        assert!(refused(2, &[settled(None, None)]).contains("above the call's timeout"));
-        for ok in [Some(0.5), Some(10.0), None] {
+        // Every frame starts before the call's end, so settle_secs equal to the timeout could never hold.
+        let err = refused(10, &[settled(None, Some(10.0))]);
+        assert_eq!(
+            err,
+            "condition 0: settle_secs 10 is above 9.5, the call's timeout of 10 s less one 0.5 s frame interval"
+        );
+        assert!(refused(10, &[settled(None, Some(9.51))]).contains("above 9.5"));
+        // The default of 3 s is above a 3 s timeout too.
+        assert!(refused(3, &[settled(None, None)]).contains("above 2.5"));
+        assert!(
+            validate_conditions(
+                &Config::default(),
+                Duration::from_secs(1),
+                &[settled(None, Some(0.5))]
+            )
+            .is_ok()
+        );
+        for ok in [Some(0.5), Some(9.5), None] {
             assert!(
                 validate_conditions(
                     &Config::default(),
