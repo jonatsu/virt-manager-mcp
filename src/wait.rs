@@ -2072,15 +2072,27 @@ mod tests {
         std::thread::spawn(move || wait_on(&env, &guest, &conditions, secs))
     }
 
-    /// Waits until the failing capture has stopped the domain, then lets the fake clock run `polls` polls further.
-    fn after_the_stop(env: &FakeEnv, guest: &FakeGuest, polls: u32) {
+    /// Waits until the failing capture has stopped the domain, then lets the fake clock run `polls` polls further. It
+    /// returns at once when `waiter` ends first, so the caller reports the wait's own result.
+    fn after_the_stop(
+        env: &FakeEnv,
+        guest: &FakeGuest,
+        waiter: &std::thread::JoinHandle<Result<Outcome>>,
+        polls: u32,
+    ) {
         let started = Instant::now();
         while guest.read_domain().is_some() {
+            if waiter.is_finished() {
+                return;
+            }
             assert!(started.elapsed() < Duration::from_secs(10), "no stop");
             std::thread::sleep(Duration::from_millis(1));
         }
         let stopped_at = env.elapsed();
         while env.elapsed() < stopped_at + POLL * polls {
+            if waiter.is_finished() {
+                return;
+            }
             assert!(
                 started.elapsed() < Duration::from_secs(10),
                 "the clock stalled"
@@ -2097,8 +2109,9 @@ mod tests {
         let (release, held) = mpsc::channel();
         let guest = Arc::new(stopping_during_a_held_check(held));
         let env = Arc::new(FakeEnv::new(vec![]));
-        let waiter = wait_in_background(&env, &guest, vec![settled(None, None)], 10);
-        after_the_stop(&env, &guest, 20);
+        // A long timeout, so the fake deadline cannot end the wait while the test holds the check.
+        let waiter = wait_in_background(&env, &guest, vec![settled(None, None)], 60);
+        after_the_stop(&env, &guest, &waiter, 20);
         drop(release);
         let o = waiter.join().unwrap().unwrap();
         assert!(
