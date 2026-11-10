@@ -5,6 +5,7 @@ mod console;
 mod display;
 mod fsops;
 mod hypervisor;
+mod jobs;
 mod manage;
 mod seed;
 mod server;

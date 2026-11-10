@@ -4,6 +4,10 @@ Usage: python3 -I mcp_call.py <calls.json> -- <server command...>
 calls.json is a list of {"tool": name, "args": {...}}. Special tools: "__list__" prints every
 advertised tool with its input properties, "__sleep__" pauses for args.secs seconds, and
 "__time__" prints a monotonic timestamp, to time the calls between two of them.
+
+A call may carry "save": {"name": "field"}, which stores that field of the reply's first text block, read as
+JSON, under the name. A later string argument holding "${name}" gets the stored value. Saved values persist in
+vars.json in the current directory, so a later run, with a new server process, can use them.
 """
 
 import base64
@@ -14,6 +18,29 @@ import sys
 import time
 
 MAX_TEXT = 500000
+VARS = pathlib.Path("vars.json")
+
+
+def substitute(value, saved: dict):
+    """Replaces each ${name} in the strings of `value` with its saved value."""
+    if isinstance(value, str):
+        for name, text in saved.items():
+            value = value.replace("${" + name + "}", str(text))
+        return value
+    if isinstance(value, list):
+        return [substitute(v, saved) for v in value]
+    if isinstance(value, dict):
+        return {k: substitute(v, saved) for k, v in value.items()}
+    return value
+
+
+def save(result: dict, wanted: dict, saved: dict) -> None:
+    """Stores the fields `wanted` names from the first text block of `result`."""
+    texts = [item["text"] for item in result.get("content", []) if item.get("type") == "text"]
+    reply = json.loads(texts[0]) if texts else {}
+    for name, field in wanted.items():
+        saved[name] = reply[field]
+    VARS.write_text(json.dumps(saved))
 
 
 def send(proc: subprocess.Popen, msg: dict) -> None:
@@ -55,7 +82,9 @@ def main() -> int:
         "clientInfo": {"name": "trial-driver", "version": "0"}}})
     receive(proc, 0)
     send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    saved = json.loads(VARS.read_text()) if VARS.exists() else {}
     for n, call in enumerate(calls, start=1):
+        call = {**call, "args": substitute(call.get("args", {}), saved)}
         if call["tool"] == "__sleep__":
             time.sleep(call["args"]["secs"])
             continue
@@ -73,6 +102,8 @@ def main() -> int:
         reply = receive(proc, n)
         body = show(reply["result"]) if "result" in reply else f"RPC error: {reply.get('error')}"
         print(f"### {call['tool']} {json.dumps(call.get('args', {}))}\n{body}\n")
+        if "save" in call and "result" in reply and not reply["result"].get("isError"):
+            save(reply["result"], call["save"], saved)
     proc.stdin.close()
     proc.wait(timeout=30)
     return 0

@@ -19,9 +19,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agent::{self, Agent, ExecSpec, GuestOs, powershell};
+use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{ansi, display, fsops, manage, wait};
+use crate::{ansi, display, fsops, jobs, manage, wait};
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
@@ -38,6 +39,8 @@ const MUTATING_TOOLS: &[&str] = &[
     "start_vm",
     "stop_vm",
     "copy_to_vm",
+    "job_start",
+    "job_stop",
 ];
 
 /// Tools behind [manage] create / delete / reconfigure / snapshots.
@@ -230,6 +233,35 @@ pub struct ConsoleReadParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct JobStartParams {
+    pub vm: String,
+    /// Shell command (`/bin/sh`) to run in the background as root. It is stored in the guest as data and run as is.
+    pub command: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct JobReadParams {
+    pub vm: String,
+    /// The job ID that job_start returned.
+    pub job: String,
+    /// Byte offset in the job's output to read from (use `next` from the previous read). Default 0.
+    #[serde(default)]
+    pub since: u64,
+    /// Max bytes to return (default: limits.max_output_bytes).
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct JobStopParams {
+    pub vm: String,
+    /// The job ID that job_start returned.
+    pub job: String,
+    /// Send SIGKILL instead of SIGTERM. A killed job records no exit code and reads "ended without status".
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct WaitForParams {
     pub vm: String,
     /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks console conditions once and is refused with agent or command conditions.
@@ -417,49 +449,54 @@ pub struct SnapshotCreateParams {
     pub description: Option<String>,
 }
 
+/// The tools `config` hides: mutating tools in read-only mode, and tools whose feature is off.
+pub fn hidden_tools(config: &Config) -> Vec<&'static str> {
+    let mut hidden = Vec::new();
+    if config.read_only {
+        hidden.extend_from_slice(MUTATING_TOOLS);
+    }
+    // VMs created by this server can be powered on and off even when power_vms is empty.
+    if config.power_vms.is_empty() && !config.manage.enabled() {
+        hidden.extend_from_slice(&["start_vm", "stop_vm"]);
+    }
+    if config.host_share_dirs.is_empty() {
+        hidden.push("copy_to_vm");
+    }
+    let m = &config.manage;
+    let off = |on: bool, tools: &'static [&'static str]| {
+        if on && !config.read_only {
+            &[][..]
+        } else {
+            tools
+        }
+    };
+    for tools in [
+        off(m.create, CREATE_TOOLS),
+        off(m.create && !m.templates.is_empty(), TEMPLATE_TOOLS),
+        off(m.create && m.delete && !m.templates.is_empty(), RESET_TOOLS),
+        off(m.delete, DELETE_TOOLS),
+        off(m.reconfigure, RECONFIGURE_TOOLS),
+        off(m.snapshots, SNAPSHOT_TOOLS),
+        off(m.enabled(), &["describe_vm"]),
+        off(
+            (m.create || m.reconfigure) && !m.iso_dirs.is_empty(),
+            &["list_isos"],
+        ),
+    ] {
+        hidden.extend_from_slice(tools);
+    }
+    hidden.sort_unstable();
+    hidden.dedup();
+    hidden
+}
+
 // ---- tools --------------------------------------------------------------------
 
 #[tool_router]
 impl VirtServer {
     pub fn new(state: Arc<State>) -> Self {
         let mut tool_router = Self::tool_router();
-        let config = &state.hv.config;
-        if config.read_only {
-            for name in MUTATING_TOOLS {
-                tool_router.remove_route(name);
-            }
-        }
-        // VMs created by this server can be powered on and off even when power_vms is empty.
-        if config.power_vms.is_empty() && !config.manage.enabled() {
-            tool_router.remove_route("start_vm");
-            tool_router.remove_route("stop_vm");
-        }
-        if config.host_share_dirs.is_empty() {
-            tool_router.remove_route("copy_to_vm");
-        }
-        let m = &config.manage;
-        let off = |on: bool, tools: &'static [&'static str]| {
-            if on && !config.read_only {
-                &[][..]
-            } else {
-                tools
-            }
-        };
-        for name in [
-            off(m.create, CREATE_TOOLS),
-            off(m.create && !m.templates.is_empty(), TEMPLATE_TOOLS),
-            off(m.create && m.delete && !m.templates.is_empty(), RESET_TOOLS),
-            off(m.delete, DELETE_TOOLS),
-            off(m.reconfigure, RECONFIGURE_TOOLS),
-            off(m.snapshots, SNAPSHOT_TOOLS),
-            off(m.enabled(), &["describe_vm"]),
-            off(
-                (m.create || m.reconfigure) && !m.iso_dirs.is_empty(),
-                &["list_isos"],
-            ),
-        ]
-        .concat()
-        {
+        for name in hidden_tools(&state.hv.config) {
             tool_router.remove_route(name);
         }
         Self { state, tool_router }
@@ -919,6 +956,93 @@ impl VirtServer {
             Ok(vec![ContentBlock::text(
                 outcome.to_json(started.elapsed()).to_string(),
             )])
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Start a long-running shell command in a Linux guest as a background job, and return its job \
+        ID at once. The job runs detached from the guest agent (through systemd-run, or setsid without systemd), so \
+        it survives an agent restart and a server restart. Its stdout and stderr go to one log; read it with \
+        job_read, stop it with job_stop, and find jobs again with job_list. A reset or deletion of the VM removes its \
+        jobs."
+    )]
+    async fn job_start(
+        &self,
+        Parameters(p): Parameters<JobStartParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let dom = s.hv.domain(&p.vm)?;
+            let agent = s.agent(&dom);
+            jobs::require_linux(&agent)?;
+            let (id, how) = jobs::start(&agent, &p.command)?;
+            Ok(vec![json_block(
+                &json!({ "job": id.hyphenated().to_string(), "started": how }),
+            )?])
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read a job's output from a byte offset, with its state: starting, running, exited (with \
+        exit_code), or \"ended without status\" when its process is gone without an exit code, as after a reboot or \
+        a forced stop. Pass `next` back as `since` to read on."
+    )]
+    async fn job_read(
+        &self,
+        Parameters(p): Parameters<JobReadParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let id = jobs::parse_id(&p.job)?;
+            let dom = s.hv.domain(&p.vm)?;
+            let agent = s.agent(&dom);
+            jobs::require_linux(&agent)?;
+            let max = p.max_bytes.unwrap_or(s.hv.config.limits.max_output_bytes);
+            let r = jobs::read(&agent, &id, p.since, max)?;
+            let meta = json!({
+                "job": p.job,
+                "state": r.state.name(),
+                "exit_code": r.state.exit_code(),
+                "next": r.next,
+            });
+            Ok(vec![
+                ContentBlock::text(meta.to_string()),
+                ContentBlock::text(String::from_utf8_lossy(&r.data).into_owned()),
+            ])
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Stop a running job: SIGTERM to its process group, which still records the exit code, or \
+        SIGKILL with force. Refused when the job's process is no longer the one it started."
+    )]
+    async fn job_stop(
+        &self,
+        Parameters(p): Parameters<JobStopParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let id = jobs::parse_id(&p.job)?;
+            let dom = s.hv.domain(&p.vm)?;
+            let agent = s.agent(&dom);
+            jobs::require_linux(&agent)?;
+            Ok(vec![ContentBlock::text(jobs::stop(&agent, &id, p.force)?)])
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List the jobs in a Linux guest with their state and start time (seconds since the epoch)."
+    )]
+    async fn job_list(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let dom = s.hv.domain(&p.vm)?;
+            let agent = s.agent(&dom);
+            jobs::require_linux(&agent)?;
+            Ok(vec![json_block(&jobs::list(&agent)?)?])
         })
         .await
     }
@@ -1434,4 +1558,28 @@ fn shell_spec(os: GuestOs, shell: Shell, cmd: &str) -> Result<ExecSpec> {
 
 fn json_block<T: serde::Serialize>(v: &T) -> Result<ContentBlock> {
     Ok(ContentBlock::text(serde_json::to_string_pretty(v)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_hides_job_start_and_stop_but_not_reads_or_waits() {
+        let read_only = Config {
+            read_only: true,
+            ..Config::default()
+        };
+        let hidden = hidden_tools(&read_only);
+        for tool in ["job_start", "job_stop", "exec", "console_write"] {
+            assert!(hidden.contains(&tool), "{tool} stays visible");
+        }
+        for tool in ["job_read", "job_list", "wait_for", "console_read"] {
+            assert!(!hidden.contains(&tool), "{tool} is hidden");
+        }
+        let writable = hidden_tools(&Config::default());
+        for tool in ["job_start", "job_stop", "job_read", "job_list", "wait_for"] {
+            assert!(!writable.contains(&tool), "{tool} is hidden");
+        }
+    }
 }

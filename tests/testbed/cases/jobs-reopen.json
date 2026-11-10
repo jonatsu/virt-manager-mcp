@@ -1,0 +1,92 @@
+[
+  {
+    "tool": "job_list",
+    "args": {
+      "vm": "t-w"
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${job1}",
+      "max_bytes": 40
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "t-w",
+      "job": "${job1}"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${job1}",
+      "since": 100000
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "t-w",
+      "job": "${job1}"
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "../../../etc"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "rm -rf /var/lib/virtmanager-mcp && ln -s /tmp /var/lib/virtmanager-mcp && ls -A /tmp"
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
+      "command": "echo should not run"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "ls -A /tmp"
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "true"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-w",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-w"
+    }
+  }
+]

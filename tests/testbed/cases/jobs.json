@@ -1,0 +1,126 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-w",
+      "template": "debian13",
+      "wait_for_agent_secs": 120
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
+      "command": "i=0; while [ $i -lt 600 ]; do echo step $i; i=$((i+1)); sleep 1; done"
+    },
+    "save": {
+      "job1": "job"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 3
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${job1}"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${job1}"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "nohup sh -c 'sleep 1; systemctl restart qemu-guest-agent' >/dev/null 2>&1 &"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 5
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${job1}",
+      "since": 20
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
+      "command": "printf '%s|%s\\n' '$HOME' \"it's \\\"quoted\\\"\"; echo \"${NOT_SET:-literal braces}\""
+    },
+    "save": {
+      "job2": "job"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${job2}"
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-w",
+      "command": "sleep 300"
+    },
+    "save": {
+      "job3": "job"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-w",
+      "command": "kill -9 $(cut -d ' ' -f 1 /var/lib/virtmanager-mcp/jobs/${job3}/pid)"
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-w",
+      "job": "${job3}"
+    }
+  },
+  {
+    "tool": "job_list",
+    "args": {
+      "vm": "t-w"
+    }
+  }
+]
