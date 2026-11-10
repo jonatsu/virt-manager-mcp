@@ -384,7 +384,19 @@ fn check_reply(reply: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuses any monitor command other than `input-send-event`, so the monitor never receives anything else even if a
+/// later caller builds its own `Step`.
+fn check_command(command: &Value) -> Result<()> {
+    match command.get("execute").and_then(Value::as_str) {
+        Some("input-send-event") => Ok(()),
+        other => bail!(
+            "refusing to send QEMU monitor command {other:?}: only input-send-event is allowed"
+        ),
+    }
+}
+
 fn send_one(dom: &Domain, command: &Value) -> Result<()> {
+    check_command(command)?;
     let reply = dom
         .qemu_monitor_command(&command.to_string(), 0)
         .map_err(|e| anyhow!("sending input-send-event: {}", e.message()))?;
@@ -397,8 +409,13 @@ pub fn send(dom: &Domain, steps: &[Step]) -> Result<()> {
     let mut held = None;
     for step in steps {
         if let Err(e) = send_one(dom, &step.command) {
-            if let Some(b) = held {
-                let _ = send_one(dom, &button(b, false));
+            if let Some(b) = held
+                && let Err(release) = send_one(dom, &button(b, false))
+            {
+                return Err(e.context(format!(
+                    "releasing the held {} button also failed, so it may still be down: {release:#}",
+                    b.name()
+                )));
             }
             return Err(e);
         }
@@ -459,7 +476,7 @@ mod tests {
         assert_eq!(to_axis(1279, 1280), 32767);
         assert_eq!(to_axis(0, 800), 0);
         assert_eq!(to_axis(799, 800), 32767);
-        // 640 * 32767 / 1279 = 16396.3 and 400 * 32767 / 799 = 16403.98, rounded down.
+        // 640 * 32767 / 1279 = 16396.3 and 400 * 32767 / 799 = 16404.005, rounded down.
         assert_eq!(to_axis(640, 1280), 16396);
         assert_eq!(to_axis(400, 800), 16404);
         // The click the host's QEMU took on the Debian installer's Continue button.
@@ -764,5 +781,22 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.to_string(), "QEMU refused input-send-event: no tablet");
         assert!(check_reply("not json").is_err());
+    }
+
+    #[test]
+    fn only_input_send_event_reaches_the_monitor() {
+        assert!(check_command(&button(QmpButton::Left, true)).is_ok());
+        for other in [
+            json!({"execute": "human-monitor-command", "arguments": {"command-line": "quit"}}),
+            json!({"execute": "quit"}),
+            json!({"arguments": {}}),
+            json!({"execute": 1}),
+        ] {
+            let err = check_command(&other).unwrap_err();
+            assert!(
+                err.to_string().contains("only input-send-event is allowed"),
+                "{err}"
+            );
+        }
     }
 }
