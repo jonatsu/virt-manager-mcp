@@ -522,6 +522,11 @@ pub fn run(
         .map(|c| State::new(c, env))
         .collect::<Result<Vec<_>>>()?;
     let mut vm = Probe::<Result<Option<u32>>>::default();
+    // When the VM check in flight started.
+    let mut vm_started = None;
+    // A failed capture and the time it was seen. A capture fails when the VM stops during it, so the failure ends the
+    // wait only once a VM check started after it finds the VM still there; a stopped VM ends it as closed.
+    let mut capture_failure: Option<(anyhow::Error, Instant)> = None;
     let mut next_progress = start + PROGRESS_EVERY;
     // Seeded from the call's own lookup, so a restart before the call is caught on the first poll.
     let mut domain_id = guest.initial_id();
@@ -530,21 +535,37 @@ pub fn run(
         if env.cancelled() {
             return Ok(Outcome::Cancelled);
         }
-        let stopped = match vm.take() {
-            Some(Ok(None)) => true,
-            Some(Ok(id)) => {
-                domain_id = id;
+        let checked = vm.take().map(|id| {
+            let started: Instant = vm_started.take().expect("a finished VM check had a start");
+            (id, started)
+        });
+        let stopped = match &checked {
+            Some((Ok(None), _)) => true,
+            Some((Ok(id), _)) => {
+                domain_id = *id;
                 false
             }
-            Some(Err(_)) | None => false,
+            Some((Err(_), _)) | None => false,
         };
+        // A check that started after the failure and did not find the VM stopped confirms the failure.
+        let failure_confirmed = !stopped
+            && matches!((&checked, &capture_failure), (Some((_, started)), Some((_, at))) if started >= at);
         // A new frame, when one arrived since the last poll; every screen condition reads the same one.
-        let frame = match &mut frames {
-            Some(frames) if !stopped => frames.poll(now, deadline, &guest)?,
-            _ => None,
+        let frame = match frames.as_mut().filter(|_| !stopped) {
+            Some(frames) => match frames.poll(now, deadline, &guest) {
+                Some(Ok(frame)) => Some(frame),
+                Some(Err(e)) => {
+                    capture_failure = Some((e, now));
+                    vm.due_now();
+                    None
+                }
+                None => None,
+            },
+            None => None,
         };
-        if !stopped {
-            vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id());
+        if !stopped && vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id())
+        {
+            vm_started = Some(now);
         }
         // One scan serves every console condition, so all of them see the same output in a poll.
         let scan = console_scan(env, &states);
@@ -598,6 +619,11 @@ pub fn run(
                 index: Some(index),
                 reason,
             });
+        }
+        if (failure_confirmed || now >= deadline)
+            && let Some((e, _)) = capture_failure
+        {
+            return Err(e);
         }
         if now >= deadline {
             return timed_out(&mut states);
@@ -821,6 +847,8 @@ struct FrameSource {
     probe: Probe<Result<RgbImage>>,
     /// When the capture in flight started.
     started: Option<Instant>,
+    /// Set once a capture failed; no capture starts after it.
+    failed: bool,
 }
 
 impl FrameSource {
@@ -829,30 +857,31 @@ impl FrameSource {
             screen,
             probe: Probe::default(),
             started: None,
+            failed: false,
         }
     }
 
-    /// The frame that arrived since the last poll, if any, and starts the next capture when one is due. A capture
-    /// that failed ends the wait with its cause. One still in flight at the deadline is left to finish on its own
-    /// thread, and its frame is dropped.
+    /// The capture that finished since the last poll, if any, and starts the next one when it is due. After a
+    /// failed capture it starts none. One still in flight at the deadline is left to finish on its own thread, and
+    /// its frame is dropped.
     fn poll(
         &mut self,
         now: Instant,
         deadline: Instant,
         guest: &Arc<dyn Guest>,
-    ) -> Result<Option<Captured>> {
-        let frame = match self.probe.take() {
-            Some(image) => {
-                let image =
-                    image.with_context(|| format!("capturing display head {}", self.screen))?;
-                let at = self.started.take().expect("a finished capture had a start");
-                Some(Captured {
-                    image: Arc::new(image),
-                    at,
-                })
-            }
-            None => None,
-        };
+    ) -> Option<Result<Captured>> {
+        let frame = self.probe.take().map(|image| {
+            let at = self.started.take().expect("a finished capture had a start");
+            let image = image.with_context(|| format!("capturing display head {}", self.screen))?;
+            Ok(Captured {
+                image: Arc::new(image),
+                at,
+            })
+        });
+        self.failed |= matches!(frame, Some(Err(_)));
+        if self.failed {
+            return frame;
+        }
         let screen = self.screen;
         if self
             .probe
@@ -862,7 +891,7 @@ impl FrameSource {
         {
             self.started = Some(now);
         }
-        Ok(frame)
+        frame
     }
 }
 
@@ -1308,6 +1337,11 @@ impl<T> Default for Probe<T> {
 }
 
 impl<T: Send + 'static> Probe<T> {
+    /// Makes the next probe due at once; it starts once none is in flight.
+    fn due_now(&mut self) {
+        self.next_at = None;
+    }
+
     /// The finished probe's result, if one finished.
     fn take(&mut self) -> Option<T> {
         let rx = self.inflight.as_ref()?;
@@ -1624,6 +1658,9 @@ mod tests {
         captures: Mutex<Vec<u32>>,
         /// When set, every capture blocks until the sender is dropped.
         capture_hang: Option<Mutex<Receiver<()>>>,
+        /// When set, the capture with this index stops the domain and fails, as a capture does when the VM stops
+        /// during it.
+        stops_at_capture: Option<usize>,
     }
 
     impl FakeGuest {
@@ -1642,6 +1679,7 @@ mod tests {
                 frames: Mutex::new(vec![]),
                 captures: Mutex::new(vec![]),
                 capture_hang: None,
+                stops_at_capture: None,
             }
         }
 
@@ -1742,7 +1780,13 @@ mod tests {
             if let Some(rx) = &self.capture_hang {
                 let _ = rx.lock().unwrap().recv();
             }
-            self.captures.lock().unwrap().push(screen);
+            let mut captures = self.captures.lock().unwrap();
+            captures.push(screen);
+            if self.stops_at_capture == Some(captures.len() - 1) {
+                self.domain.store(0, Ordering::Relaxed);
+                bail!("screenshot failed: Requested operation is not valid: domain is not running");
+            }
+            drop(captures);
             let mut frames = self.frames.lock().unwrap();
             let Some(frame) = frames.first().cloned() else {
                 bail!(
@@ -1960,6 +2004,37 @@ mod tests {
             "{err}"
         );
         assert!(env.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_capture_that_fails_as_the_vm_stops_ends_the_wait_as_closed() {
+        // The third capture, about 1 s in, stops the domain and fails; VM checks run every 500 ms.
+        let guest = Arc::new(FakeGuest {
+            stops_at_capture: Some(2),
+            ..FakeGuest::showing(vec![solid(4, 4, 1)])
+        });
+        let env = FakeEnv::new(vec![]);
+        let o = wait_on(&env, &guest, &[settled(None, None)], 10).unwrap();
+        assert!(
+            matches!(o, Outcome::Closed { index: None, ref reason } if reason == "the VM is not running"),
+            "{o:?}"
+        );
+        assert_eq!(
+            guest.captures.lock().unwrap().len(),
+            3,
+            "no capture after the failure"
+        );
+        assert!(env.elapsed() < ms(1500), "{:?}", env.elapsed());
+    }
+
+    #[test]
+    fn a_console_match_in_the_poll_of_a_capture_failure_wins() {
+        // The first capture starts at 0 and fails; its result arrives in the poll at 30 ms, with the output.
+        let guest = Arc::new(FakeGuest::new());
+        let env = FakeEnv::new(vec![(POLL, b"login: ")]);
+        let o = wait_on(&env, &guest, &[settled(None, None), console("login:")], 10).unwrap();
+        assert_eq!(matched(&o), (1, "login:", Some(6)));
+        assert_eq!(env.elapsed(), POLL);
     }
 
     #[test]
