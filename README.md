@@ -129,7 +129,8 @@ ocr_models = "/home/me/.local/share/virtmanager-mcp/ocr" # absolute path
 
 When `ocr_models` is set, the server refuses to start unless the directory holds both model files. When it is unset,
 `screen_text` is refused and `screen_settled` still works. OCR runs in a pool of 4 threads, so it leaves the host's
-other cores to its VMs.
+other cores to its VMs. [`docs/how-to/ocr-models.md`](docs/how-to/ocr-models.md) covers where the models run and how
+to update and remove them.
 
 `mouse` moves, clicks, double-clicks, drags or scrolls. It needs a USB tablet (`<input type='tablet' bus='usb'/>`),
 which VMs from `create_vm` and `create_vm_from_template` have, and it supports display head 0 only. It sends QEMU
