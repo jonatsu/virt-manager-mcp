@@ -28,10 +28,15 @@ start=$(sed 's/.*) //' "/proc/$$/stat" | cut -d ' ' -f 20)
 boot=$(cat /proc/sys/kernel/random/boot_id)
 printf '%s %s %s\n' "$$" "${start}" "${boot}" > "${dir}/pid.tmp" && mv "${dir}/pid.tmp" "${dir}/pid"
 
+code=
 while :; do
   interrupted=
   wait "${child}"
-  code=$?
+  status=$?
+  # bash forgets a PID once wait has reported it, so a repeated wait returns 127; keep the status already seen.
+  if [ "${status}" -ne 127 ] || [ -z "${code}" ]; then
+    code=${status}
+  fi
   # A wait that the TERM handler interrupts returns early; wait again for the command's own status.
   [ -n "${interrupted}" ] || break
 done
