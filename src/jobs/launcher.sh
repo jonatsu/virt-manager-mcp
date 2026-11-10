@@ -29,10 +29,20 @@ check_dir "${base}"
 check_dir "${base}/jobs"
 dir=${base}/jobs/${id}
 mkdir -m 700 "${dir}" || refuse "cannot create ${dir}"
-cat > "${dir}/cmd" || refuse "cannot write ${dir}/cmd"
+# From here on, a job that does not start leaves no directory behind, so it never lists as starting.
+discard() {
+  rm -rf -- "${dir:?}"
+}
+cat > "${dir}/cmd" || {
+  discard
+  refuse "cannot write ${dir}/cmd"
+}
 # The wrapper runs from a file: systemd expands $VAR and %-specifiers in a unit's command line, so script text
 # passed as an argument would be mangled. The paths below hold neither.
-printf '%s\n' "${wrapper}" > "${dir}/run" || refuse "cannot write ${dir}/run"
+printf '%s\n' "${wrapper}" > "${dir}/run" || {
+  discard
+  refuse "cannot write ${dir}/run"
+}
 
 if [ -d /run/systemd/system ] && command -v systemd-run > /dev/null 2>&1; then
   if systemd-run --quiet --collect --unit="virtmanager-mcp-job-${id}" \
@@ -46,5 +56,6 @@ if command -v setsid > /dev/null 2>&1; then
   echo "started with setsid"
   exit 0
 fi
+discard
 echo "failed: neither systemd-run nor setsid could start the job"
 exit 4

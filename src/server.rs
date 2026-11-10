@@ -965,7 +965,8 @@ impl VirtServer {
         ID at once. The job runs detached from the guest agent (through systemd-run, or setsid without systemd), so \
         it survives an agent restart and a server restart. Its stdout and stderr go to one log; read it with \
         job_read, stop it with job_stop, and find jobs again with job_list. A reset or deletion of the VM removes its \
-        jobs."
+        jobs. Where the guest's env lacks --default-signal (busybox, coreutils before 9), the job starts with \
+        SIGINT and SIGQUIT ignored."
     )]
     async fn job_start(
         &self,
