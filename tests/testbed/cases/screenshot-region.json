@@ -5,7 +5,7 @@
       "vm": "trial-deb13"
     },
     "expect": {
-      "matches": "<image saved to shot-\\d+\\.png>\\n\\d+x\\d+$"
+      "matches": "<image saved to shot-\\d+\\.png>\\n1280x800$"
     }
   },
   {
