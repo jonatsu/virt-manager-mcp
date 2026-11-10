@@ -7,6 +7,10 @@
       "vcpus": 1,
       "memory_mib": 512,
       "disk_gib": 1
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM name must be 1-64 characters"
     }
   },
   {
@@ -17,6 +21,10 @@
       "vcpus": 4,
       "memory_mib": 512,
       "disk_gib": 1
+    },
+    "expect": {
+      "error": true,
+      "contains": "vcpus must be between 1 and 2 (manage.max_vcpus)"
     }
   },
   {
@@ -27,6 +35,10 @@
       "vcpus": 1,
       "memory_mib": 512,
       "disk_gib": 1
+    },
+    "expect": {
+      "error": true,
+      "contains": "a VM named 'trial-deb13' already exists"
     }
   },
   {
@@ -38,6 +50,9 @@
       "memory_mib": 512,
       "disk_gib": 1,
       "network": "default"
+    },
+    "expect": {
+      "contains": "created VM 't-new' (1 vCPUs, 512 MiB, 1 GiB disk agent-vms/t-new.qcow2"
     }
   },
   {
@@ -48,6 +63,10 @@
       "vcpus": 1,
       "memory_mib": 512,
       "disk_gib": 1
+    },
+    "expect": {
+      "error": true,
+      "contains": "manage.max_vms = 1"
     }
   },
   {
@@ -59,15 +78,35 @@
       "memory_mib": 512,
       "disk_gib": 1,
       "iso": "/etc/shadow"
+    },
+    "expect": {
+      "error": true,
+      "contains": "/etc/shadow is not inside manage.iso_dirs"
     }
   },
   {
-    "tool": "list_vms"
+    "tool": "list_vms",
+    "expect": {
+      "contains": [
+        "\"name\": \"t-new\"",
+        "\"name\": \"trial-deb13\""
+      ],
+      "absent": [
+        "t-new2",
+        "t-new3"
+      ]
+    }
   },
   {
     "tool": "describe_vm",
     "args": {
       "vm": "t-new"
+    },
+    "expect": {
+      "contains": [
+        "\"created_by_this_server\": true",
+        "\"state\": \"shutoff\""
+      ]
     }
   },
   {
@@ -75,6 +114,9 @@
     "args": {
       "vm": "t-new",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-new': started"
     }
   },
   {
@@ -82,12 +124,21 @@
     "args": {
       "vm": "t-new",
       "force": true
+    },
+    "expect": {
+      "contains": "VM 't-new' is shut off"
     }
   },
   {
     "tool": "delete_vm",
     "args": {
       "vm": "t-new"
+    },
+    "expect": {
+      "contains": [
+        "deleted VM 't-new'",
+        "deleted disk /var/lib/libvirt/images/agent-vms/t-new.qcow2"
+      ]
     }
   }
 ]

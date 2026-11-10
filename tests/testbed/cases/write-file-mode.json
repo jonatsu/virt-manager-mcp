@@ -4,6 +4,9 @@
     "args": {
       "vm": "trial-deb13",
       "command": "rm -f /tmp/mode-default /tmp/mode-explicit /tmp/mode-existing; install -m 640 /dev/null /tmp/mode-existing"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
     }
   },
   {
@@ -12,6 +15,9 @@
       "vm": "trial-deb13",
       "path": "/tmp/mode-default",
       "content": "default\n"
+    },
+    "expect": {
+      "contains": "wrote 8 bytes to /tmp/mode-default"
     }
   },
   {
@@ -21,6 +27,9 @@
       "path": "/tmp/mode-explicit",
       "content": "explicit\n",
       "mode": "600"
+    },
+    "expect": {
+      "contains": "wrote 9 bytes to /tmp/mode-explicit"
     }
   },
   {
@@ -30,6 +39,9 @@
       "path": "/tmp/mode-existing",
       "content": "appended\n",
       "append": true
+    },
+    "expect": {
+      "contains": "wrote 9 bytes to /tmp/mode-existing"
     }
   },
   {
@@ -38,6 +50,9 @@
       "vm": "trial-deb13",
       "path": "/tmp/mode-existing",
       "content": "overwritten\n"
+    },
+    "expect": {
+      "contains": "wrote 12 bytes to /tmp/mode-existing"
     }
   },
   {
@@ -47,6 +62,10 @@
       "path": "/tmp/mode-refused",
       "content": "x\n",
       "mode": "4755"
+    },
+    "expect": {
+      "error": true,
+      "contains": "invalid mode \"4755\""
     }
   },
   {
@@ -54,6 +73,14 @@
     "args": {
       "vm": "trial-deb13",
       "command": "stat -c '%a %n' /tmp/mode-default /tmp/mode-explicit /tmp/mode-existing; ls /tmp/mode-refused 2>&1"
+    },
+    "expect": {
+      "contains": [
+        "644 /tmp/mode-default",
+        "600 /tmp/mode-explicit",
+        "640 /tmp/mode-existing",
+        "cannot access '/tmp/mode-refused'"
+      ]
     }
   },
   {
@@ -61,6 +88,9 @@
     "args": {
       "vm": "trial-deb13",
       "command": "rm -f /tmp/mode-default /tmp/mode-explicit /tmp/mode-existing"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
     }
   }
 ]

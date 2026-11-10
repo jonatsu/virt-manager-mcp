@@ -4,12 +4,18 @@
     "args": {
       "vm": "trial-deb13",
       "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 'trial-deb13': started"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "matches": "console for 'trial-deb13' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -18,6 +24,9 @@
       "vm": "trial-deb13",
       "wait_ms": 30000,
       "max_bytes": 1
+    },
+    "expect": {
+      "contains": "\"closed\":null"
     }
   },
   {
@@ -26,6 +35,9 @@
       "vm": "trial-deb13",
       "wait_ms": 30000,
       "max_bytes": 1
+    },
+    "expect": {
+      "contains": "\"closed\":null"
     }
   },
   {
@@ -34,6 +46,9 @@
       "vm": "trial-deb13",
       "wait_ms": 30000,
       "max_bytes": 1
+    },
+    "expect": {
+      "contains": "\"closed\":null"
     }
   },
   {
@@ -42,6 +57,9 @@
       "vm": "trial-deb13",
       "wait_ms": 30000,
       "max_bytes": 1
+    },
+    "expect": {
+      "contains": "\"closed\":null"
     }
   },
   {
@@ -49,6 +67,12 @@
     "args": {
       "vm": "trial-deb13",
       "max_bytes": 500000
+    },
+    "expect": {
+      "contains": [
+        "\"closed\":null",
+        "GNU GRUB"
+      ]
     }
   }
 ]

@@ -4,6 +4,9 @@
     "args": {
       "vm": "trial-deb13",
       "force": true
+    },
+    "expect": {
+      "matches": "console for 'trial-deb13' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -11,6 +14,9 @@
     "args": {
       "vm": "trial-deb13",
       "text": "root"
+    },
+    "expect": {
+      "contains": "sent 5 bytes"
     }
   },
   {
@@ -19,16 +25,28 @@
       "vm": "trial-deb13",
       "since": 0,
       "wait_ms": 5000
+    },
+    "expect": {
+      "contains": "Password:"
     }
   },
   {
-    "tool": "list_vms"
+    "tool": "list_vms",
+    "expect": {
+      "contains": "\"name\": \"trial-deb13\""
+    }
   },
   {
-    "tool": "list_vms"
+    "tool": "list_vms",
+    "expect": {
+      "contains": "\"name\": \"trial-deb13\""
+    }
   },
   {
-    "tool": "list_vms"
+    "tool": "list_vms",
+    "expect": {
+      "contains": "\"name\": \"trial-deb13\""
+    }
   },
   {
     "tool": "console_read",
@@ -36,6 +54,9 @@
       "vm": "trial-deb13",
       "since": 0,
       "wait_ms": 3000
+    },
+    "expect": {
+      "contains": "Password:"
     }
   },
   {
@@ -43,13 +64,22 @@
     "args": {
       "vm": "trial-deb13",
       "text": "trial"
+    },
+    "expect": {
+      "contains": "sent 6 bytes"
     }
   },
   {
-    "tool": "list_vms"
+    "tool": "list_vms",
+    "expect": {
+      "contains": "\"name\": \"trial-deb13\""
+    }
   },
   {
-    "tool": "list_vms"
+    "tool": "list_vms",
+    "expect": {
+      "contains": "\"name\": \"trial-deb13\""
+    }
   },
   {
     "tool": "console_read",
@@ -57,12 +87,21 @@
       "vm": "trial-deb13",
       "since": 0,
       "wait_ms": 3000
+    },
+    "expect": {
+      "contains": [
+        "Password:",
+        "root@trial-deb13:~#"
+      ]
     }
   },
   {
     "tool": "console_close",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": "console closed"
     }
   }
 ]

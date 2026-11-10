@@ -4,12 +4,21 @@
     "args": {
       "vm": "trial-deb13",
       "force": true
+    },
+    "expect": {
+      "matches": "console for 'trial-deb13' opened \\(generation \\d+\\)"
     }
   },
   {
     "tool": "console_open",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": [
+        "console for 'trial-deb13' is already open",
+        "pass force: true to reopen it"
+      ]
     }
   },
   {
@@ -17,6 +26,9 @@
     "args": {
       "vm": "trial-deb13",
       "force": true
+    },
+    "expect": {
+      "matches": "console for 'trial-deb13' opened \\(generation \\d+\\)"
     }
   },
   {
@@ -24,6 +36,9 @@
     "args": {
       "vm": "trial-deb13",
       "text": ""
+    },
+    "expect": {
+      "contains": "sent 1 bytes"
     }
   },
   {
@@ -31,12 +46,18 @@
     "args": {
       "vm": "trial-deb13",
       "wait_ms": 3000
+    },
+    "expect": {
+      "contains": "trial-deb13 login:"
     }
   },
   {
     "tool": "console_close",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": "console closed"
     }
   }
 ]

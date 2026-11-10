@@ -4,6 +4,14 @@
     "args": {
       "vm": "trial-deb13",
       "command": "hostname; uname -r; id; echo err >&2; exit 3"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":3",
+        "trial-deb13",
+        "uid=0(root)",
+        "--- stderr ---\nerr"
+      ]
     }
   },
   {
@@ -16,6 +24,12 @@
         "$(id)",
         ";rm -rf /"
       ]
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "a b $(id) ;rm -rf /"
+      ]
     }
   },
   {
@@ -24,6 +38,13 @@
       "vm": "trial-deb13",
       "command": "sleep 30; echo late",
       "timeout_secs": 3
+    },
+    "expect": {
+      "contains": [
+        "\"timed_out\":true",
+        "did not finish within 3s"
+      ],
+      "absent": "late"
     }
   },
   {
@@ -32,6 +53,12 @@
       "vm": "trial-deb13",
       "command": "cat",
       "stdin": "piped stdin\n"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "--- stdout ---\npiped stdin"
+      ]
     }
   },
   {
@@ -40,6 +67,9 @@
       "vm": "trial-deb13",
       "path": "/tmp/hello.txt",
       "content": "hello from mcp\n"
+    },
+    "expect": {
+      "contains": "wrote 15 bytes to /tmp/hello.txt"
     }
   },
   {
@@ -49,6 +79,9 @@
       "path": "/tmp/hello.txt",
       "content": "line two\n",
       "append": true
+    },
+    "expect": {
+      "contains": "wrote 9 bytes to /tmp/hello.txt"
     }
   },
   {
@@ -56,6 +89,9 @@
     "args": {
       "vm": "trial-deb13",
       "path": "/tmp/hello.txt"
+    },
+    "expect": {
+      "contains": "hello from mcp\nline two"
     }
   },
   {
@@ -63,6 +99,12 @@
     "args": {
       "vm": "trial-deb13",
       "path": "/tmp/hello.txt"
+    },
+    "expect": {
+      "contains": [
+        "\"type\": \"file\"",
+        "\"size\": 24"
+      ]
     }
   },
   {
@@ -70,6 +112,10 @@
     "args": {
       "vm": "trial-deb13",
       "path": "/tmp/it's a dir; touch /tmp/pwned"
+    },
+    "expect": {
+      "error": true,
+      "contains": "can't cd to /tmp/it's a dir; touch /tmp/pwned"
     }
   },
   {
@@ -77,6 +123,12 @@
     "args": {
       "vm": "trial-deb13",
       "command": "ls /tmp/pwned 2>&1"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":2",
+        "cannot access '/tmp/pwned'"
+      ]
     }
   },
   {
@@ -85,12 +137,24 @@
       "vm": "trial-deb13",
       "path": "/etc/os-release",
       "max_bytes": 80
+    },
+    "expect": {
+      "contains": [
+        "\"truncated\":true",
+        "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\""
+      ]
     }
   },
   {
     "tool": "guest_info",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": [
+        "\"host-name\": \"trial-deb13\"",
+        "\"version-id\": \"13\""
+      ]
     }
   },
   {
@@ -99,6 +163,9 @@
       "vm": "trial-deb13",
       "snapshot": "clean",
       "description": "before marker"
+    },
+    "expect": {
+      "contains": "created snapshot 'clean' of 'trial-deb13'"
     }
   },
   {
@@ -106,12 +173,24 @@
     "args": {
       "vm": "trial-deb13",
       "command": "echo marker > /root/marker && sync && cat /root/marker"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "--- stdout ---\nmarker"
+      ]
     }
   },
   {
     "tool": "snapshot_list",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": [
+        "\"name\": \"clean\"",
+        "\"description\": \"before marker\""
+      ]
     }
   },
   {
@@ -119,6 +198,9 @@
     "args": {
       "vm": "trial-deb13",
       "snapshot": "clean"
+    },
+    "expect": {
+      "contains": "reverted 'trial-deb13' to snapshot 'clean'; the VM is now running"
     }
   },
   {
@@ -126,6 +208,9 @@
     "args": {
       "vm": "trial-deb13",
       "command": "ls /root/marker 2>&1; uptime"
+    },
+    "expect": {
+      "contains": "cannot access '/root/marker'"
     }
   },
   {
@@ -133,12 +218,18 @@
     "args": {
       "vm": "trial-deb13",
       "snapshot": "clean"
+    },
+    "expect": {
+      "contains": "deleted snapshot 'clean' of 'trial-deb13'"
     }
   },
   {
     "tool": "snapshot_list",
     "args": {
       "vm": "trial-deb13"
+    },
+    "expect": {
+      "matches": "^\\[\\]$"
     }
   }
 ]
