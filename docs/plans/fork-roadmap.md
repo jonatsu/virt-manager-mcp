@@ -116,10 +116,10 @@ Reviews of earlier work found these. None blocks the server's use.
     to scan. `Consoles::open` and `Consoles::close` now hold that lock only to check and swap entries, and call
     libvirt and drop a replaced session, which joins its reader and aborts its stream, without it. A separate lock,
     which waits never take, makes opens run one at a time.
-11. **An unterminated OSC sequence hides the output after it.** `ansi::strip` holds back everything after `ESC ]`
-    until a BEL or `ESC \` arrives, so a stray `ESC ]` from line noise stops console waits with `strip_ansi` from
-    matching, and hides the rest of a stripped `console_read`. Capping an OSC at a newline or a few KiB would bound
-    it; a captured boot log would show whether stray sequences occur.
+11. **Done: an unterminated OSC sequence no longer hides the output after it.** `ansi::strip` held back everything
+    after `ESC ]` until a BEL or `ESC \` arrived, so a stray `ESC ]` from line noise stopped console waits with
+    `strip_ansi` from matching. CAN or SUB now aborts an OSC sequence, and a newline, another escape sequence or
+    4 KiB of body ends it, so the text after it shows.
 12. **Console conditions strip the same output once each.** Every console condition runs `ansi::strip` over its own
     span on each poll with new output, which costs little at the default 256 KiB scrollback but grows with
     `console_buffer_bytes` and the number of conditions. Strip once per poll and share the result.

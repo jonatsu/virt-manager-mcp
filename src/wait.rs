@@ -1001,6 +1001,16 @@ mod tests {
     use super::*;
     use crate::console::ScanResult;
 
+    #[test]
+    fn a_stray_osc_start_does_not_hide_a_later_match() {
+        let regex = Regex::new("login: ").unwrap();
+        let data = b"\x1b]noise\nDebian login: ";
+        assert_eq!(
+            find(&regex, true, 100, data),
+            Some((100 + data.len() as u64, "login: ".to_string()))
+        );
+    }
+
     /// A fake console and clock: output chunks appear at set times, and each sleep moves the clock.
     struct FakeEnv {
         clock: Mutex<Instant>,
