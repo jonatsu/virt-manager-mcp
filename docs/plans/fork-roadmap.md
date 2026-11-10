@@ -166,8 +166,12 @@ before it is built, and each feature from the earlier list sits under one of the
    `console_write`; and background jobs on Linux guests (`job_start`, `job_read`, `job_stop`, `job_list`). A
    serial-only OpenWrt guest, `t-owrt`, joined the test bed. Evidence:
    [`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md), whose execution
-   record holds each unit's commits, test-bed results and reviews. Run 2 brings OCR, screen conditions and the mouse,
-   and run 3 brings Windows.
+   record holds each unit's commits, test-bed results and reviews. Run 2 is done: `wait_for` with `screen_settled`,
+   `screen_text` through `ocrs` 0.14 on Rust 1.94, and a screenshot attachment; region screenshots; the `mouse` tool
+   through `input-send-event`; and `scripts/fetch-ocr-models.sh` for `display.ocr_models`. The installer guest
+   `t-inst` and the Windows setup guest `t-win` joined the test bed. Evidence:
+   [`live-interaction-run-2-implementation-plan.md`](live-interaction-run-2-implementation-plan.md), whose execution
+   record holds each unit's commits, test-bed results and reviews. Run 3 brings Windows jobs and the guest agent.
 3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
    passing them through its context, and reaches services running in the guest. This covers copying from the VM,
    directory sync, the guest's IP address and port forwarding. Each new path out of the guest needs a guardrail.
@@ -209,7 +213,9 @@ outside-disk test-bed cases passed with no `t-*` VM or volume left and the templ
 conformance review found no material mismatch. The manual root check for follow-up 7 passed at `1f4d8ed`.
 
 Outcome 2 comes from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each with
-its own plan. Run 1 is done, per
-[`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md). Next is the plan for
-run 2: OCR with the screen-text and settled-screen conditions, the mouse, region screenshots, and the screenshot
-attachment for `wait_for`. It starts with the probe that decides between `ocrs` and Tesseract.
+its own plan. Runs 1 and 2 are done, per
+[`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md) and
+[`live-interaction-run-2-implementation-plan.md`](live-interaction-run-2-implementation-plan.md). Next is the plan for
+run 3: an unattended Windows 11 Pro install with the `virtio-win` serial driver and `qemu-ga`, Windows jobs, the
+`command` condition on Windows, and screen waits and the mouse on that guest. Its risks include the inversion that
+damages the setup screen's small text, which the design records.
