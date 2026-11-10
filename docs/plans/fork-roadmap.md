@@ -136,7 +136,8 @@ Reviews of earlier work found these. None blocks the server's use.
 14. **Done: the apparent console stall was a race in `owrt-pacing.json`.** The case sent its unpaced burst 1 ms after
     `cat > /tmp/unpaced`. The burst reached the guest while its shell still held the terminal in raw, no-echo mode,
     so nothing was echoed, and `cat` also swallowed the Ctrl-D and the `wc` line after it. The server delivered
-    every byte. The case now pauses after starting `cat` and after each Ctrl-D, and it passes. Evidence:
+    every byte. The case now pauses after starting `cat` and after each Ctrl-D, and it passes. Agents face the same
+    race, so the `console_write` description and the README tell them to wait for the program's prompt first. Evidence:
     [`2026-11-10-owrt-pacing-stall.md`](../research/2026-11-10-owrt-pacing-stall.md).
 
 ## Outcomes

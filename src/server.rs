@@ -932,7 +932,10 @@ impl VirtServer {
         generation where the guest's answer starts; wait_for and console_read can start there. For a receiver that \
         drops input sent back to back, pace the write: inter_char_delay_ms pauses between bytes, or chunk_size with \
         chunk_delay_ms pauses between chunks. The pauses may total at most limits.max_wait_secs. One write runs at \
-        a time per console; a second one is refused while the first is still sending."
+        a time per console; a second one is refused while the first is still sending. Send input only once the \
+        program that should read it is waiting for it: right after a command line, the shell may still hold the \
+        terminal in its own mode, so input that arrives before the command starts can be swallowed without echo, and \
+        a Ctrl-D in it read as data. Wait for the program's prompt with wait_for, or pause, before sending its input."
     )]
     async fn console_write(
         &self,

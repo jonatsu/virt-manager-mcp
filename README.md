@@ -276,6 +276,10 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 - `console_write` can pause between bytes (`inter_char_delay_ms`) or between chunks (`chunk_size` with
   `chunk_delay_ms`), up to 1000 ms each, for firmware and bootloaders that drop input sent back to back. A write
   whose pauses would exceed `limits.max_wait_secs` is refused.
+- Input sent before the guest program that should read it is waiting can go astray. Right after a command line, the
+  shell may still hold the terminal in its own raw, no-echo mode, so input that arrives before the command starts
+  is not echoed, and a Ctrl-D in it is read as data. Wait for the program's prompt with `wait_for`, or pause, before
+  sending its input.
 - Jobs keep their files in `/var/lib/virtmanager-mcp/jobs/<id>/` in the guest and run under `systemd-run`, or
   `setsid` without systemd, so they survive an agent restart and a server restart. The launcher refuses a job
   directory parent that is a symbolic link, or is not a root-owned directory with mode 700. Windows guests are
