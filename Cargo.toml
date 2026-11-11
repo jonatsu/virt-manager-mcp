@@ -1,6 +1,6 @@
 [package]
 name = "virtmanager-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # The minimum Rust version, which rten 0.28 (used by ocrs 0.14) requires; CI builds with it.
 rust-version = "1.94"
