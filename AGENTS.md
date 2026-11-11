@@ -10,6 +10,8 @@ This repository is a Rust MCP server that gives AI agents guarded access to libv
 - Treat `example-global-CLAUDE.md` and `example-global-AGENTS.md` as product templates for the server's users. They
   are not instructions for working on this repository.
 - Use Conventional Commits, one logical change per commit.
+- Record each change that operators or agents notice under `## Unreleased` in `CHANGELOG.md`, in the commit that makes
+  it. `CONTRIBUTING.md` defines the version rules and the release steps.
 - Keep designs in `docs/plans/<name>-design.md` short and plain: summary, decisions, behaviour, invariants, risks,
   open questions. Do not use arc42 or other heavy templates.
 - Write plans and designs in the project's own voice. State what holds and what was decided, not who decided it or

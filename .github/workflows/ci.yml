@@ -1,20 +1,24 @@
-# Build gate for every push and pull request to main. The libvirt test bed
-# (tests/testbed/) stays local, because hosted runners have no VMs to drive.
-# Actions are pinned by commit SHA; the comment names the release.
+# Build gate for every push and pull request to main, and for version tags, where
+# the release job publishes a GitHub release once the gate passes (CONTRIBUTING.md).
+# The libvirt test bed (tests/testbed/) stays local, because hosted runners have no
+# VMs to drive. Actions are pinned by commit SHA; the comment names the release.
 name: CI
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
+# Every job reads only; the release job alone asks for write access.
 permissions:
   contents: read
 
+# A newer push cancels an older run of the same branch; a tag's run always finishes.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -86,3 +90,58 @@ jobs:
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         env:
           SKIP: cargo-fmt,cargo-clippy
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust, msrv, advisories, pre-commit]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install libvirt development files
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvirt-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - name: Check the tag against Cargo.toml
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match version ${version} in Cargo.toml" >&2
+            exit 1
+          fi
+      # A pre-release (a version with a suffix, such as 0.3.0-rc.1) gets generated notes instead.
+      - name: Extract the changelog section
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          # The section under "## X.Y.Z", without its heading, up to the next "## " heading.
+          awk -v heading="## ${GITHUB_REF_NAME#v}" '$0 == heading {found = 1; next} found && /^## / {exit} found' \
+            CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md has no '## ${GITHUB_REF_NAME#v}' section" >&2
+            exit 1
+          fi
+      - run: cargo build --release --locked
+      - name: Package the build
+        run: |
+          name="virtmanager-mcp-${GITHUB_REF_NAME#v}-x86_64-linux-gnu"
+          mkdir -p "dist/${name}/scripts"
+          cp target/release/virtmanager-mcp LICENSE README.md CHANGELOG.md config.example.toml "dist/${name}/"
+          cp scripts/make-template.sh scripts/fetch-ocr-models.sh "dist/${name}/scripts/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ${GITHUB_REF_NAME} == *-* ]]; then
+            notes=(--generate-notes --prerelease)
+          else
+            notes=(--notes-file release-notes.md)
+          fi
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" \
+            --verify-tag "${notes[@]}" dist/*.tar.gz dist/*.tar.gz.sha256
