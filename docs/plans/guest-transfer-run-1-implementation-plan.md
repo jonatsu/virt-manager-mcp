@@ -1,6 +1,6 @@
 # Moving code and results, run 1: implementation plan
 
-Status: draft, awaiting a plan-critic review and approval. Built from
+Status: draft, revised for a plan-critic review, awaiting approval. Built from
 [`guest-transfer-design.md`](guest-transfer-design.md) at `1e15bdc`. The design owns behaviour; this plan owns order and
 checks. Progress goes in the execution record at the end. Run 2, directory transfers on Windows guests, gets its own
 plan once this run has landed.
@@ -34,6 +34,15 @@ flowchart LR
   U7 --> U8[8 Docs and final gate]
 ```
 
+### Design amendment this plan needs
+
+In raw mode, the `tar` crate 0.4.46 reads past each entry by the size in its ustar header and ignores a PAX `size`
+record (`archive.rs:387`). An unpacker that merged PAX records and honoured `size` would lose its place in the stream.
+The unpacker therefore refuses an entry that carries a PAX `size` record, and any PAX global header. Real guest
+archives need neither below 8 GiB per file, and `max_pull_bytes` defaults to 1 GiB: GNU tar and busybox write their
+own formats, and bsdtar writes PAX records only for long or non-ASCII names and sizes over 8 GiB. The design's list
+of unpacker checks takes this in unit 5's commit.
+
 ## Preflight
 
 These apply to every unit, which names only its additions.
@@ -42,10 +51,16 @@ These apply to every unit, which names only its additions.
   test that shows its refusal still happens. Load `rust-style`, `rust-error-handling` and `rust-testing` before
   editing Rust, `rust-unix-processes` before the `rustix` file calls, and `bash-shell` before editing `run-all.sh`.
 - **Gate.** Every commit passes the build gate in `AGENTS.md`, plus `cargo +1.94 test --locked`.
-- **Dependencies.** Units 2, 4 and 5 add `rustix`, `ignore` and `tar` with `cargo add`. Each must pass
-  `cargo deny check advisories` and build on Rust 1.94. Record each crate's version and licence in the unit's row.
-- **Dead code.** The crate is a binary, so an item without a caller fails clippy. Add each item in the unit that first
-  calls it.
+- **Dependencies.** Unit 1 adds `rustix` with its `fs` feature, unit 4 adds `ignore` (0.4.33 needs Rust 1.88), and
+  units 4 and 5 add `tar`, all with `cargo add`. Each must pass `cargo deny check advisories` and build on Rust 1.94.
+  Record each crate's version and licence in the unit's row.
+- **Dead code.** The crate is a binary, so an item without a caller fails clippy, a config field nobody reads
+  included. Add each item in the unit that first reads or calls it: `max_pull_bytes` in unit 2, `max_transfers` in
+  unit 3, `max_pull_entries` in unit 5.
+- **Host memory and disk.** `/tmp`, and with it `run-all.sh`'s work directory, is tmpfs on this host, so files there use
+  RAM. Test files stay at 128 MiB or less, the caps are lowered in the cases' configs rather than filled, and each case
+  deletes its large host files when it ends. Check `df -h /` in `trial-deb13` before a case that builds a tree there,
+  and delete the tree afterwards.
 - **Seams.** Unit tests never touch libvirt. Guest calls go through the agent's `Channel` trait in `src/agent.rs`, which
   tests implement with a scripted guest. Host file code takes the pull or share directory as an opened handle, so tests
   run it in a `tempfile` directory. Crafted archives for the unpacker are built in the tests with the `tar` crate's
@@ -65,16 +80,15 @@ These apply to every unit, which names only its additions.
 
 ### 1. Pull configuration (reviewed, Opus)
 
-**Outcome.** The server accepts `host_pull_dirs` and the three new limits, and refuses to start on a pull directory
-that overlaps anything a guest must not write. Every pull directory has a usable staging directory, and leftovers of a
+**Outcome.** The server accepts `host_pull_dirs`, and refuses to start on a pull directory that overlaps anything a
+guest must not write. Every pull directory has a usable staging directory, and leftovers of a
 dead server are gone at start. This realizes the design's "Configuration" section and the staging cleanup under "Host
 rules for every pull".
 
 **Changes.**
 
-- `src/config.rs`: `host_pull_dirs`, canonicalized like `host_share_dirs`, and `limits.max_pull_bytes` (1 GiB),
-  `limits.max_pull_entries` (100,000) and `limits.max_transfers` (4). The overlap check against share directories, the
-  project directory and `manage.iso_dirs` runs when the config loads.
+- `src/config.rs`: `host_pull_dirs`, canonicalized like `host_share_dirs`, so each entry must exist. The overlap
+  check against share directories, the project directory and `manage.iso_dirs` runs when the config loads.
 - A new module, `src/transfer/host.rs` (the name is the implementer's choice), holding the staging directory: it
   creates `.vmm-staging/` with mode 700, tries `renameat2` with `RENAME_NOREPLACE` and `RENAME_EXCHANGE` on two scratch
   entries there, and deletes staged entries whose lock file no process holds an `flock` on.
@@ -87,7 +101,8 @@ rules for every pull".
 the project directory, an ISO directory, and a pool target, each in both directions. The cleanup test holds a lock in
 one handle and shows that entry survives while an unlocked one goes. A filesystem without `renameat2` support cannot be
 made here, so a test injects the failure into the probe function and shows the refusal. On the host, a server started
-with a pull directory inside `/var/lib/libvirt/images` refuses to start, without changing anything there.
+with `host_pull_dirs = ["/var/lib/libvirt/images/agent-vms"]`, the `agent-vms` pool's existing target, refuses to
+start with a message that names that pool, and the pool's volume list is unchanged.
 
 **Review.** Opus `code-reviewer`, for the overlap logic with symlinked and relative paths, and for the pool check
 reading every pool rather than only `manage.disk_pool`.
@@ -104,12 +119,16 @@ and `max_pull_bytes`. The call still blocks until the copy ends; unit 3 adds the
   with `O_NOFOLLOW` through `rustix`, creating missing directories with mode 755; refusing a destination inside
   `.vmm-staging/` or whose last component is a symlink; a staged file created with `O_EXCL` beside its `flock`ed lock
   file; `fchmod` to 644; `renameat2` with `RENAME_NOREPLACE`, or `RENAME_EXCHANGE` with `overwrite` after checking the
-  old entry is a file; deleting the staged entry on every failure.
+  old entry is a file; deleting the staged entry on every failure. After an exchange, the server checks the type of
+  the entry that came back into staging. If another process had put a directory at the destination meanwhile, it swaps
+  back and fails, and it deletes a returned entry only as a single file, never recursively.
+- `src/config.rs`: `limits.max_pull_bytes`, default 1 GiB.
 - An in-process set of running destinations, refusing a destination equal to, above or below a running one.
 - `src/agent.rs`: a streaming read into a writer, mirroring `write_from`, which stops once `max_pull_bytes` is passed.
 - `src/server.rs`: the `copy_from_vm` tool, advertised only when `host_pull_dirs` is set and read-only mode is off,
-  with `read_only_hint` false, `destructive_hint` true and `idempotent_hint` false. Read-only mode also stops
-  advertising `copy_to_vm`, as the design requires; the read-only test's tool list changes to match.
+  with `read_only_hint` false, `destructive_hint` true and `idempotent_hint` false, and listed in `MUTATING_TOOLS`,
+  which read-only mode hides (`server.rs:46`). `copy_to_vm` is already on that list. Units 4 and 5 add their tools to
+  it the same way.
 
 **Verification.** Unit tests against a scripted guest and a `tempfile` pull directory:
 
@@ -121,6 +140,8 @@ and `max_pull_bytes`. The call still blocks until the copy ends; unit 3 adds the
 - a guest file larger than `max_pull_bytes` fails and leaves no entry at the destination or in the staging directory;
 - a guest read error mid-copy leaves nothing behind;
 - two pulls to the same path, or to a path and its parent, conflict in one process;
+- a directory placed at the destination between the type check and the exchange, simulated through a hook in the
+  test, is swapped back intact and the pull fails;
 - read-only mode advertises neither `copy_from_vm` nor `copy_to_vm`.
 
 On `trial-deb13`, a pull of `/etc/os-release` matches `sha256sum` in the guest.
@@ -136,11 +157,16 @@ section.
 **Changes.**
 
 - A transfer table beside the jobs: random IDs; per transfer its VM name and UUID, kind, bytes moved, state and result;
-  the 64 most recent finished results kept; at most `max_transfers` running, a further copy refused.
+  the 64 most recent finished results kept; at most `limits.max_transfers` (default 4, added to `src/config.rs` here)
+  running, a further copy refused.
+- A transfer outlives the call that started it, so it owns its `Domain` rather than borrowing one, as `Agent` does
+  today (`server.rs:1784`); `Domain` is `Send + Sync` in `virt` 0.4.3.
 - `copy_to_vm` and `copy_from_vm` start a transfer on a blocking thread and wait for it up to the call's limit. A copy
   that finishes in time replies as before; otherwise the reply gives the transfer ID, the bytes so far and `running`.
   A cancelled call leaves the transfer running.
-- `src/server.rs`: `wait_for` answers a `transfer_done` condition from the table before it looks up the VM. It refuses
+- `src/server.rs`: `wait_for` answers a `transfer_done` condition from the table before it looks up the VM, through a
+  function over the table that takes the call's VM argument and the ID, so unit tests reach it without libvirt. It
+  refuses
   `transfer_done` combined with any other condition, an ID of another VM by name or UUID, and an unknown ID, which it
   reports as a transfer that ended with its server process or never existed. While the transfer runs, the wait polls
   the table until it finishes or the wait's own limit passes.
@@ -150,13 +176,15 @@ section.
 
 - a short copy replies with its result; a long one replies with an ID within the limit, and `transfer_done` later
   returns the same result the copy would have given;
-- a transfer whose VM was stopped mid-copy reports its failure through `transfer_done`, with the VM lookup failing;
+- a transfer whose VM was stopped mid-copy reports its failure through the table function, which never looks the VM
+  up;
 - `transfer_done` with another condition, with another VM's name, and with an unknown ID is refused;
 - a fifth concurrent copy is refused with the default limit;
 - after 65 finished transfers, the oldest result is gone.
 
-On `trial-deb13`, with `max_wait_secs` set to 2 in the case's config, a 256 MiB `copy_to_vm` replies with an ID, and
-`transfer_done` reports the copy complete; the guest's checksum matches.
+On `trial-deb13`, with `max_wait_secs` set to 2 in a scratch config, a 128 MiB `copy_to_vm` replies with an ID, and
+`transfer_done` reports the copy complete; the guest's checksum matches. The host and guest files are deleted
+afterwards.
 
 **Review.** Opus `code-reviewer`, for the blocking-thread use, cancellation and the table's locking.
 
@@ -186,10 +214,13 @@ design's "Pushing a directory" and "Paths" sections describe, through a transfer
   `b -> .`, `a -> b/../x` are skipped and named;
 - a directory swapped for a symlink between selection and reading is not followed;
 - a FIFO is skipped and named; a setuid file arrives without the bit;
-- the guest commands are refused for `/`, `/usr` and an existing target without `replace`.
+- the guest commands are refused for `/`, `/usr` and an existing target without `replace`, and `replace` onto a file
+  is refused;
+- with a scripted guest, a failure at each guest step (writing the archive, `tar -x`, each move) leaves the old tree in
+  place and deletes the temporary entries.
 
-On `trial-deb13`, a push of this repository's `src/` and `tests/` matches by checksum, `target/` is absent, and a
-second push with `replace` after deleting a host file leaves no copy of that file.
+On `trial-deb13`, a push of a copy of this repository's `src/` and `tests/` in a scratch share matches by checksum,
+an ignored file is absent, and a second push with `replace` after deleting a host file leaves no copy of that file.
 
 **Review.** Opus `code-reviewer`, for the walk and the guest-side command construction.
 
@@ -200,13 +231,18 @@ section describes, through a transfer.
 
 **Changes.**
 
+- `src/agent.rs`: the helpers the pull needs. `kill` becomes callable from the transfer code; a size query seeks to
+  the end of a file (`read_file` seeks only from the start today); and `tar` runs through the existing start and
+  status calls rather than the synchronous `exec`, so the transfer can poll while it runs.
+- `src/config.rs`: `limits.max_pull_entries`, default 100,000.
 - The guest side: refuse a `guest_path` that is not a directory; run `tar -c -f <archive> -C <guest_path> .` with the
-  archive in `/var/tmp`, or `/tmp` where `/var/tmp` is missing; poll the archive's size with the agent's seek call and
-  kill `tar` once it passes `max_pull_bytes`; treat exit status 1 with GNU tar's "file changed as we read it" as a
+  archive in `/var/tmp`, or `/tmp` where `/var/tmp` is missing; poll the archive's size and kill `tar` once it passes
+  `max_pull_bytes`; treat exit status 1 with GNU tar's "file changed as we read it" as a
   warning and any other non-zero status as failure; stream the archive out and delete it.
 - `src/transfer/pull.rs` (name free): the unpacker over `tar::Entries` in raw mode, merging long-name and PAX headers
   itself with a 64 KiB limit; failing on an absolute path, a `..` component, a repeated path, a file and directory at
-  one path, a GNU sparse entry, a PAX entry with `GNU.sparse.*` keys, or a passed cap; skipping and naming links,
+  one path, a GNU sparse entry, a PAX entry with `GNU.sparse.*` keys or a `size` record, a PAX global header, or a
+  passed cap; skipping and naming links,
   devices, FIFOs and sockets; applying `exclude` in gitignore syntax; writing into a staged directory with modes 644
   and 755 set by `fchmod`, then moving it into place as unit 2 does, with `overwrite` replacing only a directory.
 - `src/server.rs`: the tool, hidden in read-only mode and without `host_pull_dirs`, destructive and not idempotent.
@@ -214,11 +250,18 @@ section describes, through a transfer.
 **Verification.** Unit tests feed the unpacker crafted archives: each failure above writes nothing and leaves the
 staging directory empty; a tree with a symlink, a hard link and a FIFO arrives without them and names them; an archive
 of 100,001 empty files fails on the entry cap; a sparse entry declaring 1 TiB fails before any write; `exclude`
-patterns match as in `.gitignore`. On `trial-deb13`, a pulled tree matches the guest's checksums with every mode 644 or
-755, and a pull of a 2 GiB tree with the default cap stops `tar` and leaves no archive in `/var/tmp`. The pull's rate
-is measured with a 256 MiB file.
+patterns match as in `.gitignore`; a PAX `size` record and a PAX global header each fail the pull. Scripted-guest
+tests show that `tar` exit status 1 with "file changed as we read it" succeeds with the warning, that status 1 with
+another message and status 2 fail, that `overwrite` onto a file at the destination is refused, and that a growing
+archive is killed once it passes the cap.
+
+On `trial-deb13`, a pulled tree matches the guest's checksums with every mode 644 or 755. With `max_pull_bytes` set
+to 64 MiB in a scratch config, a pull of a 128 MiB tree built in `/var/tmp` stops `tar` and leaves no archive; the
+tree is deleted afterwards. The pull's rate is measured with a 128 MiB file.
 
 **Review.** Opus `code-reviewer`, for the unpacker against the design's list and for the size polling.
+
+The same commit adds the plan's design amendment to the design's unpacker list.
 
 ### 6. `vm_addresses` (reviewed)
 
@@ -246,21 +289,29 @@ with every call checked.
 
 **Changes.**
 
-- `run-all.sh` writes a transfer config with a pull directory and a share directory under its work directory, seeds the
-  cases' saved values with their paths, and builds a small test tree with a `.gitignore`, a symlink inside and one
-  outside the tree, and a FIFO.
+- `run-all.sh` writes a transfer config with a pull directory and a share directory under its work directory. It builds
+  a small, deterministic test tree there, with a `.gitignore`, a symlink inside and one outside the tree, and a FIFO,
+  so the cases can expect known checksums. `mcp_call.py` fills saved values only into `args`, not into `expect`, and
+  `run-all.sh` deletes `vars.json` between units, so `run-all.sh` writes the paths into `vars.json` right before each
+  transfer case.
+- `mcp_call.py` cannot see host files, so after each case `run-all.sh` checks the host side in Bash: the pulled files'
+  checksums, every mode 644 or 755, nothing executable, and an empty `.vmm-staging/`. A failed check fails the unit.
 - New cases: `transfer-file.json` (file pull, refusals, `overwrite`, the type rule), `transfer-push.json` (push,
   ignored files, skipped links, `replace`, the root guard), `transfer-pull.json` (pull, skipped entries, the caps),
-  `transfer-background.json` (with `max_wait_secs` of 2: a long push and a long pull through `transfer_done`, and a VM
-  stopped during a transfer), and `addresses.json` (`trial-deb13` by lease, then again with its guest agent stopped
-  for 30 s, as `start-vm-waits-for-agent.json` does, still by lease). No test-bed guest without a guest agent has a
-  network interface, so the agent-stopped run stands in for one.
+  `transfer-background.json` (with `max_wait_secs` of 2: a long push and a long pull of 128 MiB through
+  `transfer_done`, and a VM stopped during a push). The stop leaves `.vmm-*` entries beside the push target on the
+  guest's disk (design risk 1), so `run-all.sh` starts `trial-deb13` again through its existing readiness check and
+  deletes the entries under the known target before the next case. The remaining case is `addresses.json`:
+  `trial-deb13` by lease, then again with its guest agent stopped for 30 s, as `start-vm-waits-for-agent.json` does,
+  still by lease. No test-bed guest without a guest agent has a network interface, so the agent-stopped run stands in
+  for one.
 - `win-transfer.json` on `t-win11`: `copy_to_vm` and `copy_from_vm` of a file under `C:\Windows\Temp` with matching
   checksums, and `vm_addresses`, which returns an empty list because `t-win11` has no network interface.
 - The test-bed README lists the cases.
 
 **Verification.** `run-all.sh` with the new units passes twice in a row, and leaves no `.vmm-*` entry in the guests'
-temporary directories or the pull directory's staging directory.
+temporary directories, under the push targets, or in the pull directory's staging directory. The work directory holds
+no file over 1 MiB once the run ends.
 
 ### 8. Docs and final gate
 
