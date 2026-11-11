@@ -5,6 +5,11 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+### Fixed
+
+- `exec` with PowerShell on Windows no longer fills stderr with CLIXML progress records such as "Preparing modules
+  for first use".
+
 ## 0.2.0
 
 The first release of this fork. It covers every change since upstream's `v1.0`, including upstream's VM management.

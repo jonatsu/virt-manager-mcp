@@ -1886,8 +1886,10 @@ fn shell_spec(os: GuestOs, shell: Shell, cmd: &str) -> Result<ExecSpec> {
     Ok(match (os, shell) {
         (GuestOs::Linux, Shell::Default | Shell::Sh) => ExecSpec::new("/bin/sh", ["-c", cmd]),
         (GuestOs::Linux, Shell::Bash) => ExecSpec::new("bash", ["-c", cmd]),
+        // Without a console, PowerShell writes its progress records to stderr as CLIXML, such as "Preparing modules
+        // for first use", so they are turned off.
         (GuestOs::Windows, Shell::Default | Shell::Powershell) => powershell(&format!(
-            "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}"
+            "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}"
         )),
         (GuestOs::Windows, Shell::Cmd) => ExecSpec::new(
             "cmd.exe",
@@ -1909,6 +1911,27 @@ fn json_block<T: serde::Serialize>(v: &T) -> Result<ContentBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The script a PowerShell `ExecSpec` carries in its `-EncodedCommand` argument.
+    fn encoded_script(spec: &ExecSpec) -> String {
+        let bytes = B64.decode(spec.args.last().unwrap()).unwrap();
+        let utf16: Vec<u16> = bytes
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&utf16).unwrap()
+    }
+
+    #[test]
+    fn windows_powershell_turns_off_progress_and_writes_utf8() {
+        for shell in [Shell::Default, Shell::Powershell] {
+            let script = encoded_script(&shell_spec(GuestOs::Windows, shell, "Get-Date").unwrap());
+            assert_eq!(
+                script,
+                "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\nGet-Date"
+            );
+        }
+    }
 
     #[test]
     fn every_tool_states_its_hints() {
