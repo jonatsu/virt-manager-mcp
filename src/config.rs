@@ -349,17 +349,20 @@ fn canonicalize_dirs(dirs: &mut [PathBuf], key: &str) -> Result<()> {
 /// VM's disk.
 pub fn refuse_overlaps(pull_dirs: &[PathBuf], others: &[(&str, &[PathBuf])]) -> Result<()> {
     for pull in pull_dirs {
-        for (key, dirs) in others {
-            if let Some(other) = dirs
-                .iter()
-                .find(|d| pull.starts_with(d) || d.starts_with(pull))
-            {
-                bail!(
-                    "host_pull_dirs: {} overlaps {} in {key}; a guest could write there",
-                    pull.display(),
-                    other.display()
-                );
-            }
+        let overlaps: Vec<String> = others
+            .iter()
+            .flat_map(|(key, dirs)| {
+                dirs.iter()
+                    .filter(|d| pull.starts_with(d) || d.starts_with(pull))
+                    .map(move |d| format!("{} in {key}", d.display()))
+            })
+            .collect();
+        if !overlaps.is_empty() {
+            bail!(
+                "host_pull_dirs: {} overlaps {}; a guest could write there",
+                pull.display(),
+                overlaps.join(", ")
+            );
         }
     }
     Ok(())
@@ -521,6 +524,26 @@ mod tests {
             .to_string();
         assert!(err.contains("storage pool agent-vms"), "{err}");
         refuse_overlaps(std::slice::from_ref(&c), &pool).unwrap();
+        // The other direction: a pull directory inside a pool's target. Every overlapping pool is named.
+        let pools = [
+            ("storage pool default", std::slice::from_ref(&root)),
+            ("storage pool vms", std::slice::from_ref(&a)),
+        ];
+        let err = refuse_overlaps(std::slice::from_ref(&inner), &pools)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("storage pool default") && err.contains("storage pool vms"),
+            "{err}"
+        );
+        // share_project_dir adds the project directory to host_share_dirs before the pull check, so a project
+        // directory is refused like any share; `project_dir` is what validate pushes.
+        let project = project_dir(a.clone(), None).unwrap();
+        let err = config(&inner, &project, &b)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("host_share_dirs"), "{err}");
 
         // A missing pull directory is refused before anything else.
         let err = config(&root.join("missing"), &a, &b)

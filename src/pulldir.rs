@@ -7,7 +7,7 @@
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -28,13 +28,14 @@ const STALE_AFTER: Duration = Duration::from_secs(60);
 /// renames pulls rely on, and removes what dead pulls left behind.
 pub fn prepare(pull_dirs: &[PathBuf]) -> Result<()> {
     for dir in pull_dirs {
-        let staging = staging_dir(dir)?;
+        let context = || format!("host_pull_dirs: {}", dir.display());
+        let staging = staging_dir(dir).with_context(context)?;
         check_renames(&staging, &|from, to, flags| {
             renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, flags)
                 .map_err(io::Error::from)
         })
-        .with_context(|| format!("host_pull_dirs: {}", dir.display()))?;
-        let removed = remove_stale(&staging, STALE_AFTER)?;
+        .with_context(context)?;
+        let removed = remove_stale(&staging, STALE_AFTER).with_context(context)?;
         if removed > 0 {
             tracing::info!(
                 "removed {removed} entries of ended pulls from {}",
@@ -46,7 +47,7 @@ pub fn prepare(pull_dirs: &[PathBuf]) -> Result<()> {
 }
 
 /// Creates `dir/.vmm-staging` with mode 700, or checks that the existing one is a real directory owned by this
-/// account, and returns its path.
+/// account and makes it private again, and returns its path.
 fn staging_dir(dir: &Path) -> Result<PathBuf> {
     let staging = dir.join(STAGING);
     match DirBuilder::new().mode(0o700).create(&staging) {
@@ -57,10 +58,21 @@ fn staging_dir(dir: &Path) -> Result<PathBuf> {
     let meta =
         fs::symlink_metadata(&staging).with_context(|| format!("reading {}", staging.display()))?;
     if !meta.is_dir() {
-        bail!("{} is not a directory", staging.display());
+        bail!(
+            "{} is not a directory; remove it so the server can create its staging directory there",
+            staging.display()
+        );
     }
     if meta.uid() != rustix::process::geteuid().as_raw() {
-        bail!("{} belongs to another user", staging.display());
+        bail!(
+            "{} belongs to another user; remove it, or choose a pull directory of this account",
+            staging.display()
+        );
+    }
+    if meta.mode() & 0o077 != 0 {
+        // The path is a real directory of this account, checked above, so this changes nothing else.
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("making {} private", staging.display()))?;
     }
     Ok(staging)
 }
@@ -106,42 +118,53 @@ fn create_new(path: &Path) -> io::Result<File> {
 
 /// Removes the entries of pulls that no process runs any more, and returns how many it removed. A pull is over when
 /// nobody holds the lock on its lock file, or when it has no lock file. Entries younger than `min_age` stay, because
-/// a pull may be between creating its lock file and locking it.
+/// a pull may be between creating its lock file and locking it. Other server processes may finish pulls meanwhile,
+/// and a leftover entry harms nothing, so an entry that vanishes is skipped and any other problem with one entry is
+/// logged rather than stopping the server.
 fn remove_stale(staging: &Path, min_age: Duration) -> Result<usize> {
     let now = SystemTime::now();
     let mut removed = 0;
     let entries =
         fs::read_dir(staging).with_context(|| format!("reading {}", staging.display()))?;
     for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let meta = entry.metadata()?;
-        let young = meta
-            .modified()
-            .ok()
-            .and_then(|m| now.duration_since(m).ok())
-            .is_none_or(|age| age < min_age);
-        if young {
-            continue;
-        }
-        let id = pull_id(name);
-        if is_running(staging, id)? {
-            continue;
-        }
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
-        let gone = if meta.is_dir() {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
-        match gone {
-            Ok(()) => removed += 1,
+        match remove_if_stale(staging, &entry, now, min_age) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+            Err(e) => tracing::warn!("leaving {} in place: {e}", path.display()),
         }
     }
     Ok(removed)
+}
+
+/// Removes one staging entry if it is old enough and its pull is over; returns whether it did.
+fn remove_if_stale(
+    staging: &Path,
+    entry: &fs::DirEntry,
+    now: SystemTime,
+    min_age: Duration,
+) -> io::Result<bool> {
+    let name = entry.file_name();
+    let Some(name) = name.to_str() else {
+        return Ok(false);
+    };
+    let meta = entry.metadata()?;
+    let young = meta
+        .modified()
+        .ok()
+        .and_then(|m| now.duration_since(m).ok())
+        .is_none_or(|age| age < min_age);
+    if young || is_running(staging, pull_id(name))? {
+        return Ok(false);
+    }
+    if meta.is_dir() {
+        fs::remove_dir_all(entry.path())?;
+    } else {
+        fs::remove_file(entry.path())?;
+    }
+    Ok(true)
 }
 
 /// The pull ID an entry in the staging directory belongs to: its name up to the first dot.
@@ -149,24 +172,24 @@ fn pull_id(name: &str) -> &str {
     name.split('.').next().unwrap_or(name)
 }
 
-/// Whether some process holds the lock of pull `id` in `staging`.
-fn is_running(staging: &Path, id: &str) -> Result<bool> {
+/// Whether some process holds the lock of pull `id` in `staging`. The lock file is opened without following a
+/// symlink and without blocking, so a FIFO planted in its place cannot hang start-up.
+fn is_running(staging: &Path, id: &str) -> io::Result<bool> {
     let path = staging.join(format!("{id}{LOCK_SUFFIX}"));
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
     let file = match OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags(flags.bits() as i32)
         .open(&path)
     {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
+        Err(e) => return Err(e),
     };
     match file.try_lock() {
         Ok(()) => Ok(false),
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
-        Err(std::fs::TryLockError::Error(e)) => {
-            Err(e).with_context(|| format!("locking {}", path.display()))
-        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
 }
 
@@ -204,7 +227,7 @@ mod tests {
         let pull = dir.join("pull");
         fs::create_dir(&pull).unwrap();
         std::os::unix::fs::symlink(&elsewhere, pull.join(STAGING)).unwrap();
-        let err = prepare(&[pull]).unwrap_err().to_string();
+        let err = format!("{:#}", prepare(&[pull]).unwrap_err());
         assert!(err.contains("not a directory"), "{err}");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -266,6 +289,44 @@ mod tests {
         left.sort();
         assert_eq!(left, [held.to_string(), format!("{held}{LOCK_SUFFIX}")]);
         drop(lock);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A lock file that is a FIFO or a symlink is neither followed nor waited on; its entries stay, and start-up
+    /// goes on.
+    #[test]
+    fn odd_lock_files_neither_hang_nor_stop_the_cleanup() {
+        let dir = test_dir("odd");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            dir.join("4444.lock"),
+            rustix::fs::Mode::from(0o600),
+        )
+        .unwrap();
+        fs::write(dir.join("4444"), "x").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", dir.join("5555.lock")).unwrap();
+        fs::write(dir.join("5555"), "x").unwrap();
+        let removed = remove_stale(&dir, Duration::ZERO).unwrap();
+        // The FIFO can be opened without blocking and locked, so its pull counts as over; the symlink cannot be
+        // opened, so its pull's entries stay.
+        assert!(!dir.join("4444").exists());
+        assert!(dir.join("5555").exists());
+        assert!(removed >= 2, "removed {removed}");
+        assert!(fs::symlink_metadata("/etc/hostname").is_ok());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_staging_directory_others_can_read_is_made_private() {
+        let dir = test_dir("private");
+        let staging = dir.join(STAGING);
+        fs::create_dir(&staging).unwrap();
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o777)).unwrap();
+        prepare(std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&staging).unwrap().mode() & 0o777,
+            0o700
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

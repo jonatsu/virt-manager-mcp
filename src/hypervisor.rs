@@ -73,7 +73,7 @@ impl Hypervisor {
                 let name = pool.get_name()?;
                 let xml = pool.get_xml_desc(0)?;
                 if let Some(path) = pool_target(&xml)? {
-                    targets.push((name, path.canonicalize().unwrap_or(path)));
+                    targets.push((name, resolve_existing(&path)));
                 }
             }
             Ok(targets)
@@ -235,6 +235,25 @@ fn open(uri: &str) -> Result<Connect> {
     })
 }
 
+/// `path` with its longest existing ancestor resolved, so a target that does not exist yet still compares by its
+/// real location when a parent directory is a symlink.
+fn resolve_existing(path: &std::path::Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut cur = path;
+    loop {
+        if let Ok(real) = cur.canonicalize() {
+            return rest.iter().rev().fold(real, |p, c| p.join(c));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// The `<target><path>` of a storage pool's XML, if it has one.
 fn pool_target(xml: &str) -> Result<Option<PathBuf>> {
     let doc = roxmltree::Document::parse(xml).context("parsing storage pool XML")?;
@@ -269,5 +288,23 @@ mod tests {
             pool_target(source_path).unwrap(),
             Some(PathBuf::from("/dev/vg"))
         );
+    }
+
+    #[test]
+    fn a_missing_pool_target_resolves_through_its_existing_ancestor() {
+        let root =
+            std::env::temp_dir().join(format!("virtmanager-mcp-pool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let real = root.join("real");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            resolve_existing(&link.join("pool/sub")),
+            real.join("pool/sub")
+        );
+        assert_eq!(resolve_existing(&link), real);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

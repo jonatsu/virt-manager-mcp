@@ -151,7 +151,10 @@ async fn run() -> Result<()> {
         return sweep::run_command(&state);
     }
     if !config.host_pull_dirs.is_empty() {
-        let pools = state.hv.pool_targets()?;
+        let pools = state
+            .hv
+            .pool_targets()
+            .context("listing libvirt storage pools to check host_pull_dirs")?;
         let pools: Vec<(String, Vec<PathBuf>)> = pools
             .into_iter()
             .map(|(name, path)| (format!("storage pool {name}"), vec![path]))

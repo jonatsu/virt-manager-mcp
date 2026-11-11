@@ -90,7 +90,9 @@ This fork publishes no release binaries; build it from source.
 4. Optional: list host directories that pulls from a guest may write into in `host_pull_dirs`. Keep them apart from
    anything else: the server refuses to start when a pull directory equals, contains or lies inside a share
    directory, the shared project directory, an ISO directory, or the target of any libvirt storage pool, because a
-   guest controls what a pull writes. Each pull directory gets a private `.vmm-staging/` directory, where pulls build
+   guest controls what a pull writes. The check compares resolved paths, so it cannot see a bind mount that shows
+   the same directory at two places; do not bind-mount a pull directory elsewhere. Each pull directory gets a private
+   `.vmm-staging/` directory, where pulls build
    their copies; its filesystem must support `renameat2` with `RENAME_NOREPLACE` and `RENAME_EXCHANGE`, as local
    filesystems such as ext4, xfs, btrfs and tmpfs do.
 
