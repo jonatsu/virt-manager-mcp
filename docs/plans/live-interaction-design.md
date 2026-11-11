@@ -172,7 +172,8 @@ margin. A failed or late capture keeps the match and adds a note. Read-only mode
 `job_start` returns a UUID v4 job ID; the tools refuse any other form, so an ID never becomes a path. The job runs
 detached from the guest agent's own service, so restarting `qemu-guest-agent` does not end it: through `systemd-run`
 where systemd exists, otherwise `setsid`. Its directory holds the merged stdout and stderr as bytes, the root process
-ID with its start time and the boot ID, and the exit code once the job ends.
+ID with its start time, and the exit code once the job ends; on Linux also the boot ID, and on Windows the lock file
+described below.
 
 - Linux: `/var/lib/virtmanager-mcp/jobs/<id>/`, created with mode 700; the launcher refuses a parent that is not a
   root-owned directory with mode 700, or is a link, so no guest user can redirect it. The command reaches the guest on
@@ -305,7 +306,8 @@ published.
    out. A restart of the `QEMU-GA` service left the agent unreachable in 4 of about 22 tries with `virtio-win` 0.1.302:
    the new agent ran, but libvirt reported the channel disconnected until a power cycle. Windows ignores the ACPI
    button while a user is logged on, so a graceful stop depends on the agent. Jobs do not depend on the agent, so they
-   survive both.
+   keep running through an agent restart and while the agent is unreachable; the power cycle that brings the agent
+   back ends them.
 4. A guest that fills its disk can lose job output. Job logs are not capped in the guest.
 5. OCR on a busy screen loads the host, which also runs other VMs. The 4-thread pool bounds it. Several `screen_text`
    conditions each run OCR on the same frame, so one pattern with alternatives is cheaper.

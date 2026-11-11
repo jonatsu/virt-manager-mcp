@@ -16,7 +16,7 @@ Host: Linux. Guests: Linux and Windows.
 
 | Capability | Mechanism | Guest requirement |
 | -- | -- | -- |
-| `exec`, `read_file`, `write_file`, `copy_to_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs need a Linux guest |
+| `exec`, `read_file`, `write_file`, `copy_to_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs work on Linux and Windows guests |
 | `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs `display.ocr_models` |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
@@ -284,8 +284,13 @@ directory or its parent is a junction or symbolic link, is owned by anyone but `
 access to anyone else. A job's exit code follows `powershell -File`: the code passed to `exit`, 1 after an uncaught
 error, and 0 otherwise, even after a failing native program, so end a job with `exit $LASTEXITCODE` to pass on a
 program's code. `job_stop` ends the job's process tree at once with `taskkill /T /F`, with or without `force`, and the
-job then reads "ended without status". The job's output waits in memory, up to 64 MiB, while a reader such as the
+job then reads "ended without status"; processes the job started detached from its tree, such as through
+`Start-Process` or WMI, keep running. The job's output waits in memory, up to 64 MiB, while a reader such as the
 agent holds the log file open; output beyond that is dropped, and a line in the log says how many bytes.
+
+Windows support was tested on an offline, English Windows 11 Pro guest. Reading a job's state depends on the guest
+agent's English error texts for a missing or locked file, so on a guest in another display language `job_read`,
+`job_list` and the job conditions may fail.
 
 Restarting the `QEMU-GA` service sometimes leaves the agent unreachable until the VM is powered off and on: the new
 agent runs, but libvirt reports its channel disconnected. This was seen with `virtio-win` 0.1.302. Windows also
