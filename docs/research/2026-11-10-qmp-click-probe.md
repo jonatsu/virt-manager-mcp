@@ -23,8 +23,8 @@ down, gives the axis values (31204, 31741).
 
 ## Conclusion
 
-The likely cause is that QEMU delivers the events of one `input-send-event` command in a single input sync, so the
-guest never sees the button held. That cause is inferred from the behaviour and was not traced in QEMU's source. In
-either case, a click needs the move, the press and the release as
-separate commands with a short pause between them. `src/mouse.rs` builds its sequences that way, with 50 ms pauses,
-and its axis test asserts the (1218, 774) to (31204, 31741) mapping above.
+The likely cause is that QEMU delivers the events of one `input-send-event` command in a single input sync. The guest
+then never sees the button held. That cause is inferred from the behaviour and was not traced in QEMU's source. In
+either case, a click needs the move, the press and the release as separate commands with a short pause between them.
+`src/mouse.rs` builds its sequences that way, with 50 ms pauses. Its axis test asserts the (1218, 774) to
+(31204, 31741) mapping above.

@@ -1,5 +1,6 @@
 > Survey lane notes from the `agent-setup` session of 2026-11-09, copied from its untracked working folder.
-> The evaluation record, [`2026-11-09-vm-management-mcp-evaluation.md`](2026-11-09-vm-management-mcp-evaluation.md), summarizes them.
+> The evaluation record, [`2026-11-09-vm-management-mcp-evaluation.md`](2026-11-09-vm-management-mcp-evaluation.md),
+> summarizes them.
 
 # VM management for coding agents: alternatives survey (2026-11-09)
 

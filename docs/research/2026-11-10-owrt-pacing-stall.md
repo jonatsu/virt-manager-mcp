@@ -1,15 +1,15 @@
 # Console output stalls after an unpaced 4000-byte write (2026-11-10)
 
 `tests/testbed/run-all.sh` runs `owrt-pacing.json` with `--check`, and the case failed most of the time. This note
-records what the failing runs showed and the cause, which "Resolution" at the end gives: a race in the case, not a
+records what the failing runs showed. The cause, given under "Resolution" at the end, is a race in the case, not a
 server defect.
 
 ## What the case does
 
-On the serial-only OpenWrt guest `t-owrt`, the case writes 4000 bytes into `cat > /tmp/paced` with pacing (16-byte
-chunks, 20 ms apart), ends it with Ctrl-D, then writes the same 4000 bytes unpaced into `cat > /tmp/unpaced`, ends it
-with Ctrl-D, and runs `wc -c` and `md5sum` on both files. Call 14, a `console_read`, expects both files to hold 4000
-bytes with MD5 `3f59f6f6f02f857841c375830e5edeb1`.
+The case runs on the serial-only OpenWrt guest `t-owrt`. It writes 4000 bytes into `cat > /tmp/paced` with pacing
+(16-byte chunks, 20 ms apart) and ends it with Ctrl-D. It then writes the same 4000 bytes unpaced into
+`cat > /tmp/unpaced` and ends that with Ctrl-D. Last, it runs `wc -c` and `md5sum` on both files. Call 14, a
+`console_read`, expects both files to hold 4000 bytes with MD5 `3f59f6f6f02f857841c375830e5edeb1`.
 
 ## Observations
 
@@ -53,13 +53,13 @@ The server is not at fault. Three checks settled it:
     Ctrl-D, and the `wc` line.
   - Every stream packet from the guest arrived before that point, and the guest sent nothing after it.
 
-The burst reached the guest while busybox `ash` still held the terminal in its raw, no-echo line-editing mode,
-before it had restored the terminal settings and started `cat`. Bytes received in that mode are not echoed, and
-Ctrl-D (0x04) arrives as an ordinary byte, not as end of file. So `cat` read the 4000 bytes, the Ctrl-D and the `wc`
-line, and then waited for more, with nothing to print. That makes 4000 + 1 + 63 = 4064 bytes, which is exactly what
-`/tmp/unpaced` held in the probe. The paced phase escapes the race, because its first chunk is small and the later
-chunks come 20 ms apart.
+The burst reached the guest while busybox `ash` still held the terminal in its raw, no-echo line-editing mode. At
+that point `ash` had not yet restored the terminal settings or started `cat`. Bytes received in that mode are not
+echoed, and Ctrl-D (0x04) arrives as an ordinary byte, not as end of file. So `cat` read the 4000 bytes, the Ctrl-D
+and the `wc` line, and then waited for more, with nothing to print. That makes 4000 + 1 + 63 = 4064 bytes, which is
+exactly what `/tmp/unpaced` held in the probe. The paced phase escapes the race, because its first chunk is small and
+the later chunks come 20 ms apart.
 
 The case now pauses for a second after each `cat > ...` and after each Ctrl-D. With the pauses it passed 6 runs out
-of 6, and again through `run-all.sh`. Any client of `console_write` faces the same race: input sent before the
+of 6, and again through `run-all.sh`. Any client of `console_write` faces the same race. Input sent before the
 guest program is ready to read can be swallowed or read in the wrong terminal mode.

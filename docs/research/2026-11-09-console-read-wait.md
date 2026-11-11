@@ -9,17 +9,17 @@ answered.
 
 ## Evidence
 
-1. **Input reaches the guest.** After `console_write("root")`, the guest agent listed `/bin/login --` and
+1. Input reaches the guest. After `console_write("root")`, the guest agent listed `/bin/login --` and
    `/usr/sbin/unix_chkpwd root nullok` on `ttyS0`. `login` had accepted the name and was checking a password.
-2. **Rereads from offset 0 never wait.** `console_read` returned as soon as any byte existed after `since`. With
+2. Rereads from offset 0 never wait. `console_read` returned as soon as any byte existed after `since`. With
    `since: 0`, the first prompt always exists, so `wait_ms` was ignored. A run with the libvirt client log enabled
    (`LIBVIRT_LOG_FILTERS="1:rpc 1:event 1:remote"`) spans 18:51:10.538 to 18:51:10.604, 66 ms for the whole
    sequence. Each read had returned within milliseconds of the write before it.
-3. **The stream and the event loop work.** In the same log, the event-loop thread runs `virNetClientIncomingEvent`
+3. The stream and the event loop work. In the same log, the event-loop thread runs `virNetClientIncomingEvent`
    and queues each incoming stream packet with `virNetClientStreamQueuePacket`. The reader thread then receives it
    with `virNetClientStreamRecvPacket`. Thread states sampled mid-run show the reader thread in its 30 ms sleep and
    the `libvirt-events` thread in `poll`, with nothing blocked.
-4. **A login works without code changes.** With a pause of several seconds before each read, one read from offset 0
+4. A login works without code changes. With a pause of several seconds before each read, one read from offset 0
    returned `login: root`, `Password:`, the motd and `root@trial-deb13:~#`. A command typed there printed its
    result, and `tty` reported `/dev/ttyS0`.
 

@@ -19,19 +19,20 @@ does cloud-init accept a seed image built in memory with the `fatfs` crate?
 
 ## Results
 
-- **cloud-init accepts the `fatfs` seed.** The guest agent answered 55 s after power-on. `cloud-init status --long`
+- cloud-init accepts the `fatfs` seed. The guest agent answered 55 s after power-on. `cloud-init status --long`
   reported `status: done`, `detail: DataSourceNoCloud [seed=/dev/vdb]` and `errors: []`. `hostname` printed `t-seed`,
   and `lsblk` showed `vdb` with label `CIDATA`, type `vfat`, read-only.
-- **The fresh disk reset in a loop on its first boots with 2 vCPUs.** The serial console showed GRUB's
+- The fresh disk reset in a loop on its first boots with 2 vCPUs. The serial console showed GRUB's
   `Booting 'Debian GNU/Linux'` repeating, with no kernel output and no DHCP lease, while a vCPU stayed busy. It
-  happened with and without the seed, with 1 and 2 GiB, and with no graphics and with SPICE graphics. With 1 vCPU the same
-  disk booted to `localhost login:`. After that first successful boot, the same disk booted with 2 vCPUs under both
-  `host-passthrough` and `host-model` in 20 s. `trial-deb13`, installed from the netinst image, boots with 2 vCPUs.
-- **A seed disk given as a pool volume failed on a later start.** With `<disk type='volume'>` and
-  `<source pool='agent-vms' volume='t-seed-seed.img'/>`, the first start worked, and a start after a redefinition
-  failed with `Could not open '…/t-seed-seed.img': Permission denied`, read-only or not. The file was owned by
-  `libvirt-qemu` with mode 0600, and the kernel log showed no AppArmor denial, though it reported suppressed audit
-  callbacks. With `<disk type='file'>` and the file path, two starts in a row worked.
+  happened with and without the seed, with 1 and 2 GiB, and with no graphics and with SPICE graphics. With 1 vCPU the
+  same disk booted to `localhost login:`. After that first successful boot, the same disk booted with 2 vCPUs under
+  both `host-passthrough` and `host-model` in 20 s. `trial-deb13`, installed from the netinst image, boots with 2
+  vCPUs.
+- A seed disk given as a pool volume failed on a later start. The disk used `<disk type='volume'>` and
+  `<source pool='agent-vms' volume='t-seed-seed.img'/>`. The first start worked. A start after a redefinition failed
+  with `Could not open '…/t-seed-seed.img': Permission denied`, read-only or not. The file was owned by `libvirt-qemu`
+  with mode 0600. The kernel log showed no AppArmor denial, though it reported suppressed audit callbacks. With
+  `<disk type='file'>` and the file path, two starts in a row worked.
 
 ## Inferences
 

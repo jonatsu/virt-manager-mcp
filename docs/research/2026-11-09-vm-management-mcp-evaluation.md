@@ -1,5 +1,6 @@
 > Copied from the `agent-setup` repository, `docs/evaluations/2026-11-09-vm-management-mcp.md` at commit `18c23040`.
-> In the text, "this repository" and `TODO.md` refer to `agent-setup`. Trial assets live in [`tests/testbed/`](../../tests/testbed/).
+> In the text, "this repository" and `TODO.md` refer to `agent-setup`. Trial assets live in
+> [`tests/testbed/`](../../tests/testbed/).
 >
 > Correction: agent-setup commit `f2e697c0` withdrew the first two defects below. The console never stalled:
 > `console_read` ignored `wait_ms` on rereads, see [`2026-11-09-console-read-wait.md`](2026-11-09-console-read-wait.md).
