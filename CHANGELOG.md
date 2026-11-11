@@ -12,6 +12,8 @@ Each release's section lists what changed for people who run the server and for 
   runs. The job directory under `C:\ProgramData\virtmanager-mcp` must be owned by `SYSTEM` or `Administrators` and
   grant access to no one else, or `job_start` refuses. `job_stop` ends a Windows job's process tree at once, with or
   without `force`, and the job then reads "ended without status".
+- `wait_for`'s `command`, `job_done` and `job_output` conditions work on Windows guests. The `command` condition runs
+  its command with PowerShell, as `exec` does by default, and holds when it exits 0.
 
 ### Fixed
 

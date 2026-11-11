@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use virt::domain::Domain;
 
@@ -439,9 +440,76 @@ pub fn ps_quote(s: &str) -> String {
     out
 }
 
+/// The shell that interprets a command line.
+#[derive(Debug, Deserialize, JsonSchema, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Shell {
+    /// /bin/sh on Linux, PowerShell on Windows.
+    #[default]
+    Default,
+    Sh,
+    Bash,
+    Cmd,
+    Powershell,
+}
+
+/// The program and arguments that run `cmd` with `shell` on a guest running `os`. `exec` and `wait_for`'s `command`
+/// condition both build their command here, so they interpret a command line alike.
+pub fn shell_spec(os: GuestOs, shell: Shell, cmd: &str) -> Result<ExecSpec> {
+    Ok(match (os, shell) {
+        (GuestOs::Linux, Shell::Default | Shell::Sh) => ExecSpec::new("/bin/sh", ["-c", cmd]),
+        (GuestOs::Linux, Shell::Bash) => ExecSpec::new("bash", ["-c", cmd]),
+        // Without a console, PowerShell writes its progress records to stderr as CLIXML, such as "Preparing modules
+        // for first use", so they are turned off.
+        (GuestOs::Windows, Shell::Default | Shell::Powershell) => powershell(&format!(
+            "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}"
+        )),
+        (GuestOs::Windows, Shell::Cmd) => ExecSpec::new(
+            "cmd.exe",
+            ["/d", "/s", "/c", &format!("chcp 65001 >nul & {cmd}")],
+        ),
+        (GuestOs::Linux, Shell::Cmd | Shell::Powershell) => {
+            bail!("this shell is not available on a Linux guest")
+        }
+        (GuestOs::Windows, Shell::Sh | Shell::Bash) => {
+            bail!("this shell is not available on a Windows guest")
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The script a PowerShell `ExecSpec` carries in its `-EncodedCommand` argument.
+    pub(crate) fn encoded_script(spec: &ExecSpec) -> String {
+        let bytes = B64.decode(spec.args.last().unwrap()).unwrap();
+        let utf16: Vec<u16> = bytes
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&utf16).unwrap()
+    }
+
+    #[test]
+    fn windows_powershell_turns_off_progress_and_writes_utf8() {
+        for shell in [Shell::Default, Shell::Powershell] {
+            let script = encoded_script(&shell_spec(GuestOs::Windows, shell, "Get-Date").unwrap());
+            assert_eq!(
+                script,
+                "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\nGet-Date"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_shell_is_sh_on_linux() {
+        let spec = shell_spec(GuestOs::Linux, Shell::Default, "true").unwrap();
+        assert_eq!(
+            (spec.path.as_str(), spec.args.as_slice()),
+            ("/bin/sh", ["-c".to_string(), "true".to_string()].as_slice())
+        );
+    }
 
     #[test]
     fn ps_quote_escapes_all_single_quote_variants() {

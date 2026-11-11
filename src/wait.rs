@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use virt::domain::Domain;
 
-use crate::agent::{Agent, ExecSpec, GuestOs};
+use crate::agent::{Agent, GuestOs, Shell, shell_spec};
 use crate::ansi;
 use crate::config::Config;
 use crate::console::{Consoles, SessionScan};
@@ -76,15 +76,15 @@ pub enum Condition {
     /// The QEMU guest agent answers.
     Agent,
     /// A shell command run through the guest agent exits 0. It runs again after a non-zero exit, and may also run
-    /// again when a slow agent's reply to the start is lost; it is never killed. Linux guests only. Refused in
-    /// read-only mode.
+    /// again when a slow agent's reply to the start is lost; it is never killed. It runs with exec's default shell:
+    /// /bin/sh on Linux, PowerShell on Windows. Refused in read-only mode.
     Command { command: String },
-    /// A job has exited, or has ended without writing its status. Linux guests only.
+    /// A job has exited, or has ended without writing its status.
     JobDone {
         /// The job ID that job_start returned.
         job: String,
     },
-    /// A job's output from `since` matches `pattern`, a regular expression (Rust `regex` syntax). Linux guests only.
+    /// A job's output from `since` matches `pattern`, a regular expression (Rust `regex` syntax).
     JobOutput {
         /// The job ID that job_start returned.
         job: String,
@@ -372,11 +372,13 @@ pub trait Guest: Send + Sync + 'static {
     fn initial_id(&self) -> Option<u32>;
     fn ping(&self, timeout_secs: i32) -> bool;
     fn os(&self, timeout_secs: i32) -> Result<GuestOs>;
-    fn start(&self, command: &str, timeout_secs: i32) -> Result<i64>;
+    /// Starts `command` with the default shell of a guest running `os`, as `exec` would, and returns its PID.
+    fn start(&self, os: GuestOs, command: &str, timeout_secs: i32) -> Result<i64>;
     fn status(&self, pid: i64, timeout_secs: i32) -> Result<ExecState>;
     /// A job's state and up to `max_bytes` of its output from `since`, or `None` when the guest has no such job.
     fn job_read(
         &self,
+        os: GuestOs,
         job: &Uuid,
         since: u64,
         max_bytes: usize,
@@ -419,8 +421,8 @@ impl Guest for LiveGuest {
         Agent::new(&self.0, timeout_secs).os()
     }
 
-    fn start(&self, command: &str, timeout_secs: i32) -> Result<i64> {
-        Agent::new(&self.0, timeout_secs).start(&ExecSpec::new("/bin/sh", ["-c", command]))
+    fn start(&self, os: GuestOs, command: &str, timeout_secs: i32) -> Result<i64> {
+        Agent::new(&self.0, timeout_secs).start(&shell_spec(os, Shell::Default, command)?)
     }
 
     fn status(&self, pid: i64, timeout_secs: i32) -> Result<ExecState> {
@@ -438,15 +440,15 @@ impl Guest for LiveGuest {
 
     fn job_read(
         &self,
+        os: GuestOs,
         job: &Uuid,
         since: u64,
         max_bytes: usize,
         timeout_secs: i32,
     ) -> Result<Option<jobs::Read>> {
-        // Job conditions refuse Windows guests before they read, until the wait loop learns the guest's system.
         jobs::read(
             &Agent::new(&self.0, timeout_secs),
-            GuestOs::Linux,
+            os,
             job,
             since,
             max_bytes,
@@ -1049,7 +1051,7 @@ impl State {
             Check::Agent => State::Agent(Probe::default()),
             Check::Command(command) => State::Command(CommandState {
                 command: Arc::from(command),
-                os_checked: false,
+                os: None,
                 pid: None,
                 last_code: None,
                 probe: Probe::default(),
@@ -1322,13 +1324,13 @@ struct JobState {
     output: Option<Regex>,
     /// Where the next read of the job's output starts: the start of the last unfinished line read so far.
     from: u64,
-    os_checked: bool,
-    probe: Probe<JobStep>,
+    /// The guest's system, once a probe has learned it; each later probe uses it without asking again.
+    os: Option<GuestOs>,
+    probe: Probe<(Option<GuestOs>, JobStep)>,
 }
 
 /// What one job probe found.
 enum JobStep {
-    Windows,
     Missing,
     /// The agent did not answer; the next probe tries again.
     Unavailable,
@@ -1346,7 +1348,7 @@ impl JobState {
             job,
             output,
             from: since,
-            os_checked: false,
+            os: None,
             probe: Probe::default(),
         }
     }
@@ -1361,14 +1363,11 @@ impl JobState {
 
     /// Takes in a finished probe's result. Returns a hit when the condition holds.
     fn absorb(&mut self) -> Result<Option<Poll>> {
-        let Some(step) = self.probe.take() else {
+        let Some((os, step)) = self.probe.take() else {
             return Ok(None);
         };
+        self.os = self.os.or(os);
         let (state, data, from, cut) = match step {
-            JobStep::Windows => bail!(
-                "job conditions are not available for Windows guests yet; they come with Windows job support \
-                 (live-interaction run 3)"
-            ),
             JobStep::Missing => bail!("no job {} in this guest", self.job),
             JobStep::Unavailable => return Ok(None),
             JobStep::Read {
@@ -1378,7 +1377,6 @@ impl JobState {
                 cut,
             } => (state, data, from, cut),
         };
-        self.os_checked = true;
         let Some(regex) = &self.output else {
             return Ok(match state {
                 jobs::State::Exited(code) => Some(Poll::hit(format!("exited with code {code}"))),
@@ -1408,7 +1406,7 @@ impl JobState {
         if let Some(hit) = self.absorb()? {
             return Ok(hit);
         }
-        let (job, from, os_checked) = (self.job, self.from, self.os_checked);
+        let (job, from, os) = (self.job, self.from, self.os);
         // job_done needs only the state; reading one byte keeps its probe cheap.
         let max = if self.output.is_some() {
             MAX_JOB_READ
@@ -1417,29 +1415,30 @@ impl JobState {
         };
         self.probe
             .start_if_due(now, deadline, PROBE_EVERY, guest, move |g, t| {
-                job_step(g, &job, from, max, os_checked, t)
+                job_step(g, &job, from, max, os, t)
             });
         Ok(Poll::Pending)
     }
 }
 
-/// One job probe: checks the OS once, then reads the job's state and output from `from`.
+/// One job probe: learns the guest's system unless `os` already holds it, then reads the job's state and output from
+/// `from`. Returns the system it used, so later probes skip the check.
 fn job_step(
     guest: &dyn Guest,
     job: &Uuid,
     from: u64,
     max: usize,
-    os_checked: bool,
+    os: Option<GuestOs>,
     timeout_secs: i32,
-) -> JobStep {
-    if !os_checked {
-        match guest.os(timeout_secs) {
-            Ok(GuestOs::Windows) => return JobStep::Windows,
-            Ok(GuestOs::Linux) => {}
-            Err(_) => return JobStep::Unavailable,
-        }
-    }
-    match guest.job_read(job, from, max, timeout_secs) {
+) -> (Option<GuestOs>, JobStep) {
+    let os = match os {
+        Some(os) => os,
+        None => match guest.os(timeout_secs) {
+            Ok(os) => os,
+            Err(_) => return (None, JobStep::Unavailable),
+        },
+    };
+    let step = match guest.job_read(os, job, from, max, timeout_secs) {
         Ok(Some(r)) => JobStep::Read {
             state: r.state,
             data: r.data,
@@ -1448,7 +1447,8 @@ fn job_step(
         },
         Ok(None) => JobStep::Missing,
         Err(_) => JobStep::Unavailable,
-    }
+    };
+    (Some(os), step)
 }
 
 struct ConsoleState {
@@ -1661,16 +1661,16 @@ impl<T: Send + 'static> Probe<T> {
 
 struct CommandState {
     command: Arc<str>,
-    os_checked: bool,
+    /// The guest's system, once a probe has learned it; each later probe uses it without asking again.
+    os: Option<GuestOs>,
     /// The process started and not yet seen to exit.
     pid: Option<i64>,
     last_code: Option<i64>,
-    probe: Probe<CommandStep>,
+    probe: Probe<(Option<GuestOs>, CommandStep)>,
 }
 
 /// What one `command` probe found.
 enum CommandStep {
-    Windows,
     /// The agent did not answer the OS check or the start; nothing was started.
     Unavailable,
     /// A run is under way, or its status could not be read this time; it is polled again, never started twice.
@@ -1686,19 +1686,15 @@ enum CommandStep {
 impl CommandState {
     /// Takes in a finished probe's result. Returns a hit when the command exited 0.
     fn absorb(&mut self) -> Result<Option<Poll>> {
-        match self.probe.take() {
-            Some(CommandStep::Windows) => bail!(
-                "command conditions are not available for Windows guests yet; they come with Windows job support \
-                 (live-interaction run 3)"
-            ),
-            Some(CommandStep::Unavailable) | None => {}
-            Some(CommandStep::Gone) => self.pid = None,
-            Some(CommandStep::Running(pid)) => {
-                self.os_checked = true;
-                self.pid = Some(pid);
-            }
-            Some(CommandStep::Exited { code, output }) => {
-                self.os_checked = true;
+        let Some((os, step)) = self.probe.take() else {
+            return Ok(None);
+        };
+        self.os = self.os.or(os);
+        match step {
+            CommandStep::Unavailable => {}
+            CommandStep::Gone => self.pid = None,
+            CommandStep::Running(pid) => self.pid = Some(pid),
+            CommandStep::Exited { code, output } => {
                 self.pid = None;
                 self.last_code = code;
                 if code == Some(0) {
@@ -1713,43 +1709,46 @@ impl CommandState {
         if let Some(hit) = self.absorb()? {
             return Ok(hit);
         }
-        let (command, os_checked, pid) = (self.command.clone(), self.os_checked, self.pid);
+        let (command, os, pid) = (self.command.clone(), self.os, self.pid);
         self.probe
             .start_if_due(now, deadline, PROBE_EVERY, guest, move |g, t| {
-                command_step(g, &command, os_checked, pid, t)
+                command_step(g, &command, os, pid, t)
             });
         Ok(Poll::Pending)
     }
 }
 
-/// One `command` probe: checks the OS once, starts the command when no run is under way, and asks for its status. A
-/// start whose reply is lost can still leave a run the probe does not know about; nothing else starts a second run.
+/// One `command` probe: learns the guest's system unless `os` already holds it, starts the command with that system's
+/// default shell when no run is under way, and asks for its status. Returns the system it used, so later probes skip
+/// the check. A start whose reply is lost can still leave a run the probe does not know about; nothing else starts a
+/// second run.
 fn command_step(
     guest: &dyn Guest,
     command: &str,
-    os_checked: bool,
+    os: Option<GuestOs>,
     pid: Option<i64>,
     timeout_secs: i32,
-) -> CommandStep {
-    if !os_checked {
-        match guest.os(timeout_secs) {
-            Ok(GuestOs::Windows) => return CommandStep::Windows,
-            Ok(GuestOs::Linux) => {}
-            Err(_) => return CommandStep::Unavailable,
-        }
-    }
-    let pid = match pid {
-        Some(pid) => pid,
-        None => match guest.start(command, timeout_secs) {
-            Ok(pid) => pid,
-            Err(_) => return CommandStep::Unavailable,
+) -> (Option<GuestOs>, CommandStep) {
+    let os = match os {
+        Some(os) => os,
+        None => match guest.os(timeout_secs) {
+            Ok(os) => os,
+            Err(_) => return (None, CommandStep::Unavailable),
         },
     };
-    match guest.status(pid, timeout_secs) {
+    let pid = match pid {
+        Some(pid) => pid,
+        None => match guest.start(os, command, timeout_secs) {
+            Ok(pid) => pid,
+            Err(_) => return (Some(os), CommandStep::Unavailable),
+        },
+    };
+    let step = match guest.status(pid, timeout_secs) {
         Ok(ExecState::Running) | Err(_) => CommandStep::Running(pid),
         Ok(ExecState::Exited { code, output }) => CommandStep::Exited { code, output },
         Ok(ExecState::Gone) => CommandStep::Gone,
-    }
+    };
+    (Some(os), step)
 }
 
 #[cfg(test)]
@@ -1953,6 +1952,10 @@ mod tests {
     /// A guest whose agent answers after `ping_after` probes and whose command exits with each code in turn.
     struct FakeGuest {
         os: GuestOs,
+        /// The calls that asked for the guest's system.
+        os_checks: AtomicU32,
+        /// The system each start and each job read was given, in call order.
+        given_os: Mutex<Vec<GuestOs>>,
         /// The running domain's ID; 0 means stopped.
         domain: AtomicU32,
         pings: AtomicU32,
@@ -1993,6 +1996,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 os: GuestOs::Linux,
+                os_checks: AtomicU32::new(0),
+                given_os: Mutex::new(vec![]),
                 domain: AtomicU32::new(1),
                 pings: AtomicU32::new(0),
                 ping_after: 0,
@@ -2063,11 +2068,13 @@ mod tests {
 
         fn os(&self, _: i32) -> Result<GuestOs> {
             self.block();
+            self.os_checks.fetch_add(1, Ordering::SeqCst);
             Ok(self.os)
         }
 
-        fn start(&self, _: &str, _: i32) -> Result<i64> {
+        fn start(&self, os: GuestOs, _: &str, _: i32) -> Result<i64> {
             self.block();
+            self.given_os.lock().unwrap().push(os);
             Ok(100 + i64::from(self.starts.fetch_add(1, Ordering::Relaxed)))
         }
 
@@ -2097,11 +2104,13 @@ mod tests {
 
         fn job_read(
             &self,
+            os: GuestOs,
             _: &Uuid,
             since: u64,
             max_bytes: usize,
             _: i32,
         ) -> Result<Option<jobs::Read>> {
+            self.given_os.lock().unwrap().push(os);
             self.job_reads.lock().unwrap().push(since);
             let mut job = self.job.lock().unwrap();
             let Some(&(state, output)) = job.first() else {
@@ -2468,14 +2477,17 @@ mod tests {
         // A command condition whose run exited after the last poll, with `code`.
         let finished = |code| {
             let (tx, rx) = mpsc::channel();
-            tx.send(CommandStep::Exited {
-                code: Some(code),
-                output: b"ready\n".to_vec(),
-            })
+            tx.send((
+                Some(GuestOs::Linux),
+                CommandStep::Exited {
+                    code: Some(code),
+                    output: b"ready\n".to_vec(),
+                },
+            ))
             .unwrap();
             State::Command(CommandState {
                 command: Arc::from("test -e /tmp/ready"),
-                os_checked: true,
+                os: Some(GuestOs::Linux),
                 pid: Some(100),
                 last_code: None,
                 probe: Probe {
@@ -3464,27 +3476,42 @@ mod tests {
     }
 
     #[test]
-    fn job_conditions_refuse_a_zero_timeout_and_a_windows_guest() {
+    fn job_conditions_refuse_a_zero_timeout() {
         let env = FakeEnv::new(vec![]);
         let done = Condition::JobDone {
             job: job(&Uuid::new_v4()),
         };
-        let checks =
-            validate_conditions(&Config::default(), ANY_TIMEOUT, std::slice::from_ref(&done))
-                .unwrap();
+        let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, &[done]).unwrap();
         let err = run(&env, Arc::new(FakeGuest::new()), checks, Duration::ZERO)
             .unwrap_err()
             .to_string();
         assert!(err.contains("at least 1 s"), "{err}");
-        let windows = FakeGuest {
+    }
+
+    #[test]
+    fn job_conditions_read_a_windows_job_after_one_system_check() {
+        let guest = Arc::new(FakeGuest {
             os: GuestOs::Windows,
+            job: Mutex::new(vec![
+                (jobs::State::Running, b"copying\r\n"),
+                (jobs::State::Running, b"copying\r\n"),
+                (jobs::State::Exited(0), b"copying\r\ndone\r\n"),
+            ]),
             ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let done = Condition::JobDone {
+            job: job(&Uuid::new_v4()),
         };
         let checks = validate_conditions(&Config::default(), ANY_TIMEOUT, &[done]).unwrap();
-        let err = run(&env, Arc::new(windows), checks, Duration::from_secs(5))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("Windows"), "{err}");
+        let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o).0, 0);
+        assert_eq!(guest.os_checks.load(Ordering::SeqCst), 1);
+        let given = guest.given_os.lock().unwrap().clone();
+        assert!(
+            given.len() >= 3 && given.iter().all(|os| *os == GuestOs::Windows),
+            "{given:?}"
+        );
     }
 
     #[test]
@@ -3715,24 +3742,25 @@ mod tests {
     }
 
     #[test]
-    fn a_command_on_a_windows_guest_is_refused() {
-        let guest = FakeGuest {
+    fn a_command_on_a_windows_guest_starts_with_its_shell_after_one_system_check() {
+        let guest = Arc::new(FakeGuest {
             os: GuestOs::Windows,
+            codes: Mutex::new(vec![1, 1, 0]),
             ..FakeGuest::new()
-        };
+        });
         let env = FakeEnv::new(vec![]);
         let checks = validate_conditions(
             &Config::default(),
             ANY_TIMEOUT,
             &[Condition::Command {
-                command: "true".into(),
+                command: "Test-Path C:\\ready".into(),
             }],
         )
         .unwrap();
-        let err = run(&env, Arc::new(guest), checks, Duration::from_secs(5))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("Windows"), "{err}");
+        let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o), (0, "ready\n", None));
+        assert_eq!(guest.os_checks.load(Ordering::SeqCst), 1);
+        assert_eq!(*guest.given_os.lock().unwrap(), [GuestOs::Windows; 3]);
     }
 
     #[test]
