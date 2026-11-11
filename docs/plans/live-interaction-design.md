@@ -25,7 +25,7 @@ outcome lands in three runs: waits, console and Linux jobs; then OCR, screen and
 | Input pacing and layout | `console_write` gains per-character or per-chunk pacing with a cap, as in `serial-mcp-server`; `type_text` stays US layout | Waiting removes the main input loss; `send_keys` reaches any key | resolved |
 | Long jobs | `job_start`, `job_read`, `job_stop`, `job_list`, with output in a log file per job in the guest | `guest-exec-status` returns output only after the process exits (QEMU guest agent protocol reference) | resolved |
 | Job platforms | Linux and Windows, both within this outcome | Windows is a named target | resolved |
-| Test guests | Debian netinst, OpenWrt x86, a kernel-panic boot on a template VM, Windows 11 Pro | Covers every channel and both job platforms | provisional: the Windows guest agent needs the `virtio-win` serial driver and `qemu-ga`, untried on this host |
+| Test guests | Debian netinst, OpenWrt x86, a kernel-panic boot on a template VM, Windows 11 Pro | Covers every channel and both job platforms | resolved: the Windows guest agent runs with the `virtio-win` serial driver and `qemu-ga`, installed at first logon |
 | Delivery | Three runs, each landed and pushed before the next | Each run is a safe stopping point; `wait_for` is proven before later runs extend it | resolved |
 | Test-guest memory | Watched and kept reasonable, with no strict cap; Windows may use more | No builds run on the host now | resolved |
 
@@ -180,15 +180,42 @@ ID with its start time and the boot ID, and the exit code once the job ends.
   in a unit's command line. A background command starts with SIGINT and SIGQUIT ignored, and systemd ignores SIGPIPE
   in services; the unit sets `IgnoreSIGPIPE=no`, and the wrapper resets all three
   where the guest's `env` supports `--default-signal`.
-- Windows: `C:\ProgramData\virtmanager-mcp\jobs\<id>\`, started by a launcher sent like `exec` that redirects through
-  `cmd /c` to keep the log in bytes.
+- Windows: `C:\ProgramData\virtmanager-mcp\jobs\<id>\`. The command is PowerShell, as `exec`'s default is there. It
+  reaches the guest through the agent's file calls and is stored as UTF-8 with a byte-order mark, so PowerShell 5.1
+  reads it as UTF-8; it never appears on a command line. A launcher sent like `exec` writes a fixed PowerShell wrapper
+  beside it and starts the wrapper with `Win32_Process.Create`, so the WMI service, not the guest agent, is its parent.
+  The wrapper runs `cmd /d /c "chcp 65001 >nul & powershell -File <command> 2>&1"`, so stdout and stderr arrive merged
+  and native programs write UTF-8, and appends that stream to the log in chunks. The agent cannot open a file another
+  process holds open for writing, so the wrapper holds the log only while it appends a chunk, retrying while a reader
+  holds it.
+- Windows directories: `C:\ProgramData\virtmanager-mcp` and its `jobs` directory are owned by `SYSTEM` or
+  `Administrators`, have inheritance removed, and grant access only to those two. The launcher creates a missing level
+  in that form, and refuses a level that is a reparse point (a junction or symbolic link), has another owner, or whose
+  access list names any other principal, leaving it as it found it. Ordinary users may create folders in
+  `C:\ProgramData`, and an owner can rewrite an access list, so the owner check matters.
+- Windows exit codes follow `powershell -File`: the code passed to `exit`, 1 after an uncaught error, and 0 otherwise,
+  even after a failing native program. A job ends with `exit $LASTEXITCODE` to pass on a native program's code. The
+  `command` condition runs like `exec`, through `-EncodedCommand`, where a failing native program or cmdlet as the last
+  command gives 1. In both, `$false` is not a failure, so a test needs `exit [int](-not (...))`.
 
 `job_read` returns output from an offset, up to `max_bytes` (by default `max_output_bytes`), the next offset, and
 the exit code once the job has ended. A job whose process is gone without an exit code, after a reboot or a kill,
-reads as "ended without status"; the start time and the boot ID guard against a reused process ID. `job_stop`
-signals the job's process group on Linux and ends its process tree from the recorded root ID on Windows. `job_list`
-lists the jobs in the guest, so an agent finds its jobs again after losing context. The jobs live in the guest, so
-they outlive a server restart, and a reset or deletion of the VM removes them.
+reads as "ended without status". On Linux the start time and the boot ID guard against a reused process ID. On Windows
+the wrapper holds a lock file in the job directory open without sharing while it runs, and writes the exit code before
+it lets go; the agent cannot open that file while it is held, so a read needs only file calls, and neither a reboot nor
+a reused process ID passes for a running job. A read that finds no exit code reads it once more after checking the
+process, so a job that ended in between reports its code.
+
+`job_stop` signals the job's process group on Linux. On Windows a console process has no equivalent of SIGTERM, so
+`job_stop` ends the wrapper's process tree with `taskkill /T /F` whether or not `force` is set, and says so; it first
+checks that the recorded process ID still has its recorded start time, so a reused ID is never killed. A stopped
+Windows job reads "ended without status", as a killed job does on Linux, and processes it detached from its tree
+survive. `job_list` lists the jobs in the guest, so an agent finds its jobs again after losing context. The jobs live
+in the guest, so they outlive a server restart, and a reset or deletion of the VM removes them. On Windows they run as
+`SYSTEM` in session 0, without a desktop.
+
+The Windows mechanisms are recorded in
+[`2026-11-11-windows-jobs-probe.md`](../research/2026-11-11-windows-jobs-probe.md).
 
 ## Invariants
 
@@ -239,10 +266,14 @@ published.
   - The Debian netinst installer is driven by screen waits, keys and the mouse to its partitioning screen.
   - A VM without a tablet refuses `mouse`.
 - Run 3:
-  - A Windows 11 Pro VM, installed unattended from the 26H2 business editions ISO in `~/Downloads`. It uses UEFI
-    with Secure Boot and Microsoft's enrolled keys, an emulated TPM 2.0, 4 GiB of memory, and Microsoft's public KMS
-    client key for Pro, so it stays unactivated with a watermark.
-  - Its setup also loads the `virtio-win` serial driver and installs `qemu-ga`.
+  - `t-win11`, a persistent Windows 11 Pro VM installed unattended by `tests/testbed/win11/build.sh` from the 26H2
+    business editions ISO, `tpl-win11-26h2.iso`. It uses UEFI with Secure Boot and Microsoft's enrolled keys, an
+    emulated TPM 2.0, 4 GiB of memory, a 64 GiB SATA disk, and Microsoft's public KMS client key for Pro, so it stays
+    unactivated with a watermark. It has no network, which keeps it out of Windows Update and account sign-in, and no
+    serial console. Its local administrator logs on automatically with a test password. A template would also exercise
+    `create_vm_from_template` on Windows, but the domains it builds have no TPM and do not ask for Secure Boot.
+  - At first logon its answer file installs the `virtio-win` 0.1.302 serial driver with `pnputil` and `qemu-ga` from
+    its MSI.
   - Windows jobs, the `command` condition, screen waits and the mouse are checked on it.
 
 ## Checks
@@ -263,7 +294,10 @@ published.
    Inverting dark frames fixes most of it, and regions or tolerant patterns such as `log ?in:` help. `ocrs` 0.14 read
    as many of the probe's key strings exactly as 0.12 did.
 2. Hardened hosts may deny monitor access. The mouse then fails with libvirt's reason; keyboard input still works.
-3. The Windows guest agent depends on drivers no setup on this host has tried. Run 3 may need a design change there.
+3. The Windows guest agent depends on the `virtio-win` serial driver, which is signed, and on `qemu-ga.exe`, which
+   carries no Authenticode signature; the test bed pins the SHA-256 of the `virtio-win` ISO it comes from. On the
+   first boot after setup, the agent answered `guest-ping` before it could start processes, so the first `exec` timed
+   out.
 4. A guest that fills its disk can lose job output. Job logs are not capped in the guest.
 5. OCR on a busy screen loads the host, which also runs other VMs. The 4-thread pool bounds it. Several `screen_text`
    conditions each run OCR on the same frame, so one pattern with alternatives is cheaper.
@@ -278,6 +312,5 @@ The run-2 evidence for risks 1, 6 and 7 is in the execution record of
 
 ## Open questions
 
-| Question | Kind | Recommendation |
-| -- | -- | -- |
-| How the Windows guest agent gets its driver | Settled in run 3 | Load the `virtio-win` serial driver and `qemu-ga` MSI from the `virtio-win` ISO in the unattended setup |
+None. The Windows guest agent gets its serial driver and `qemu-ga` from the `virtio-win` ISO at first logon, as the
+run 3 test bed describes.
