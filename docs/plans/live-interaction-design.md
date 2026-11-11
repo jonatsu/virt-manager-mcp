@@ -181,13 +181,16 @@ ID with its start time and the boot ID, and the exit code once the job ends.
   in services; the unit sets `IgnoreSIGPIPE=no`, and the wrapper resets all three
   where the guest's `env` supports `--default-signal`.
 - Windows: `C:\ProgramData\virtmanager-mcp\jobs\<id>\`. The command is PowerShell, as `exec`'s default is there. It
-  reaches the guest through the agent's file calls and is stored as UTF-8 with a byte-order mark, so PowerShell 5.1
-  reads it as UTF-8; it never appears on a command line. A launcher sent like `exec` writes a fixed PowerShell wrapper
-  beside it and starts the wrapper with `Win32_Process.Create`, so the WMI service, not the guest agent, is its parent.
-  The wrapper runs `cmd /d /c "chcp 65001 >nul & powershell -File <command> 2>&1"`, so stdout and stderr arrive merged
-  and native programs write UTF-8, and appends that stream to the log in chunks. The agent cannot open a file another
-  process holds open for writing, so the wrapper holds the log only while it appends a chunk, retrying while a reader
-  holds it.
+  reaches the guest as raw bytes on the launcher's standard input and is stored as UTF-8 with a byte-order mark, so
+  PowerShell 5.1 reads it as UTF-8; it never appears on a command line. The launcher, sent like `exec`, writes a fixed
+  PowerShell wrapper beside it and starts the wrapper with `Win32_Process.Create`, so the WMI service, not the guest
+  agent, is its parent. The wrapper runs `cmd /d /c "chcp 65001 >nul & powershell -File <command> 2>&1"`, so stdout and
+  stderr arrive merged and native programs write UTF-8, and appends that stream to the log in chunks. The agent cannot
+  open a file another process holds open for writing, so the wrapper holds the log only while it appends, and keeps
+  output in memory while a reader holds the log. It waits for the job's process, not for the end of its output: a
+  process the job started in the background may keep the output open, so the wrapper copies output for 2 s after the
+  job's process exits, then records the exit code. If the wrapper itself fails, it ends the job's process tree and
+  records no exit code.
 - Windows directories: `C:\ProgramData\virtmanager-mcp` and its `jobs` directory are owned by `SYSTEM` or
   `Administrators`, have inheritance removed, and grant access only to those two. The launcher creates a missing level
   in that form, and refuses a level that is a reparse point (a junction or symbolic link), has another owner, or whose
