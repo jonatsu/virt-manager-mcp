@@ -141,6 +141,13 @@ Reviews of earlier work found these. None blocks the server's use.
     every byte. The case now pauses after starting `cat` and after each Ctrl-D, and it passes. Agents face the same
     race, so the `console_write` description and the README tell them to wait for the program's prompt first. Evidence:
     [`2026-11-10-owrt-pacing-stall.md`](../research/2026-11-10-owrt-pacing-stall.md).
+15. **`exec` returns PowerShell errors on Windows as CLIXML.** An error from a PowerShell command reaches `exec`'s
+    stderr as a `#< CLIXML` block, which an agent has to decode, although progress records no longer do. Probe whether
+    `-OutputFormat Text`, or redirecting the error stream in the script, gives plain text, then fix it with a test.
+16. **A restart of `QEMU-GA` can leave a Windows guest's agent unreachable.** With `virtio-win` 0.1.302, 4 of about 22
+    restarts left the new agent running while libvirt reported its channel disconnected, until the VM was powered off
+    and on ([probe note](../research/2026-11-11-windows-jobs-probe.md)). Retry with a newer `virtio-win` and report it
+    upstream if it persists; `win-jobs-restart.json` reproduces it.
 
 ## Outcomes
 
@@ -156,7 +163,7 @@ before it is built, and each feature from the earlier list sits under one of the
    each unit's commits, test-bed results and reviews, built from
    [`disposable-vms-design.md`](disposable-vms-design.md) and
    [`2026-11-10-fatfs-seed-boot.md`](../research/2026-11-10-fatfs-seed-boot.md).
-2. **Reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input, on
+2. **Done: reliable interaction with a live guest.** An agent knows when the guest is ready and does not lose input, on
    guests with or without a guest agent: installers, bootloaders, kernels, Windows and appliances. This covers the wait
    tool (console text, screen text, a settled screen, the guest agent, a command or a job), the mouse and region
    screenshots, paced console input, long-running jobs on Linux and Windows whose output streams back, and
@@ -171,7 +178,13 @@ before it is built, and each feature from the earlier list sits under one of the
    through `input-send-event`; and `scripts/fetch-ocr-models.sh` for `display.ocr_models`. The installer guest
    `t-inst` and the Windows setup guest `t-win` joined the test bed. Evidence:
    [`live-interaction-run-2-implementation-plan.md`](live-interaction-run-2-implementation-plan.md), whose execution
-   record holds each unit's commits, test-bed results and reviews. Run 3 brings Windows jobs and the guest agent.
+   record holds each unit's commits, test-bed results and reviews. Run 3 is done: background jobs on Windows guests,
+   started through WMI and run as `SYSTEM`, and the `command`, `job_done` and `job_output` conditions on Windows. The
+   Windows 11 Pro guest `t-win11`, built unattended by `tests/testbed/win11/build.sh`, joined the test bed with cases
+   for jobs, waits, and a Start menu click found by OCR. Evidence:
+   [`live-interaction-run-3-implementation-plan.md`](live-interaction-run-3-implementation-plan.md), whose execution
+   record holds each unit's commits, test-bed results and reviews, and
+   [`2026-11-11-windows-jobs-probe.md`](../research/2026-11-11-windows-jobs-probe.md).
 3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
    passing them through its context, and reaches services running in the guest. This covers copying from the VM,
    directory sync, the guest's IP address and port forwarding. Each new path out of the guest needs a guardrail.
@@ -213,10 +226,10 @@ and the plan's execution record holds its evidence. Follow-ups 7 to 9 landed in 
 outside-disk test-bed cases passed with no `t-*` VM or volume left and the template checksum unchanged. A separate
 conformance review found no material mismatch. The manual root check for follow-up 7 passed at `1f4d8ed`.
 
-Outcome 2 comes from the accepted [`live-interaction-design.md`](live-interaction-design.md), in three runs, each with
-its own plan. Runs 1 and 2 are done, per
-[`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md) and
-[`live-interaction-run-2-implementation-plan.md`](live-interaction-run-2-implementation-plan.md). Next is the plan for
-run 3: an unattended Windows 11 Pro install with the `virtio-win` serial driver and `qemu-ga`, Windows jobs, the
-`command` condition on Windows, and screen waits and the mouse on that guest. Its risks include the inversion that
-damages the setup screen's small text, which the design records.
+Outcome 2 is done in three runs from the accepted [`live-interaction-design.md`](live-interaction-design.md), per
+[`live-interaction-run-1-implementation-plan.md`](live-interaction-run-1-implementation-plan.md),
+[`live-interaction-run-2-implementation-plan.md`](live-interaction-run-2-implementation-plan.md) and
+[`live-interaction-run-3-implementation-plan.md`](live-interaction-run-3-implementation-plan.md).
+
+Next is outcome 3, moving code and results in and out, which needs its design first. Follow-ups 6, 15 and 16 can land
+at any time.

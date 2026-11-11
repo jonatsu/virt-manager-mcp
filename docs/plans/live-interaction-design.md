@@ -302,18 +302,24 @@ published.
 3. The Windows guest agent depends on the `virtio-win` serial driver, which is signed, and on `qemu-ga.exe`, which
    carries no Authenticode signature; the test bed pins the SHA-256 of the `virtio-win` ISO it comes from. On the
    first boot after setup, the agent answered `guest-ping` before it could start processes, so the first `exec` timed
-   out.
+   out. A restart of the `QEMU-GA` service left the agent unreachable in 4 of about 22 tries with `virtio-win` 0.1.302:
+   the new agent ran, but libvirt reported the channel disconnected until a power cycle. Windows ignores the ACPI
+   button while a user is logged on, so a graceful stop depends on the agent. Jobs do not depend on the agent, so they
+   survive both.
 4. A guest that fills its disk can lose job output. Job logs are not capped in the guest.
 5. OCR on a busy screen loads the host, which also runs other VMs. The 4-thread pool bounds it. Several `screen_text`
    conditions each run OCR on the same frame, so one pattern with alternatives is cheaper.
-6. Inverting dark frames damages the small text of the Windows setup screen: "Next" read as "Nex". Run 3 drives that
-   screen and has to work around it.
+6. Inverting dark frames damages the small text of the Windows setup screen: "Next" read as "Nex". `t-win11` installs
+   unattended, so no case drives that screen; on its light desktop, `screen_text` matched the Start menu's "Pinned"
+   exactly, without a region.
 7. The Debian installer drops input sent within about 2 s of a new screen. An agent waits for the screen's text, then
    for `screen_settled`, before it types.
 
 The run-2 evidence for risks 1, 6 and 7 is in the execution record of
 [`live-interaction-run-2-implementation-plan.md`](live-interaction-run-2-implementation-plan.md), and the OCR probe is
-[`2026-11-10-ocr-probe.md`](../research/2026-11-10-ocr-probe.md).
+[`2026-11-10-ocr-probe.md`](../research/2026-11-10-ocr-probe.md). The run-3 evidence for risks 3 and 6 is in the
+execution record of [`live-interaction-run-3-implementation-plan.md`](live-interaction-run-3-implementation-plan.md)
+and in [`2026-11-11-windows-jobs-probe.md`](../research/2026-11-11-windows-jobs-probe.md).
 
 ## Open questions
 

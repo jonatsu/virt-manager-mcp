@@ -11,7 +11,8 @@ Each release's section lists what changed for people who run the server and for 
   `SYSTEM`, started through WMI so it survives an agent restart, with UTF-8 output that can be read while the job
   runs. The job directory under `C:\ProgramData\virtmanager-mcp` must be owned by `SYSTEM` or `Administrators` and
   grant access to no one else, or `job_start` refuses. `job_stop` ends a Windows job's process tree at once, with or
-  without `force`, and the job then reads "ended without status".
+  without `force`, and the job then reads "ended without status". While a reader holds a Windows job's log, up to
+  64 MiB of its output waits in memory; beyond that, the log records how many bytes were dropped.
 - `wait_for`'s `command`, `job_done` and `job_output` conditions work on Windows guests. The `command` condition runs
   its command with PowerShell, as `exec` does by default, and holds when it exits 0.
 

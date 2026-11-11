@@ -37,7 +37,7 @@ The path is passed as data, never spliced into shell code.
 | `console_open`, `console_read`, `console_close` | ✅ |
 | `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
 | `job_read`, `job_list`: a background job's output and state | ✅ |
-| `job_start`, `job_stop`: run a long command detached in a Linux guest, and stop it | ❌ |
+| `job_start`, `job_stop`: run a long command detached in a Linux or Windows guest, and stop it | ❌ |
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
 | `write_file` (overwrite/append, text or base64) | ❌ |
 | `copy_to_vm`: copy a host file into the guest (only with `host_share_dirs`) | ❌ |
@@ -274,6 +274,23 @@ To also see kernel/boot messages there, add `console=ttyS0` to the kernel comman
 need PowerShell. Windows does not offer a serial console login by default, so use `exec`
 or `screenshot`/`send_keys`/`type_text` instead of `console_*`.
 
+A PowerShell command's exit code is the one passed to `exit`, 1 after an uncaught error or when the last command is a
+failing native program or cmdlet, and 0 otherwise. `$false` is not a failure, so a bare `Test-Path` exits 0 either way;
+write `exit [int](-not (Test-Path C:\ready))` for a `wait_for` `command` condition.
+
+Jobs run a PowerShell script as `SYSTEM` in session 0, without a desktop, so they cannot open windows the screen
+shows. They keep their files in `C:\ProgramData\virtmanager-mcp\jobs\<id>\`; `job_start` refuses to run when that
+directory or its parent is a junction or symbolic link, is owned by anyone but `SYSTEM` or `Administrators`, or grants
+access to anyone else. A job's exit code follows `powershell -File`: the code passed to `exit`, 1 after an uncaught
+error, and 0 otherwise, even after a failing native program, so end a job with `exit $LASTEXITCODE` to pass on a
+program's code. `job_stop` ends the job's process tree at once with `taskkill /T /F`, with or without `force`, and the
+job then reads "ended without status". The job's output waits in memory, up to 64 MiB, while a reader such as the
+agent holds the log file open; output beyond that is dropped, and a line in the log says how many bytes.
+
+Restarting the `QEMU-GA` service sometimes leaves the agent unreachable until the VM is powered off and on: the new
+agent runs, but libvirt reports its channel disconnected. This was seen with `virtio-win` 0.1.302. Windows also
+ignores the ACPI power button while a user is logged on, so a graceful `stop_vm` relies on the agent there.
+
 ## Connecting an MCP client
 
 ### stdio (default)
@@ -341,8 +358,8 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   sending its input.
 - Jobs keep their files in `/var/lib/virtmanager-mcp/jobs/<id>/` in the guest and run under `systemd-run`, or
   `setsid` without systemd, so they survive an agent restart and a server restart. The launcher refuses a job
-  directory parent that is a symbolic link, or is not a root-owned directory with mode 700. Windows guests are
-  refused for now.
+  directory parent that is a symbolic link, or is not a root-owned directory with mode 700. Windows jobs are
+  described under [Windows guest](#windows-guest).
 - `copy_to_vm` streams the file in 64 KiB guest-agent requests, so the data never passes through
   the conversation. The host path is resolved (symlinks, `..`) before the `host_share_dirs`
   check, so links pointing outside a share are refused. On a Linux guest a new file gets mode 644
