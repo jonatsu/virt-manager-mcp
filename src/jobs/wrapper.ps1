@@ -12,6 +12,10 @@ $ProgressPreference = 'SilentlyContinue'
 $drainSeconds = 2
 # How long the last output may wait for a reader to let go of the log before the exit code is written without it.
 $flushSeconds = 60
+# How much output may wait in memory while a reader holds the log. Output beyond it is dropped, and a marker line in the
+# log says how much.
+$pendingCap = 64MB
+$dropped = 0
 
 # Opens $path for $mode without sharing a write, retrying for up to 10 s while another process holds it.
 function Open-Retrying($path, $mode, $access, $share) {
@@ -24,13 +28,22 @@ function Open-Retrying($path, $mode, $access, $share) {
   }
 }
 
-# Appends the waiting output to the log unless a reader holds it, and returns whether nothing is left waiting.
+# Appends the waiting output to the log unless a reader holds it, followed by a marker when output was dropped, and
+# returns whether nothing is left waiting.
 function Write-Pending {
-  if ($pending.Length -eq 0) { return $true }
+  if ($pending.Length -eq 0 -and $script:dropped -eq 0) { return $true }
   try { $log = [IO.File]::Open("$dir\out", 'Append', 'Write', 'Read') }
   catch [IO.IOException] { return $false }
-  try { $pending.WriteTo($log) } finally { $log.Close() }
+  try {
+    $pending.WriteTo($log)
+    if ($script:dropped -gt 0) {
+      $marker = [Text.Encoding]::UTF8.GetBytes(
+        "`r`n[virtmanager-mcp: dropped $($script:dropped) bytes of output while the log was held open]`r`n")
+      $log.Write($marker, 0, $marker.Length)
+    }
+  } finally { $log.Close() }
   $pending.SetLength(0)
+  $script:dropped = 0
   return $true
 }
 
@@ -61,7 +74,7 @@ try {
     if ($ready) {
       $count = $read.Result
       if ($count -eq 0) { break }
-      $pending.Write($buffer, 0, $count)
+      if ($pending.Length + $count -le $pendingCap) { $pending.Write($buffer, 0, $count) } else { $dropped += $count }
       $read = $stream.ReadAsync($buffer, 0, $buffer.Length)
     }
     [void](Write-Pending)

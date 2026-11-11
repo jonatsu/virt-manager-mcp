@@ -187,7 +187,9 @@ ID with its start time and the boot ID, and the exit code once the job ends.
   agent, is its parent. The wrapper runs `cmd /d /c "chcp 65001 >nul & powershell -File <command> 2>&1"`, so stdout and
   stderr arrive merged and native programs write UTF-8, and appends that stream to the log in chunks. The agent cannot
   open a file another process holds open for writing, so the wrapper holds the log only while it appends, and keeps
-  output in memory while a reader holds the log. It waits for the job's process, not for the end of its output: a
+  up to 64 MiB of output in memory while a reader holds the log; beyond that it drops output and appends a line saying
+  how many bytes it dropped. Once the job has ended, the remaining output waits at most 60 s for the log, and the exit
+  code is then recorded without it. The wrapper waits for the job's process, not for the end of its output: a
   process the job started in the background may keep the output open, so the wrapper copies output for 2 s after the
   job's process exits, then records the exit code. If the wrapper itself fails, it ends the job's process tree and
   records no exit code.
