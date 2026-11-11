@@ -1,6 +1,6 @@
 # Moving code and results, run 1: implementation plan
 
-Status: draft, revised for a plan-critic review, awaiting approval. Built from
+Status: approved with its design amendment, revised for a plan-critic review. Built from
 [`guest-transfer-design.md`](guest-transfer-design.md) at `1e15bdc`. The design owns behaviour; this plan owns order and
 checks. Progress goes in the execution record at the end. Run 2, directory transfers on Windows guests, gets its own
 plan once this run has landed.
