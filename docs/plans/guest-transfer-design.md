@@ -83,7 +83,8 @@ directories inside the pull directory are created with mode 755. The destination
 symlink.
 
 A pull builds its copy in the pull directory's staging directory, `.vmm-staging/`, under a random name created with
-`O_EXCL`. A pull whose destination lies inside `.vmm-staging/` is refused. The server sets every mode with `fchmod`, so
+`O_EXCL`. A pull whose destination has a `.vmm-staging` component anywhere is refused, so no pull writes into the
+staging directory of a nested pull directory either. The server sets every mode with `fchmod`, so
 the umask cannot change it: files 644 and directories 755, whatever the guest says. Modification times are the
 pull's own. Only a complete copy moves into place:
 
@@ -190,7 +191,8 @@ copy tool would have given. A process keeps the results of its 64 most recent fi
 
 Transfer IDs belong to one server process. The transfers end when their process exits, and an ID the process does not
 know is reported as unknown, with that reason. A transfer runs on a blocking thread and sends its chunks as separate
-guest-agent commands, so other calls to the same guest interleave with it.
+guest-agent commands, so other calls to the same guest interleave with it. A transfer that panics finishes with an
+error and frees its slot.
 
 ### Addresses: `vm_addresses`
 

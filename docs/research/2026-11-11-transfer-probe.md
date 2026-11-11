@@ -12,6 +12,9 @@ client's `__time__` markers. That is about 20 MiB/s. The guest's `sha256sum` mat
 
 At that rate, a pull of 1 GiB takes about 50 s, which is the default `limits.max_wait_secs`.
 
+Pulls run at the same rate. Later on 2026-11-11, with the server's `copy_dir_from_vm` built, a pull of a 128 MiB
+directory from `trial-deb13` took 5.5 s, including the guest's `tar` packing it: about 23 MiB/s.
+
 ## Guest tools
 
 `trial-deb13` has `/usr/bin/tar`, but no `rsync`, `python3` or `sshd`. Its `/tmp` is a 987 MiB tmpfs.

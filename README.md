@@ -100,6 +100,51 @@ This fork publishes no release binaries; build it from source.
    their copies; its filesystem must support `renameat2` with `RENAME_NOREPLACE` and `RENAME_EXCHANGE`, as local
    filesystems such as ext4, xfs, btrfs and tmpfs do.
 
+## Moving files
+
+Four tools move files between the host and a guest without passing the data through the conversation. Pushes read
+only from `host_share_dirs` (or the shared project directory), and pulls write only into `host_pull_dirs`, set up as
+[Host setup](#host-setup) describes. The server hides each tool while its directories are not configured, and
+read-only mode hides all four.
+
+- `copy_to_vm` streams one file in 64 KiB guest-agent requests. The host path is resolved (symlinks, `..`) before the
+  share check, so a link pointing outside a share is refused. On a Linux guest a new file gets mode 644 and an existing
+  one keeps its mode; run `chmod +x` through `exec` for scripts. The parent directory must exist.
+- `copy_from_vm` copies one guest file into a pull directory. The file arrives with mode 644 and appears only once
+  complete. Missing parent directories are created with mode 755, symlinks on the host side are never followed, and
+  an existing file is replaced only with `overwrite: true`. A pull never replaces a directory with a file.
+- `copy_dir_to_vm` pushes a host directory into a Linux guest that has `tar`, for example a checkout. It follows the
+  `.gitignore` rules in the tree and in its parent directories inside the share (`respect_gitignore`, on by default),
+  leaves `.git` out unless `include_git` is set, and takes more `exclude` patterns. A symlink goes along only when it
+  stays inside the tree; other links, FIFOs, sockets and devices are skipped and named in the reply. The guest
+  unpacks the archive beside the target as `.vmm-<random>.d`. Files keep their host modes without setuid and setgid
+  bits, and belong to the user the guest agent runs as. An existing target is replaced as a whole only with
+  `replace: true`, never `/` or a directory directly below it, and a failed push leaves the old target in place.
+- `copy_dir_from_vm` pulls a directory from a Linux guest that has `tar`. The guest packs it in `/var/tmp`, or `/tmp`
+  when that is missing, and the server deletes the archive afterwards. The server unpacks the archive itself, because
+  the guest controls it: files arrive with mode 644 and directories with 755, and links, devices and FIFOs are
+  skipped and named. An archive with absolute or `..` paths, paths over 4096 bytes or 256 levels, repeated paths or
+  sparse files fails the pull, which then writes nothing. `exclude` takes gitignore patterns, applied on the host. An
+  existing directory is replaced as a whole only with `overwrite: true`. A file that changed while `tar` read it
+  gives a warning, not a failure.
+
+`limits.max_pull_bytes` (default 1 GiB) caps one pull: the archive while the guest builds it, and the files written.
+`limits.max_pull_entries` (default 100,000) caps the entries of a directory pull, counting the directories their
+paths imply. The server stops a guest `tar` whose archive grows past the byte cap.
+
+Every copy waits up to `limits.max_wait_secs`. A longer copy goes on in the background and replies with a transfer
+ID, and `wait_for` with a lone `transfer_done` condition reports how it ended. At most `limits.max_transfers`
+(default 4) copies run at once, and the server keeps the newest 64 results. A background copy lives in the server
+process, so it ends when the server does. A push cut short, for example by the VM stopping, can leave `.vmm-*`
+entries beside its target in the guest; delete them through `exec`.
+
+`vm_addresses` tells an agent where to reach a guest for other ways of moving files, such as `scp`. For each
+interface it takes libvirt's DHCP lease, then the guest agent's answer, then the host's ARP table, and names the
+source. Only a lease comes from outside the guest. The agent's answer and the ARP table are the guest's own claims,
+so a compromised guest can name another VM's address or a host address.
+
+The directory tools refuse Windows guests for now. `copy_to_vm`, `copy_from_vm` and `vm_addresses` work there.
+
 ## Screen and mouse
 
 The graphical display lets an agent drive guests that have no guest agent, such as installers and firmware screens.
@@ -367,10 +412,6 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
   between. A console condition without `since` starts where the last `console_write` began, and a match moves that
   point past it. A wait never changes what `console_read` returns.
-- The copy tools wait for the copy up to `limits.max_wait_secs`. A longer copy goes on in the background and replies
-  with a transfer ID, and `wait_for` with a lone `transfer_done` condition reports how it ended. At most
-  `limits.max_transfers` (default 4) copies run at once, and the server keeps the newest 64 results. A background
-  copy lives in the server process, so it ends when the server does.
 - `console_write` can pause between bytes (`inter_char_delay_ms`) or between chunks (`chunk_size` with
   `chunk_delay_ms`), up to 1000 ms each, for firmware and bootloaders that drop input sent back to back. A write
   whose pauses would exceed `limits.max_wait_secs` is refused.
@@ -382,11 +423,6 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   `setsid` without systemd, so they survive an agent restart and a server restart. The launcher refuses a job
   directory parent that is a symbolic link, or is not a root-owned directory with mode 700. Windows jobs are
   described under [Windows guest](#windows-guest).
-- `copy_to_vm` streams the file in 64 KiB guest-agent requests, so the data never passes through
-  the conversation. The host path is resolved (symlinks, `..`) before the `host_share_dirs`
-  check, so links pointing outside a share are refused. On a Linux guest a new file gets mode 644
-  and an existing one keeps its mode; run `chmod +x` through `exec` for scripts. The parent directory
-  must exist.
 - `write_file` gives a new file on a Linux guest mode 644, or the octal `mode` it is given (up to
   `777`). Overwriting or appending keeps an existing file's mode unless `mode` is given. The guest
   agent itself would create the file world-writable, so the mode is set before any data is written.
