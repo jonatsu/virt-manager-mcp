@@ -284,9 +284,9 @@ directory or its parent is a junction or symbolic link, is owned by anyone but `
 access to anyone else. A job's exit code follows `powershell -File`: the code passed to `exit`, 1 after an uncaught
 error, and 0 otherwise, even after a failing native program, so end a job with `exit $LASTEXITCODE` to pass on a
 program's code. `job_stop` ends the job's process tree at once with `taskkill /T /F`, with or without `force`, and the
-job then reads "ended without status"; processes the job started detached from its tree, such as through
-`Start-Process` or WMI, keep running. The job's output waits in memory, up to 64 MiB, while a reader such as the
-agent holds the log file open; output beyond that is dropped, and a line in the log says how many bytes.
+job then reads "ended without status"; processes outside that tree keep running, such as those the job started
+through WMI, or whose parent has already exited. The job's output waits in memory, up to 64 MiB, while a reader such
+as the agent holds the log file open; output beyond that is dropped, and a line in the log says how many bytes.
 
 Windows support was tested on an offline, English Windows 11 Pro guest. Reading a job's state depends on the guest
 agent's English error texts for a missing or locked file, so on a guest in another display language `job_read`,
