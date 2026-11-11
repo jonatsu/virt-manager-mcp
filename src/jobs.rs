@@ -833,6 +833,16 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_launch_fits_a_command_line() {
+        // Windows limits a command line to 32,767 characters, and the launcher carries the wrapper inside its
+        // -EncodedCommand, so a growing script would make every job_start fail in the guest. The margin leaves room for
+        // the program name and the separators.
+        let spec = launch_spec(GuestOs::Windows, &Uuid::new_v4(), "'x'");
+        let length = spec.path.len() + spec.args.iter().map(|a| a.len() + 3).sum::<usize>();
+        assert!(length < 30_000, "{length} characters");
+    }
+
+    #[test]
     fn the_windows_scripts_hold_their_checks() {
         for check in [
             "[IO.FileAttributes]::ReparsePoint",

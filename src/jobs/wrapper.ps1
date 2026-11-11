@@ -47,7 +47,8 @@ function Write-Pending {
   return $true
 }
 
-$lock = Open-Retrying "$dir\lock" 'OpenOrCreate' 'ReadWrite' 'None'
+# Without the lock the job's state cannot be read, so the job does not run at all and stays "starting".
+try { $lock = Open-Retrying "$dir\lock" 'OpenOrCreate' 'ReadWrite' 'None' } catch { exit 1 }
 $me = Get-Process -Id $PID
 "$PID $($me.StartTime.ToUniversalTime().Ticks)" | Set-Content -LiteralPath "$dir\pid.tmp" -Encoding ascii
 Move-Item -LiteralPath "$dir\pid.tmp" -Destination "$dir\pid" -Force
@@ -74,7 +75,13 @@ try {
     if ($ready) {
       $count = $read.Result
       if ($count -eq 0) { break }
-      if ($pending.Length + $count -le $pendingCap) { $pending.Write($buffer, 0, $count) } else { $dropped += $count }
+      # Once output is dropped, everything after it is dropped too until the log takes the marker, so the log has
+      # no unmarked gap.
+      if ($dropped -eq 0 -and $pending.Length + $count -le $pendingCap) {
+        $pending.Write($buffer, 0, $count)
+      } else {
+        $dropped += $count
+      }
       $read = $stream.ReadAsync($buffer, 0, $buffer.Length)
     }
     [void](Write-Pending)
