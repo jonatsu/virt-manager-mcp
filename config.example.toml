@@ -69,6 +69,7 @@ agent_timeout_secs = 10             # single guest agent request
 console_buffer_bytes = 262144       # serial console scrollback per VM
 max_wait_secs = 50                  # longest a wait_for or paced console_write may block
 max_pull_bytes = 1073741824         # largest file or archive one pull from a guest may write
+max_pull_entries = 100000           # most entries one directory pull may hold
 max_transfers = 4                   # copies running in the background at once
 
 # Screen text recognition for wait_for's screen_text condition. Unset (the default) turns it off;

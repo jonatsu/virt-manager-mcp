@@ -3,6 +3,7 @@ mod agent;
 mod ansi;
 mod config;
 mod console;
+mod dirpull;
 mod display;
 mod fsops;
 mod hypervisor;

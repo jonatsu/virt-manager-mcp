@@ -72,6 +72,7 @@ impl Drop for Claim {
 /// A destination inside a pull directory: the pull directory's handle, its parent directory's handle and its name.
 pub struct Destination {
     pull_dir: OwnedFd,
+    staging_path: PathBuf,
     parent: OwnedFd,
     name: OsString,
     path: PathBuf,
@@ -84,6 +85,22 @@ pub enum Existing {
     File,
     Directory,
     Other,
+}
+
+/// What a pull writes: a file or a directory tree. A pull replaces only an entry of the same kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Directory,
+}
+
+impl Kind {
+    fn existing(self) -> Existing {
+        match self {
+            Kind::File => Existing::File,
+            Kind::Directory => Existing::Directory,
+        }
+    }
 }
 
 impl Destination {
@@ -132,6 +149,7 @@ impl Destination {
         }
         Ok(Self {
             pull_dir,
+            staging_path: dir.join(STAGING),
             parent,
             name: name.to_os_string(),
             path: path.to_path_buf(),
@@ -149,26 +167,48 @@ impl Destination {
 
     /// Checks that a pull of a file may write here: refuses anything but a file, and a file without `overwrite`.
     pub fn check_file(&self, overwrite: bool) -> Result<()> {
-        match self.existing()? {
-            Existing::Nothing => Ok(()),
-            Existing::File if overwrite => Ok(()),
-            Existing::File => bail!(
-                "{} exists; pass overwrite: true to replace it",
-                self.path.display()
-            ),
-            Existing::Directory => bail!(
-                "{} is a directory; a file pull replaces only a file",
-                self.path.display()
-            ),
-            Existing::Other => bail!(
-                "{} is a symlink or special file; a pull never replaces one",
-                self.path.display()
-            ),
+        self.check(Kind::File, overwrite)
+    }
+
+    /// Checks that a pull of `kind` may write here: refuses an entry of another kind, and one of the same kind
+    /// without `overwrite`.
+    pub fn check(&self, kind: Kind, overwrite: bool) -> Result<()> {
+        let path = self.path.display();
+        let found = self.existing()?;
+        if found == Existing::Nothing || (found == kind.existing() && overwrite) {
+            return Ok(());
+        }
+        match (found, kind) {
+            (Existing::File, Kind::File) | (Existing::Directory, Kind::Directory) => {
+                bail!("{path} exists; pass overwrite: true to replace it")
+            }
+            (Existing::Directory, Kind::File) => {
+                bail!("{path} is a directory; a file pull replaces only a file")
+            }
+            (Existing::File, Kind::Directory) => {
+                bail!("{path} is a file; a directory pull replaces only a directory")
+            }
+            _ => bail!("{path} is a symlink or special file; a pull never replaces one"),
         }
     }
 
     /// Starts a staged file in this destination's pull directory.
-    pub fn stage_file(&self) -> Result<StagedFile> {
+    pub fn stage_file(&self) -> Result<Staged> {
+        let mut staged = self.stage(Kind::File)?;
+        staged.file = Some(File::from(create_excl(&staged.staging, &staged.id)?));
+        Ok(staged)
+    }
+
+    /// Starts a staged directory, private until its commit, in this destination's pull directory.
+    pub fn stage_dir(&self) -> Result<Staged> {
+        let staged = self.stage(Kind::Directory)?;
+        rustix::fs::mkdirat(&staged.staging, &staged.id, Mode::from(0o700))
+            .with_context(|| format!("creating {STAGING}/{}", staged.id))?;
+        Ok(staged)
+    }
+
+    /// A staged entry of `kind` whose lock is held, before its file or directory exists.
+    fn stage(&self, kind: Kind) -> Result<Staged> {
         let staging = rustix::fs::openat(
             &self.pull_dir,
             STAGING,
@@ -180,37 +220,51 @@ impl Destination {
         let lock_name = format!("{id}{LOCK_SUFFIX}");
         let lock = File::from(create_excl(&staging, &lock_name)?);
         lock.lock().context("locking the staged pull")?;
-        // Built before the file exists, so a failed create still removes the lock file when `staged` drops.
-        let mut staged = StagedFile {
+        // Returned before the entry exists, so a failed create still removes the lock file when it drops.
+        Ok(Staged {
             staging,
+            staging_path: self.staging_path.clone(),
             id,
             lock_name,
             _lock: lock,
+            kind,
             file: None,
-        };
-        staged.file = Some(File::from(create_excl(&staged.staging, &staged.id)?));
-        Ok(staged)
+        })
     }
 }
 
-/// A file being written in the staging directory. Dropped without `commit`, it removes itself and its lock file.
-pub struct StagedFile {
+/// A file or directory being written in the staging directory. Dropped without `commit`, it removes itself and its
+/// lock file.
+pub struct Staged {
     staging: OwnedFd,
+    staging_path: PathBuf,
     id: String,
     lock_name: String,
     _lock: File,
+    kind: Kind,
     file: Option<File>,
 }
 
-impl StagedFile {
+impl Staged {
     pub fn file(&mut self) -> &mut File {
         self.file
             .as_mut()
-            .expect("the staged file is open until commit")
+            .expect("a staged file is open until commit")
     }
 
-    /// Gives the file its fixed mode and moves it to `dest`: a new destination never replaces one that appeared
-    /// meanwhile, and with `overwrite` an existing file is swapped out in one step and then deleted.
+    /// A handle on a staged directory, to write the tree into.
+    pub fn dir(&self) -> Result<OwnedFd> {
+        rustix::fs::openat(
+            &self.staging,
+            &self.id,
+            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .context("opening the staged directory")
+    }
+
+    /// Gives the entry its fixed mode and moves it to `dest`: a new destination never replaces one that appeared
+    /// meanwhile, and with `overwrite` an existing entry of the same kind is swapped out in one step and then deleted.
     pub fn commit(self, dest: &Destination, overwrite: bool) -> Result<()> {
         self.commit_with(dest, overwrite, &|| {})
     }
@@ -223,21 +277,32 @@ impl StagedFile {
         overwrite: bool,
         before_swap: &dyn Fn(),
     ) -> Result<()> {
-        let file = self
-            .file
-            .take()
-            .expect("the staged file is open until commit");
-        rustix::fs::fchmod(&file, Mode::from(FILE_MODE))
-            .context("setting the pulled file's mode")?;
-        // On disk before the rename, so a host crash cannot leave a short file under the destination's name.
-        file.sync_all().context("flushing the pulled file")?;
-        drop(file);
+        match self.kind {
+            Kind::File => {
+                let file = self
+                    .file
+                    .take()
+                    .expect("a staged file is open until commit");
+                rustix::fs::fchmod(&file, Mode::from(FILE_MODE))
+                    .context("setting the pulled file's mode")?;
+                // On disk before the rename, so a host crash cannot leave a short file under the destination's name.
+                file.sync_all().context("flushing the pulled file")?;
+            }
+            Kind::Directory => {
+                let dir = self.dir()?;
+                rustix::fs::fchmod(&dir, Mode::from(DIR_MODE))
+                    .context("setting the pulled directory's mode")?;
+                // Every file of the tree on disk before the rename, in one call for the whole filesystem.
+                rustix::fs::syncfs(&dir).context("flushing the pulled tree")?;
+            }
+        }
+        let expected = self.kind.existing();
         let existing = dest.existing()?;
         if existing == Existing::Nothing || !overwrite {
             return self.rename_new(dest, overwrite);
         }
-        if existing != Existing::File {
-            dest.check_file(overwrite)?;
+        if existing != expected {
+            dest.check(self.kind, overwrite)?;
         }
         before_swap();
         match rustix::fs::renameat_with(
@@ -252,8 +317,8 @@ impl StagedFile {
             Err(Errno::NOENT) => return self.rename_new(dest, overwrite),
             Err(e) => return Err(e).context(format!("replacing {}", dest.path.display())),
         }
-        // What came back must be the file that was checked; anything else moved in meanwhile, so put it back.
-        if existing_at(&self.staging, OsStr::new(&self.id))? != Existing::File {
+        // What came back must be of the kind that was checked; anything else moved in meanwhile, so put it back.
+        if existing_at(&self.staging, OsStr::new(&self.id))? != expected {
             rustix::fs::renameat_with(
                 &self.staging,
                 &self.id,
@@ -281,7 +346,7 @@ impl StagedFile {
             Ok(()) => Ok(()),
             Err(Errno::EXIST) => {
                 // Name what appeared, as the check before the copy would have.
-                dest.check_file(overwrite)
+                dest.check(self.kind, overwrite)
                     .context("it appeared while the pull ran")?;
                 bail!(
                     "{} appeared while the pull ran; nothing was replaced, so pull again",
@@ -293,11 +358,19 @@ impl StagedFile {
     }
 }
 
-impl Drop for StagedFile {
+impl Drop for Staged {
     fn drop(&mut self) {
-        // After a commit, `<id>` is gone or holds the old file that was swapped out; either way it goes. It is
-        // removed as a single file only, never recursively.
-        let _ = rustix::fs::unlinkat(&self.staging, &self.id, AtFlags::empty());
+        // After a commit, `<id>` is gone or holds the old entry that was swapped out; either way it goes. A staged
+        // file is removed as a single file only, never recursively. A staged directory is removed recursively;
+        // `remove_dir_all` never follows a symlink, and the staging directory is private to this user.
+        match self.kind {
+            Kind::File => {
+                let _ = rustix::fs::unlinkat(&self.staging, &self.id, AtFlags::empty());
+            }
+            Kind::Directory => {
+                let _ = std::fs::remove_dir_all(self.staging_path.join(&self.id));
+            }
+        }
         let _ = rustix::fs::unlinkat(&self.staging, &self.lock_name, AtFlags::empty());
     }
 }
@@ -315,7 +388,7 @@ fn existing_at(dir: impl AsFd, name: &OsStr) -> Result<Existing> {
 }
 
 /// Opens the directory `name` below `parent` without following a symlink, creating it with mode 755 if missing.
-fn open_or_create_dir(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd> {
+pub fn open_or_create_dir(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd> {
     let created = match rustix::fs::mkdirat(parent, name, Mode::from(DIR_MODE)) {
         Ok(()) => true,
         Err(Errno::EXIST) => false,
@@ -339,7 +412,7 @@ fn open_or_create_dir(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd> {
     Ok(fd)
 }
 
-fn create_excl(dir: &OwnedFd, name: &str) -> Result<OwnedFd> {
+pub fn create_excl(dir: &OwnedFd, name: &str) -> Result<OwnedFd> {
     rustix::fs::openat(
         dir,
         name,

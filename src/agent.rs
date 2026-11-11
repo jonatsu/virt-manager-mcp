@@ -206,8 +206,8 @@ impl<'a> Agent<'a> {
         }))
     }
 
-    /// Best-effort termination of a timed-out guest-exec process.
-    fn kill(&self, pid: i64) -> Result<()> {
+    /// Best-effort termination of a guest-exec process.
+    pub fn kill(&self, pid: i64) -> Result<()> {
         let spec = match self.os()? {
             GuestOs::Linux => ExecSpec::new("kill", ["-KILL", &pid.to_string()]),
             GuestOs::Windows => {
@@ -234,6 +234,23 @@ impl<'a> Agent<'a> {
 
     fn close(&self, handle: i64) {
         let _ = self.call("guest-file-close", Some(json!({ "handle": handle })));
+    }
+
+    /// The size of the guest file at `path`, found by seeking to its end, so it works while another process writes it.
+    pub fn file_size(&self, path: &str) -> Result<u64> {
+        let handle = self.open(path, "r")?;
+        let result = self
+            .call(
+                "guest-file-seek",
+                Some(json!({ "handle": handle, "offset": 0, "whence": "end" })),
+            )
+            .and_then(|r| {
+                r.get("position")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| anyhow!("guest-file-seek returned no position"))
+            });
+        self.close(handle);
+        result
     }
 
     /// Whether `path` exists in a Linux guest, following symlinks like `open` does.

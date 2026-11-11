@@ -144,8 +144,9 @@ Arguments: `vm`, `guest_path`, `host_path`, `overwrite` (default false) and `exc
 
 `guest_path` must be a directory. The guest runs `tar -c -C <guest_path> .` into `.vmm-<random>.tar` in its temporary
 directory: `/var/tmp` on Linux, or `/tmp` where `/var/tmp` is missing. While `tar` runs, the server polls the
-archive's size and stops `tar` once it passes `max_pull_bytes`, which fails the pull and deletes the archive. A
-finished archive streams out, is deleted in the guest, and is unpacked by the server under the host rules.
+archive's size and stops `tar` once it passes `max_pull_bytes`, which fails the pull and deletes the archive. A `tar`
+that finishes between two polls has its archive measured before anything is sent. A finished archive within the cap
+streams out, is deleted in the guest, and is unpacked by the server under the host rules.
 
 The server applies `exclude` itself while unpacking, in the same gitignore syntax as pushes, and never passes it to the
 guest's `tar`. Guest `tar` builds disagree on `--exclude`: GNU tar matches unanchored and lets wildcards cross `/`,
@@ -163,6 +164,9 @@ itself, so it can check every entry:
 - a sparse entry fails the pull, whether GNU-style or marked by PAX `GNU.sparse.*` keys. A GNU sparse entry declares a
   size it does not carry, and the `tar` crate would pad it with zeros on the host; the crate ignores the PAX keys, so
   such a file would arrive corrupted;
+- a PAX `size` record or a PAX global header fails the pull. In raw mode the `tar` crate 0.4.46 reads past each entry
+  by the size in its ustar header and ignores a PAX `size` record, so honouring one would lose the unpacker's place
+  in the stream. GNU tar and busybox write neither, and bsdtar writes `size` only for files over 8 GiB;
 - a PAX or long-name header larger than 64 KiB fails the pull, so metadata cannot fill memory;
 - symlinks, hard links, device files, FIFOs and sockets are skipped and named in the reply;
 - passing `max_pull_bytes` or `max_pull_entries` fails the pull.

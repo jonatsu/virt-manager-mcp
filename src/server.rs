@@ -22,7 +22,9 @@ use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
 use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, pull, push, transfer, wait};
+use crate::{
+    addresses, ansi, dirpull, display, fsops, jobs, manage, mouse, pull, push, transfer, wait,
+};
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
@@ -46,6 +48,7 @@ const MUTATING_TOOLS: &[&str] = &[
     "copy_to_vm",
     "copy_from_vm",
     "copy_dir_to_vm",
+    "copy_dir_from_vm",
     "job_start",
     "job_stop",
 ];
@@ -200,6 +203,24 @@ pub struct CopyFromVmParams {
 
 fn yes() -> bool {
     true
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CopyDirFromVmParams {
+    pub vm: String,
+    /// Absolute path of a directory inside the guest.
+    pub guest_path: String,
+    /// Absolute path of the directory to create on the host, inside one of the pull directories named in the server
+    /// instructions; missing parent directories are created.
+    pub host_path: String,
+    /// Replace an existing directory at host_path with the pulled tree as a whole (default false). A file, symlink
+    /// or special file there is never replaced.
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Paths to leave out, as gitignore patterns relative to guest_path, such as "build/" or "*.o". The server
+    /// applies them on the host, so excluded files still cross the channel and count towards the limits.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -525,7 +546,7 @@ pub fn hidden_tools(config: &Config) -> Vec<&'static str> {
         hidden.extend_from_slice(&["copy_to_vm", "copy_dir_to_vm"]);
     }
     if config.host_pull_dirs.is_empty() {
-        hidden.push("copy_from_vm");
+        hidden.extend_from_slice(&["copy_from_vm", "copy_dir_from_vm"]);
     }
     let m = &config.manage;
     let off = |on: bool, tools: &'static [&'static str]| {
@@ -940,6 +961,69 @@ impl VirtServer {
                 })?;
                 let mut reply = serde_json::to_value(&summary)?;
                 reply["guest_path"] = json!(target.path);
+                Ok(reply.to_string())
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
+        description = "Pull a directory from a Linux guest, such as build output or test results, into a pull \
+        directory on the host, without passing it through the conversation; the guest needs tar. The guest packs \
+        guest_path with tar in /var/tmp (or /tmp), and the server unpacks the archive itself. host_path names the \
+        directory to create inside one of the pull directories named in the server instructions; an existing one is \
+        replaced as a whole only with overwrite: true, and a file there never is. Files arrive with mode 644 and \
+        directories with 755; symlinks, hard links, devices and FIFOs are skipped and named. exclude takes gitignore \
+        patterns, applied on the host. limits.max_pull_bytes caps the archive and the files written, and \
+        limits.max_pull_entries the entries; an archive with absolute or '..' paths, repeated paths or sparse files \
+        fails the pull, which then writes nothing. If tar reports that a file changed while it was read, the pull \
+        succeeds with tar's warning. A pull still running after limits.max_wait_secs continues in the background and \
+        replies with a `transfer` ID; wait_for's `transfer_done` condition reports how it ended."
+    )]
+    async fn copy_dir_from_vm(
+        &self,
+        Parameters(p): Parameters<CopyDirFromVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let config = &s.hv.config;
+            // The VM first, so a call naming a hidden or missing VM creates no directories on the host.
+            let dom = s.hv.domain(&p.vm)?;
+            if !p.guest_path.starts_with('/') {
+                bail!("{}: guest_path must be absolute", p.guest_path);
+            }
+            let exclude = dirpull::excludes(&p.exclude)?;
+            let dest = pull::Destination::open(&config.host_pull_dirs, &p.host_path)?;
+            dest.check(pull::Kind::Directory, p.overwrite)?;
+            let claim = s.pulls.claim(dest.path())?;
+            let limits = dirpull::Limits {
+                max_bytes: config.limits.max_pull_bytes,
+                max_entries: config.limits.max_pull_entries,
+            };
+            let timeout = config.limits.agent_timeout_secs;
+            let guest = dom.clone();
+            s.copy(&p.vm, &dom, move |bytes| {
+                let _claim = claim;
+                let agent = Agent::new(&guest, timeout);
+                if agent.os()? == agent::GuestOs::Windows {
+                    bail!("copy_dir_from_vm does not support Windows guests yet");
+                }
+                let request = dirpull::Request {
+                    guest_path: &p.guest_path,
+                    dest: &dest,
+                    overwrite: p.overwrite,
+                    limits: &limits,
+                    exclude: &exclude,
+                    temp_dirs: dirpull::TEMP_DIRS,
+                    poll: dirpull::POLL,
+                };
+                let unpacked = dirpull::pull(&agent, &request, bytes)?;
+                let mut reply = serde_json::to_value(&unpacked)?;
+                reply["host_path"] = json!(dest.path());
                 Ok(reply.to_string())
             })
         })
@@ -1975,7 +2059,7 @@ impl ServerHandler for VirtServer {
                     .map(|d| d.display().to_string())
                     .collect();
                 extra.push_str(&format!(
-                    " copy_from_vm can copy guest files to the host, into these pull directories only: {}.",
+                    " copy_from_vm and copy_dir_from_vm can copy guest files and directories to the host, into these pull directories only: {}.",
                     dirs.join(", ")
                 ));
             }
@@ -2133,7 +2217,7 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 43);
+        assert_eq!(tools.len(), 44);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"
