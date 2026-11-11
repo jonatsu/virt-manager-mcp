@@ -130,6 +130,8 @@ pub struct Limits {
     /// Longest a waiting call may block: `wait_for`, and a paced `console_write`. Several MCP clients cut tool
     /// calls off at 60 s, so the default stays below that.
     pub max_wait_secs: u64,
+    /// Most file bytes one pull from a guest may write on the host.
+    pub max_pull_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,6 +199,7 @@ impl Default for Limits {
             agent_timeout_secs: 10,
             console_buffer_bytes: 256 * 1024,
             max_wait_secs: 50,
+            max_pull_bytes: 1 << 30,
         }
     }
 }
@@ -239,6 +242,9 @@ impl Config {
         }
         if self.limits.console_buffer_bytes == 0 {
             bail!("limits.console_buffer_bytes must be positive");
+        }
+        if self.limits.max_pull_bytes == 0 {
+            bail!("limits.max_pull_bytes must be positive");
         }
         if self.limits.max_wait_secs == 0 {
             bail!("limits.max_wait_secs must be positive");

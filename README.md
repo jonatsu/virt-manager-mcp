@@ -42,6 +42,7 @@ The path is passed as data, never spliced into shell code.
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
 | `write_file` (overwrite/append, text or base64) | ❌ |
 | `copy_to_vm`: copy a host file into the guest (only with `host_share_dirs`) | ❌ |
+| `copy_from_vm`: copy a guest file into a pull directory on the host, mode 644, replacing a file only with `overwrite` (only with `host_pull_dirs`) | ❌ |
 | `start_vm`, `stop_vm` (graceful or `force`) (only for VMs in `power_vms`) | ❌ |
 | `console_write`, optionally paced per byte or per chunk | ❌ |
 | `guest_info`: OS, hostname, NICs, filesystems, users, timezone | ❌ |

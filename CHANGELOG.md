@@ -18,6 +18,10 @@ Each release's section lists what changed for people who run the server and for 
 - `vm_addresses` lists a running VM's addresses per interface, without a guest agent where libvirt's DHCP server
   leased one. For each interface it prefers the lease, which the guest cannot forge, then the guest agent's answer,
   then the host's ARP table, and says which source answered. Read-only mode skips the guest agent.
+- `copy_from_vm` copies a guest file into a pull directory on the host without passing it through the conversation.
+  The file arrives with mode 644 and appears only once complete; missing parent directories are created with mode
+  755, symlinks are never followed, an existing file is replaced only with `overwrite: true`, and a directory never
+  is. `limits.max_pull_bytes` (default 1 GiB) caps one pull. Read-only mode hides it.
 - The `host_pull_dirs` setting names host directories that pulls from a guest may write into. The server refuses to
   start when one overlaps a share directory, the shared project directory, an ISO directory or any libvirt storage
   pool, or sits on a filesystem without `renameat2` support. Each gets a private `.vmm-staging/` directory.

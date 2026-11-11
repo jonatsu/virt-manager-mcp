@@ -22,7 +22,7 @@ use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
 use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, wait};
+use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, pull, wait};
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
@@ -44,6 +44,7 @@ const MUTATING_TOOLS: &[&str] = &[
     "start_vm",
     "stop_vm",
     "copy_to_vm",
+    "copy_from_vm",
     "job_start",
     "job_stop",
 ];
@@ -75,6 +76,8 @@ pub struct State {
     pub consoles: Consoles,
     /// The OCR recogniser, loaded from `display.ocr_models` by the first `screen_text` wait and shared after.
     pub ocr: Mutex<Option<Arc<display::Recognizer>>>,
+    /// Host destinations of the pulls running in this process.
+    pub pulls: pull::Destinations,
 }
 
 #[derive(Clone)]
@@ -178,6 +181,18 @@ pub struct CopyToVmParams {
     pub host_path: String,
     /// Absolute destination path inside the guest. Parent directory must exist; an existing file is overwritten.
     pub guest_path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CopyFromVmParams {
+    pub vm: String,
+    /// Absolute path of the file inside the guest.
+    pub guest_path: String,
+    /// Absolute destination path on the host, inside one of the pull directories named in the server instructions.
+    pub host_path: String,
+    /// Replace an existing file at host_path (default false). A directory or symlink is never replaced.
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -477,6 +492,9 @@ pub fn hidden_tools(config: &Config) -> Vec<&'static str> {
     }
     if config.host_share_dirs.is_empty() {
         hidden.push("copy_to_vm");
+    }
+    if config.host_pull_dirs.is_empty() {
+        hidden.push("copy_from_vm");
     }
     let m = &config.manage;
     let off = |on: bool, tools: &'static [&'static str]| {
@@ -787,6 +805,44 @@ impl VirtServer {
                 "copied {n} bytes from {} to {}",
                 src.display(),
                 p.guest_path
+            ))])
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
+        description = "Copy a file from the guest to the host via the QEMU guest agent, without passing it through \
+        the conversation. host_path must lie inside one of the pull directories named in the server instructions; \
+        missing parent directories there are created. The file arrives with mode 644, never executable, and appears \
+        only once it is complete. An existing file at host_path is replaced only with overwrite: true; a directory, \
+        symlink or special file there is never replaced. Files over limits.max_pull_bytes are refused."
+    )]
+    async fn copy_from_vm(
+        &self,
+        Parameters(p): Parameters<CopyFromVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let config = &s.hv.config;
+            let dest = pull::Destination::open(&config.host_pull_dirs, &p.host_path)?;
+            dest.check_file(p.overwrite)?;
+            let _claim = s.pulls.claim(dest.path())?;
+            let dom = s.hv.domain(&p.vm)?;
+            let mut staged = dest.stage_file()?;
+            let n = s.agent(&dom).read_to(
+                &p.guest_path,
+                staged.file(),
+                config.limits.max_pull_bytes,
+            )?;
+            staged.commit(&dest, p.overwrite)?;
+            Ok(vec![ContentBlock::text(format!(
+                "copied {n} bytes from {} to {}",
+                p.guest_path,
+                dest.path().display()
             ))])
         })
         .await
@@ -1796,6 +1852,17 @@ impl ServerHandler for VirtServer {
                     dirs.join(", ")
                 ));
             }
+            if !config.host_pull_dirs.is_empty() {
+                let dirs: Vec<String> = config
+                    .host_pull_dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect();
+                extra.push_str(&format!(
+                    " copy_from_vm can copy guest files to the host, into these pull directories only: {}.",
+                    dirs.join(", ")
+                ));
+            }
             extra.push_str(&manage_instructions(&config.manage));
         }
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
@@ -1926,13 +1993,14 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 41);
+        assert_eq!(tools.len(), 42);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"
                 read_only = true
                 power_vms = ["*"]
                 host_share_dirs = ["/srv"]
+                host_pull_dirs = ["/pull"]
                 [manage]
                 create = true
                 delete = true

@@ -298,6 +298,41 @@ impl<'a> Agent<'a> {
         result
     }
 
+    /// Streams the guest file at `path` into `dst`, failing once it passes `max_bytes`, and returns the bytes copied.
+    pub fn read_to(
+        &self,
+        path: &str,
+        dst: &mut impl std::io::Write,
+        max_bytes: u64,
+    ) -> Result<u64> {
+        let handle = self.open(path, "rb")?;
+        let result = (|| {
+            let mut copied = 0u64;
+            loop {
+                let r = self.call(
+                    "guest-file-read",
+                    Some(json!({ "handle": handle, "count": FILE_CHUNK })),
+                )?;
+                let data = match r.get("buf-b64").and_then(Value::as_str) {
+                    Some(b) => B64.decode(b)?,
+                    None => Vec::new(),
+                };
+                copied += data.len() as u64;
+                if copied > max_bytes {
+                    bail!(
+                        "{path} is larger than the pull limit of {max_bytes} bytes (limits.max_pull_bytes)"
+                    );
+                }
+                dst.write_all(&data)?;
+                if r.get("eof").and_then(Value::as_bool).unwrap_or(false) || data.is_empty() {
+                    return Ok(copied);
+                }
+            }
+        })();
+        self.close(handle);
+        result
+    }
+
     pub fn write_file(
         &self,
         path: &str,
@@ -759,6 +794,113 @@ mod wait_tests {
         assert!(
             took >= Duration::from_millis(50) && took < Duration::from_secs(1),
             "{took:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    /// A guest file served in reads of at most `chunk` bytes; a read after `fail_after` reads fails.
+    struct FileGuest {
+        data: Vec<u8>,
+        chunk: usize,
+        fail_after: Option<usize>,
+        pos: Cell<usize>,
+        reads: Cell<usize>,
+        log: RefCell<Vec<String>>,
+    }
+
+    impl FileGuest {
+        fn new(data: &[u8], chunk: usize) -> Self {
+            Self {
+                data: data.to_vec(),
+                chunk,
+                fail_after: None,
+                pos: Cell::new(0),
+                reads: Cell::new(0),
+                log: RefCell::default(),
+            }
+        }
+    }
+
+    impl Channel for FileGuest {
+        fn command(&self, request: &str, _: i32) -> std::result::Result<String, String> {
+            let req: Value = serde_json::from_str(request).unwrap();
+            let execute = req["execute"].as_str().unwrap();
+            self.log.borrow_mut().push(execute.to_string());
+            let ret = match execute {
+                "guest-file-open" => json!(3),
+                "guest-file-read" => {
+                    self.reads.set(self.reads.get() + 1);
+                    if self.fail_after.is_some_and(|n| self.reads.get() > n) {
+                        return Err("guest went away".into());
+                    }
+                    let start = self.pos.get();
+                    let end = (start + self.chunk).min(self.data.len());
+                    self.pos.set(end);
+                    json!({ "count": end - start, "buf-b64": B64.encode(&self.data[start..end]),
+                            "eof": end == self.data.len() })
+                }
+                _ => Value::Null,
+            };
+            Ok(json!({ "return": ret }).to_string())
+        }
+    }
+
+    #[test]
+    fn a_file_streams_out_whole_and_the_handle_closes() {
+        let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
+        let guest = FileGuest::new(&data, 4096);
+        let mut out = Vec::new();
+        let n = Agent::new(&guest, 5)
+            .read_to("/f", &mut out, 1 << 20)
+            .unwrap();
+        assert_eq!(n, 10_000);
+        assert_eq!(out, data);
+        assert_eq!(guest.log.borrow().last().unwrap(), "guest-file-close");
+    }
+
+    #[test]
+    fn a_file_over_the_limit_fails_and_the_handle_closes() {
+        let guest = FileGuest::new(&[7; 9000], 4096);
+        let mut out = Vec::new();
+        let err = Agent::new(&guest, 5)
+            .read_to("/f", &mut out, 8192)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_pull_bytes"), "{err}");
+        assert!(
+            out.len() <= 8192,
+            "wrote {} bytes past the limit",
+            out.len()
+        );
+        assert_eq!(guest.log.borrow().last().unwrap(), "guest-file-close");
+    }
+
+    #[test]
+    fn a_read_error_mid_file_fails_and_the_handle_closes() {
+        let mut guest = FileGuest::new(&[1; 9000], 4096);
+        guest.fail_after = Some(1);
+        let mut out = Vec::new();
+        assert!(
+            Agent::new(&guest, 5)
+                .read_to("/f", &mut out, 1 << 20)
+                .is_err()
+        );
+        assert_eq!(guest.log.borrow().last().unwrap(), "guest-file-close");
+    }
+
+    #[test]
+    fn an_empty_file_copies_nothing() {
+        let guest = FileGuest::new(&[], 4096);
+        let mut out = Vec::new();
+        assert_eq!(
+            Agent::new(&guest, 5).read_to("/f", &mut out, 10).unwrap(),
+            0
         );
     }
 }

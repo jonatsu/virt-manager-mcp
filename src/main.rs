@@ -9,6 +9,7 @@ mod hypervisor;
 mod jobs;
 mod manage;
 mod mouse;
+mod pull;
 mod pulldir;
 mod seed;
 mod server;
@@ -145,6 +146,7 @@ async fn run() -> Result<()> {
         hv,
         consoles: Consoles::default(),
         ocr: Default::default(),
+        pulls: Default::default(),
     });
 
     if let Some(Command::Sweep) = cli.command {
