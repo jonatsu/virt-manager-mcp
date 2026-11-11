@@ -22,7 +22,7 @@ use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
 use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{ansi, display, fsops, jobs, manage, mouse, wait};
+use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, wait};
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
@@ -570,6 +570,42 @@ impl VirtServer {
                 ));
             }
             Ok(out)
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
+        description = "List a running VM's network addresses, per interface by MAC address, without waiting. For \
+        each interface the answer comes from libvirt's DHCP lease where one exists, else from the guest agent, else \
+        from the host's ARP table, and `source` says which. A lease is handed out by libvirt itself; `agent` and \
+        `arp` answers are what the guest claims, so a compromised guest can name an address that is not its own. \
+        Loopback and IPv6 link-local addresses are left out. An empty list means no source knows an address yet; \
+        `unavailable` names the sources that failed. Read-only mode skips the guest agent."
+    )]
+    async fn vm_addresses(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let dom = s.hv.domain(&p.vm)?;
+            let answers = addresses::query(&dom, addresses::sources(s.hv.config.read_only));
+            let unavailable: serde_json::Map<String, serde_json::Value> = answers
+                .iter()
+                .filter_map(|(source, a)| {
+                    let key = serde_json::to_value(source).ok()?.as_str()?.to_string();
+                    a.as_ref().err().map(|e| (key, json!(e)))
+                })
+                .collect();
+            let reply = json!({
+                "interfaces": addresses::merge(&answers),
+                "unavailable": unavailable,
+            });
+            Ok(vec![ContentBlock::text(reply.to_string())])
         })
         .await
     }
@@ -1894,7 +1930,7 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), 41);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"
@@ -1961,6 +1997,7 @@ mod tests {
                 "screenshot",
                 "snapshot_list",
                 "stat_path",
+                "vm_addresses",
             ]
         );
         // Input to the guest can run anything, such as `rm -rf /`; so can wait_for's command condition.

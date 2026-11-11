@@ -34,6 +34,7 @@ The path is passed as data, never spliced into shell code.
 | -- | -- |
 | `list_vms`: allowed VMs, power state, agent status, OS family | ✅ |
 | `read_file`, `list_dir`, `stat_path` | ✅ |
+| `vm_addresses`: a running VM's addresses per interface, from libvirt's DHCP lease, else the guest agent, else ARP | ✅ (lease and ARP only) |
 | `console_open`, `console_read`, `console_close` | ✅ |
 | `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
 | `job_read`, `job_list`: a background job's output and state | ✅ |

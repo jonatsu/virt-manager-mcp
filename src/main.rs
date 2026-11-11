@@ -1,3 +1,4 @@
+mod addresses;
 mod agent;
 mod ansi;
 mod config;
