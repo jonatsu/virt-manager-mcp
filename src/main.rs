@@ -11,6 +11,7 @@ mod manage;
 mod mouse;
 mod pull;
 mod pulldir;
+mod push;
 mod seed;
 mod server;
 mod sweep;

@@ -22,7 +22,7 @@ use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
 use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, pull, transfer, wait};
+use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, pull, push, transfer, wait};
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
@@ -45,6 +45,7 @@ const MUTATING_TOOLS: &[&str] = &[
     "stop_vm",
     "copy_to_vm",
     "copy_from_vm",
+    "copy_dir_to_vm",
     "job_start",
     "job_stop",
 ];
@@ -195,6 +196,34 @@ pub struct CopyFromVmParams {
     /// Replace an existing file at host_path (default false). A directory or symlink is never replaced.
     #[serde(default)]
     pub overwrite: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CopyDirToVmParams {
+    pub vm: String,
+    /// Absolute path of a directory on the host, inside one of the shared directories named in the server
+    /// instructions.
+    pub host_path: String,
+    /// Absolute path of the directory to create in the guest; missing parent directories are created.
+    pub guest_path: String,
+    /// Replace an existing directory at guest_path with the pushed tree as a whole (default false). Refused for / and
+    /// the directories directly below it, and for anything but a directory.
+    #[serde(default)]
+    pub replace: bool,
+    /// Leave out what .gitignore and .git/info/exclude rules ignore, in the tree and in its parent directories inside
+    /// the share (default true).
+    #[serde(default = "yes")]
+    pub respect_gitignore: bool,
+    /// Send .git directories too (default false).
+    #[serde(default)]
+    pub include_git: bool,
+    /// More paths to leave out, as gitignore patterns relative to host_path, such as "target/" or "*.log".
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -493,7 +522,7 @@ pub fn hidden_tools(config: &Config) -> Vec<&'static str> {
         hidden.extend_from_slice(&["start_vm", "stop_vm"]);
     }
     if config.host_share_dirs.is_empty() {
-        hidden.push("copy_to_vm");
+        hidden.extend_from_slice(&["copy_to_vm", "copy_dir_to_vm"]);
     }
     if config.host_pull_dirs.is_empty() {
         hidden.push("copy_from_vm");
@@ -862,6 +891,56 @@ impl VirtServer {
                     p.guest_path,
                     dest.path().display()
                 ))
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        ),
+        description = "Push a host directory, such as a checkout, into a Linux guest as a tar archive through the QEMU \
+        guest agent; the guest needs tar. host_path must be a directory inside the shared host directories named in \
+        the server instructions. guest_path names the directory to create; an existing one is refused unless \
+        replace: true, which swaps the whole new tree in, so files deleted on the host do not linger. A failed push \
+        leaves the old tree in place. By default .gitignore rules apply and .git is left out; exclude adds gitignore \
+        patterns. Symlinks are sent only when they stay inside the tree; other symlinks, FIFOs, sockets and devices \
+        are skipped and named. Files arrive owned by the guest agent's user, without setuid or setgid bits. The reply \
+        counts files, bytes and the files .gitignore kept out. A push still running after limits.max_wait_secs \
+        continues in the background and replies with a `transfer` ID; wait_for's `transfer_done` condition reports \
+        how it ended. Temporary entries beside the target start with .vmm-."
+    )]
+    async fn copy_dir_to_vm(
+        &self,
+        Parameters(p): Parameters<CopyDirToVmParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let dom = s.hv.domain(&p.vm)?;
+            let tree = push::Tree::resolve(&s.hv.config.host_share_dirs, &p.host_path)?;
+            let options = push::Options {
+                respect_gitignore: p.respect_gitignore,
+                include_git: p.include_git,
+                exclude: p.exclude,
+            };
+            tree.check(&options)?;
+            let target = push::Target::parse(&p.guest_path, p.replace)?;
+            let timeout = s.hv.config.limits.agent_timeout_secs;
+            let guest = dom.clone();
+            let replace = p.replace;
+            s.copy(&p.vm, &dom, move |bytes| {
+                let agent = Agent::new(&guest, timeout);
+                if agent.os()? == agent::GuestOs::Windows {
+                    bail!("copy_dir_to_vm does not support Windows guests yet");
+                }
+                let summary = push::push(&agent, &target, replace, bytes, |out| {
+                    push::write_archive(&tree, &push::select(&tree, &options)?, out)
+                })?;
+                let mut reply = serde_json::to_value(&summary)?;
+                reply["guest_path"] = json!(target.path);
+                Ok(reply.to_string())
             })
         })
         .await
@@ -1885,7 +1964,7 @@ impl ServerHandler for VirtServer {
                     .map(|d| d.display().to_string())
                     .collect();
                 extra.push_str(&format!(
-                    " copy_to_vm can copy host files from these directories into a guest: {}.",
+                    " copy_to_vm and copy_dir_to_vm can copy host files and directories from these directories into a guest: {}.",
                     dirs.join(", ")
                 ));
             }
@@ -2054,7 +2133,7 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 42);
+        assert_eq!(tools.len(), 43);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"

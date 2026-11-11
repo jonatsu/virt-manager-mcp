@@ -16,7 +16,7 @@ Host: Linux. Guests: Linux and Windows.
 
 | Capability | Mechanism | Guest requirement |
 | -- | -- | -- |
-| `exec`, `read_file`, `write_file`, `copy_to_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs work on Linux and Windows guests |
+| `exec`, `read_file`, `write_file`, `copy_to_vm`, `copy_dir_to_vm`, `copy_from_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs work on Linux and Windows guests |
 | `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs `display.ocr_models` |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
@@ -42,6 +42,7 @@ The path is passed as data, never spliced into shell code.
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
 | `write_file` (overwrite/append, text or base64) | ❌ |
 | `copy_to_vm`: copy a host file into the guest (only with `host_share_dirs`) | ❌ |
+| `copy_dir_to_vm`: push a host directory into a Linux guest as a `tar` archive, following `.gitignore`, replacing a directory only with `replace` (only with `host_share_dirs`) | ❌ |
 | `copy_from_vm`: copy a guest file into a pull directory on the host, mode 644, replacing a file only with `overwrite` (only with `host_pull_dirs`) | ❌ |
 | `start_vm`, `stop_vm` (graceful or `force`) (only for VMs in `power_vms`) | ❌ |
 | `console_write`, optionally paced per byte or per chunk | ❌ |
@@ -56,8 +57,8 @@ The path is passed as data, never spliced into shell code.
 | `describe_vm` (with any `manage` operation), `list_isos` (with create/reconfigure and `iso_dirs`) | ❌ |
 
 In read-only mode the ❌ tools are not advertised at all. `start_vm`/`stop_vm` are also hidden while
-`power_vms` is empty (unless VM management is on), and `copy_to_vm` while no host directory is shared
-(`host_share_dirs` / `share_project_dir`).
+`power_vms` is empty (unless VM management is on), and `copy_to_vm` and `copy_dir_to_vm` while no host directory is
+shared (`host_share_dirs` / `share_project_dir`).
 
 ## Build
 
@@ -364,10 +365,10 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
   between. A console condition without `since` starts where the last `console_write` began, and a match moves that
   point past it. A wait never changes what `console_read` returns.
-- `copy_to_vm` and `copy_from_vm` wait for the copy up to `limits.max_wait_secs`. A longer copy goes on in the
-  background and replies with a transfer ID, and `wait_for` with a lone `transfer_done` condition reports how it
-  ended. At most `limits.max_transfers` (default 4) copies run at once, and the server keeps the newest 64 results.
-  A background copy lives in the server process, so it ends when the server does.
+- `copy_to_vm`, `copy_dir_to_vm` and `copy_from_vm` wait for the copy up to `limits.max_wait_secs`. A longer copy
+  goes on in the background and replies with a transfer ID, and `wait_for` with a lone `transfer_done` condition
+  reports how it ended. At most `limits.max_transfers` (default 4) copies run at once, and the server keeps the
+  newest 64 results. A background copy lives in the server process, so it ends when the server does.
 - `console_write` can pause between bytes (`inter_char_delay_ms`) or between chunks (`chunk_size` with
   `chunk_delay_ms`), up to 1000 ms each, for firmware and bootloaders that drop input sent back to back. A write
   whose pauses would exceed `limits.max_wait_secs` is refused.
