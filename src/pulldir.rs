@@ -1,13 +1,13 @@
 //! Pull directories on the host: the host directories that pulls from a guest write into.
 //!
 //! Each pull directory holds a staging directory, `.vmm-staging/`, where a pull builds its copy before it moves into
-//! place. A pull owns three entries there, all named after one random ID: `<id>.lock`, which it holds an `flock` on
-//! while it runs; `<id>`, its copy; and `<id>.old`, an old destination it swapped out. Start-up removes the entries of
-//! pulls that no process runs any more.
+//! place. A pull owns two entries there, both named after one random ID: `<id>.lock`, which it holds an `flock` on
+//! while it runs, and `<id>`, which holds its copy and, after an overwrite, the old destination it swapped out.
+//! Start-up removes the entries of pulls that no process runs any more.
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -18,7 +18,7 @@ use rustix::fs::{RenameFlags, renameat_with};
 pub const STAGING: &str = ".vmm-staging";
 
 /// Suffix of a pull's lock file in the staging directory.
-const LOCK_SUFFIX: &str = ".lock";
+pub const LOCK_SUFFIX: &str = ".lock";
 
 /// How old a staged entry must be before start-up may remove it. A pull creates its lock file and locks it in two
 /// steps; the age keeps start-up from taking the lock in between.
@@ -70,9 +70,18 @@ fn staging_dir(dir: &Path) -> Result<PathBuf> {
         );
     }
     if meta.mode() & 0o077 != 0 {
-        // The path is a real directory of this account, checked above, so this changes nothing else.
-        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("making {} private", staging.display()))?;
+        // Through a handle opened without following a symlink, so a directory swapped for a link since the check
+        // above is refused rather than changing something else.
+        let fd = rustix::fs::open(
+            &staging,
+            rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .and_then(|fd| rustix::fs::fchmod(&fd, rustix::fs::Mode::from(0o700)))
+        .with_context(|| format!("making {} private", staging.display()));
+        fd?;
     }
     Ok(staging)
 }
@@ -195,6 +204,8 @@ fn is_running(staging: &Path, id: &str) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn test_dir(name: &str) -> PathBuf {

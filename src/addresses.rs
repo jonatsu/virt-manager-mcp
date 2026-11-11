@@ -73,8 +73,35 @@ pub fn query(dom: &Domain, agent_timeout_secs: i32, sources: &[Source]) -> Vec<(
 }
 
 fn libvirt(dom: &Domain, source: sys::virDomainInterfaceAddressesSource) -> Answer {
+    // libvirt copies each NIC's host-side device name into the answer (`virDomainNetDHCPInterfaces` and
+    // `virDomainNetARPInterfaces` in libvirt 12.0.0), NULL for a NIC without one, such as a passed-through device.
+    // `virt` 0.4.3 reads that name without a NULL check, so the call is made only when every NIC has a name.
+    let xml = dom.get_xml_desc(0).map_err(|e| e.message().to_string())?;
+    if !every_nic_has_a_device_name(&xml) {
+        return Err(
+            "skipped: a network interface has no host-side device name, which this server cannot read safely"
+                .to_string(),
+        );
+    }
     dom.interface_addresses(source, 0)
         .map_err(|e| e.message().to_string())
+}
+
+/// Whether every `<interface>` in a domain's live XML has a `<target dev="...">`.
+fn every_nic_has_a_device_name(xml: &str) -> bool {
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return false;
+    };
+    doc.descendants()
+        .filter(|n| {
+            n.has_tag_name("interface") && n.parent().is_some_and(|p| p.has_tag_name("devices"))
+        })
+        .all(|nic| {
+            nic.children()
+                .find(|c| c.has_tag_name("target"))
+                .and_then(|t| t.attribute("dev"))
+                .is_some_and(|d| !d.is_empty())
+        })
 }
 
 /// The interfaces in a `guest-network-get-interfaces` reply. An interface without a hardware address cannot be
@@ -350,6 +377,20 @@ mod tests {
         ] {
             assert!(usable(addr), "{addr} dropped");
         }
+    }
+
+    #[test]
+    fn libvirt_sources_need_every_nic_named() {
+        let named = r#"<domain><devices>
+            <interface type="network"><mac address="52:54:00:00:00:01"/><target dev="vnet3"/></interface>
+            <hostdev mode="subsystem"/></devices></domain>"#;
+        assert!(every_nic_has_a_device_name(named));
+        let passthrough = r#"<domain><devices>
+            <interface type="network"><target dev="vnet3"/></interface>
+            <interface type="hostdev"><mac address="52:54:00:00:00:02"/></interface></devices></domain>"#;
+        assert!(!every_nic_has_a_device_name(passthrough));
+        assert!(every_nic_has_a_device_name("<domain><devices/></domain>"));
+        assert!(!every_nic_has_a_device_name("not xml"));
     }
 
     #[test]
