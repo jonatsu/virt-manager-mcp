@@ -1,0 +1,175 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$jobs = 'C:\\ProgramData\\virtmanager-mcp\\jobs'\nRename-Item $jobs 'jobs.real'\nNew-Item -ItemType Junction -Path $jobs -Target \"$jobs.real\" | Out-Null\n'junction made'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "junction made"
+      ]
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "'should not run'"
+    },
+    "expect": {
+      "error": true,
+      "contains": "C:\\ProgramData\\virtmanager-mcp\\jobs is a junction or symbolic link"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$jobs = 'C:\\ProgramData\\virtmanager-mcp\\jobs'\n(Get-Item $jobs).Delete()\nRename-Item \"$jobs.real\" 'jobs'\n\"entries: $(@(Get-ChildItem $jobs).Count)\""
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "entries: 0"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "icacls C:\\ProgramData\\virtmanager-mcp\\jobs /grant 'Users:(R)' | Out-Null\n'Users entry added'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "Users entry added"
+      ]
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "'should not run'"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "the access list of C:\\ProgramData\\virtmanager-mcp\\jobs grants access to",
+        "Users"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "icacls C:\\ProgramData\\virtmanager-mcp\\jobs /remove:g 'Users' | Out-Null\n\"entries: $(@(Get-ChildItem C:\\ProgramData\\virtmanager-mcp\\jobs).Count)\""
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "entries: 0"
+      ]
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "'runs again'"
+    },
+    "save": {
+      "wok": "job"
+    },
+    "expect": {
+      "contains": "started with Win32_Process.Create"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "job_done",
+          "job": "${wok}"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "exited with code 0"
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "..\\..\\Windows"
+    },
+    "expect": {
+      "error": true,
+      "contains": "'..\\..\\Windows' is not a job ID"
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "true"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "trial-deb13",
+      "job": "${wok}"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "trial-deb13",
+      "job": "${wok}"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  },
+  {
+    "tool": "job_list",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Get-ChildItem C:\\ProgramData\\virtmanager-mcp\\jobs | Remove-Item -Recurse -Force\n'cleared'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "cleared"
+      ]
+    }
+  }
+]

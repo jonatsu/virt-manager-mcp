@@ -1,0 +1,142 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Remove-Item C:\\ready -ErrorAction SilentlyContinue\n'clean'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "clean"
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 5,
+      "conditions": [
+        {
+          "kind": "command",
+          "command": "exit [int](-not (Test-Path C:\\ready))"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"timed_out\"",
+        "\"last_exit_code\":1"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "New-Item -ItemType File C:\\ready | Out-Null\n'made'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "made"
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "command",
+          "command": "exit [int](-not (Test-Path C:\\ready))"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"kind\":\"command\""
+      ]
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "foreach ($i in 1..6) { \"step $i\"; Start-Sleep 1 }"
+    },
+    "save": {
+      "wsteps": "job"
+    },
+    "expect": {
+      "contains": "started with Win32_Process.Create"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${wsteps}",
+          "pattern": "step 3"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"step 3\""
+      ]
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wsteps}"
+    },
+    "expect": {
+      "contains": "\"state\":\"running\"",
+      "absent": "step 6"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "job_done",
+          "job": "${wsteps}"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "exited with code 0"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Remove-Item C:\\ready\nGet-ChildItem C:\\ProgramData\\virtmanager-mcp\\jobs | Remove-Item -Recurse -Force\n'cleared'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "cleared"
+      ]
+    }
+  }
+]

@@ -4,7 +4,8 @@
 # case except the manual root-only check. Exits 0 when every case passed or the test bed is absent, 1 when a case
 # failed, 2 on bad arguments. It touches only trial-deb13, t-owrt, and the t-* VMs and t-*/tpl-scratch volumes it
 # creates in pool agent-vms on qemu:///system. The OCR cases run only when VIRTMANAGER_OCR_MODELS names the directory
-# scripts/fetch-ocr-models.sh fills; they define t-inst and t-win from the XML files here.
+# scripts/fetch-ocr-models.sh fills; they define t-inst and t-win from the XML files here. The Windows cases run on
+# t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off.
 set -uo pipefail
 
 readonly URI=qemu:///system
@@ -22,7 +23,7 @@ readonly UNITS=(
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
   screen-no-models templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
   templates-outside-disk manage-lock console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
-  screen-installer screen-windows
+  screen-installer screen-windows win-exec win-screen
 )
 # Memory the host must have available before an OCR case starts its VM, in MiB: the VM's own plus 1 GiB.
 declare -A SCREEN_VM_MIB=(["t-inst"]=2048 ["t-win"]=5120)
@@ -31,7 +32,10 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["jobs"]="jobs jobs-reopen"
+  ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait"
 )
+# Memory the host must have available before t-win11 starts, in MiB: its 4 GiB plus 1 GiB.
+readonly WIN_VM_MIB=5120
 
 declare -A RESULT=()
 ORDER=()
@@ -270,14 +274,97 @@ unit_owrt() { # case
   fi
 }
 
-# Writes $WORK/config-screen.toml: config-templates.toml with t-inst and t-win allowed and powered, and the OCR models.
+# Writes $WORK/config-screen.toml: config-templates.toml with t-inst, t-win and t-win11 allowed and powered, and the
+# OCR models.
 write_screen_config() {
-  local file=${WORK}/config-screen.toml dir=${OCR_MODELS//\\/\\\\}
+  local file=${WORK}/config-screen.toml dir=${OCR_MODELS//\\/\\\\} vms='"t-inst", "t-win", "t-win11", '
   dir=${dir//\"/\\\"}
-  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-inst", "t-win", /' -e 's/^power_vms = \[/power_vms = ["t-inst", "t-win", /' \
+  sed -e "s/^allowed_vms = \[/allowed_vms = [${vms}/" -e "s/^power_vms = \[/power_vms = [${vms}/" \
     "${TESTBED}/config-templates.toml" > "${file}" || return 1
-  [[ $(grep -c '^\(allowed\|power\)_vms = \["t-inst", "t-win", ' "${file}") == 2 ]] || return 1
+  [[ $(grep -cF -e "allowed_vms = [${vms}" -e "power_vms = [${vms}" "${file}") == 2 ]] || return 1
   printf '\n[display]\nocr_models = "%s"\n' "${dir}" >> "${file}"
+}
+
+# Writes $WORK/config-windows.toml: config-templates.toml with t-win11 allowed and powered.
+write_windows_config() {
+  local file=${WORK}/config-windows.toml
+  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-win11", /' -e 's/^power_vms = \[/power_vms = ["t-win11", /' \
+    "${TESTBED}/config-templates.toml" > "${file}" || return 1
+  [[ $(grep -cF -e 'allowed_vms = ["t-win11", ' -e 'power_vms = ["t-win11", ' "${file}") == 2 ]]
+}
+
+# Prints why the Windows cases cannot run, or nothing when they can. A running t-win11 already holds its memory.
+win_blocker() {
+  local avail
+  if ! vsh dominfo t-win11 > /dev/null 2>&1; then
+    echo "no t-win11; tests/testbed/win11/build.sh makes it"
+    return
+  fi
+  is_state t-win11 running && return
+  avail=$(avail_mib)
+  ((avail >= WIN_VM_MIB)) || echo "t-win11 needs ${WIN_VM_MIB} MiB of available memory; the host has ${avail} MiB"
+}
+
+win_ready() {
+  is_state t-win11 running || vsh start t-win11 > /dev/null || return 1
+  wait_until 600 agent_answers t-win11
+}
+
+# Shuts t-win11 down through its agent, which Windows obeys while a user is logged on, unlike the ACPI button; powers
+# it off if that fails.
+win_shut_off() {
+  is_state t-win11 "shut off" && return 0
+  vsh shutdown t-win11 --mode agent > /dev/null 2>&1 || vsh shutdown t-win11 > /dev/null 2>&1
+  wait_until 180 is_state t-win11 "shut off" && return 0
+  vsh destroy t-win11 > /dev/null && wait_until 30 is_state t-win11 "shut off"
+}
+
+# win-exec starts t-win11 and shuts it down; the job and wait cases then run on a fresh start, sharing vars.json.
+unit_windows() {
+  local cases=(win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait) config=${WORK}/config-windows.toml
+  local reason case
+  reason=$(win_blocker)
+  if [[ -n ${reason} ]]; then
+    for case in "${cases[@]}"; do record "${case}" skipped "${reason}"; done
+    return
+  fi
+  if ! write_windows_config; then
+    record win-exec failed "could not write ${config}"
+    return
+  fi
+  if ! win_shut_off; then
+    record win-exec failed "could not shut t-win11 off"
+    return
+  fi
+  run_case win-exec "${config}"
+  rm -f -- "${WORK:?}/vars.json"
+  if win_ready; then
+    for case in "${cases[@]:1}"; do run_case "${case}" "${config}"; done
+  else
+    for case in "${cases[@]:1}"; do record "${case}" failed "the t-win11 agent did not answer"; done
+  fi
+  win_shut_off || record win-wait failed "could not shut t-win11 off"
+}
+
+unit_win_screen() {
+  local reason
+  if [[ -z ${OCR_MODELS} ]]; then
+    record win-screen skipped "VIRTMANAGER_OCR_MODELS is not set, so the server has no OCR models"
+    return
+  fi
+  reason=$(win_blocker)
+  if [[ -n ${reason} ]]; then
+    record win-screen skipped "${reason}"
+    return
+  fi
+  if [[ ! -f ${WORK}/config-screen.toml ]]; then
+    record win-screen failed "could not write ${WORK}/config-screen.toml"
+  elif ! win_ready; then
+    record win-screen failed "the t-win11 agent did not answer"
+  else
+    run_case win-screen "${WORK}/config-screen.toml"
+  fi
+  win_shut_off || record win-screen failed "could not shut t-win11 off"
 }
 
 avail_mib() { awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo; }
@@ -329,6 +416,8 @@ run_unit() {
     owrt-* | mouse-refusals) unit_owrt "$1" ;;
     screen-installer) unit_screen "$1" t-inst ;;
     screen-windows) unit_screen "$1" t-win ;;
+    win-exec) unit_windows ;;
+    win-screen) unit_win_screen ;;
     smoke | guest-agent-and-snapshots | lifecycle-guardrails | write-file-mode | console-reopen | \
       start-vm-waits-for-agent | console-closed-on-power-off | screenshot-region | screen-settled | \
       screen-no-models) unit_trial "$1" ;;

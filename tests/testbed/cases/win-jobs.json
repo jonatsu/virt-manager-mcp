@@ -1,0 +1,199 @@
+[
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "foreach ($i in 0..599) { \"step $i\"; Start-Sleep 1 }"
+    },
+    "save": {
+      "wjob1": "job"
+    },
+    "expect": {
+      "contains": "started with Win32_Process.Create"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${wjob1}",
+          "pattern": "step 1\\r?\\n"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob1}"
+    },
+    "expect": {
+      "contains": "\"state\":\"running\"",
+      "matches": "step 0\\r?\\nstep 1\\r?\\n"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${wjob1}",
+          "pattern": "step 4",
+          "since": 14
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob1}",
+      "since": 14
+    },
+    "expect": {
+      "contains": [
+        "\"state\":\"running\"",
+        "step 4"
+      ],
+      "absent": "step 0"
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "\"p\u00e4iv\u00e4\u00e4 \u2713 \u65e5\u672c\"\n[Console]::Error.WriteLine('to stderr')\nexit 5"
+    },
+    "save": {
+      "wjob2": "job"
+    },
+    "expect": {
+      "contains": "started with Win32_Process.Create"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "job_done",
+          "job": "${wjob2}"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "exited with code 5"
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob2}"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":5",
+        "\"state\":\"exited\"",
+        "p\u00e4iv\u00e4\u00e4 \u2713 \u65e5\u672c",
+        "to stderr"
+      ]
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "ping.exe -n 300 127.0.0.1"
+    },
+    "save": {
+      "wjob3": "job"
+    },
+    "expect": {
+      "contains": "started with Win32_Process.Create"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${wjob3}",
+          "pattern": "Reply from"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob3}",
+      "force": true
+    },
+    "expect": {
+      "contains": [
+        "process tree with taskkill /T /F",
+        "force makes no difference"
+      ]
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob3}",
+      "max_bytes": 200
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":null",
+        "\"state\":\"ended without status\"",
+        "Pinging 127.0.0.1"
+      ]
+    }
+  },
+  {
+    "tool": "job_list",
+    "args": {
+      "vm": "t-win11"
+    },
+    "expect": {
+      "matches": "(\"job\": \"[0-9a-f-]{36}\".*){3}",
+      "contains": [
+        "\"state\": \"running\"",
+        "\"state\": \"exited\"",
+        "\"state\": \"ended without status\""
+      ]
+    }
+  }
+]

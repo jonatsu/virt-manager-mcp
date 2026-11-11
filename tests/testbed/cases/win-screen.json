@@ -1,0 +1,109 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "shutdown.exe /r /t 5\n'restarting'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "restarting"
+      ]
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 30
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 300,
+      "conditions": [
+        {
+          "kind": "agent"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$up = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime\n\"fresh boot: $($up.TotalSeconds -lt 180)\""
+    },
+    "expect": {
+      "contains": "fresh boot: True"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 180,
+      "conditions": [
+        {
+          "kind": "screen_settled",
+          "settle_secs": 10
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "mouse",
+    "args": {
+      "vm": "t-win11",
+      "action": "click",
+      "x": 418,
+      "y": 776,
+      "image_width": 1280,
+      "image_height": 800
+    },
+    "expect": {
+      "contains": "click"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 30,
+      "screenshot": true,
+      "conditions": [
+        {
+          "kind": "screen_text",
+          "pattern": "Pinned"
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"text\":\"Pinned\""
+      ],
+      "matches": "\"screenshot\":\\{(?=[^}]*\"width\":\\d+)(?=[^}]*\"height\":\\d+)[^}]*\\}.*\\n<image saved to shot-\\d+\\.png>$"
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-win11",
+      "keys": [
+        "esc"
+      ]
+    },
+    "expect": {
+      "contains": "sent 1 key combo(s)"
+    }
+  }
+]

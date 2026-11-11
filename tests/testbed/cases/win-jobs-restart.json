@@ -1,0 +1,117 @@
+[
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "foreach ($i in 0..599) { \"step $i\"; Start-Sleep 1 }"
+    },
+    "save": {
+      "wrestart": "job"
+    },
+    "expect": {
+      "contains": "started with Win32_Process.Create"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${wrestart}",
+          "pattern": "step 2"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$r = Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{CommandLine = \"powershell.exe -NoProfile -Command Start-Sleep 1; Restart-Service QEMU-GA\"}\n\"restart started: $($r.ReturnValue)\""
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "restart started: 0"
+      ]
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 4
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "agent"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${wrestart}",
+          "pattern": "step 12"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wrestart}",
+      "since": 80
+    },
+    "expect": {
+      "contains": "\"state\":\"running\""
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wrestart}"
+    },
+    "expect": {
+      "contains": "process tree with taskkill /T /F"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Get-ChildItem C:\\ProgramData\\virtmanager-mcp\\jobs | Remove-Item -Recurse -Force\n'cleared'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "cleared"
+      ]
+    }
+  }
+]

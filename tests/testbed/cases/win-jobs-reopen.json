@@ -1,0 +1,98 @@
+[
+  {
+    "tool": "job_list",
+    "args": {
+      "vm": "t-win11"
+    },
+    "expect": {
+      "matches": "(\"job\": \"[0-9a-f-]{36}\".*){3}",
+      "contains": [
+        "\"state\": \"running\"",
+        "\"state\": \"exited\"",
+        "\"state\": \"ended without status\""
+      ]
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob1}",
+      "max_bytes": 40
+    },
+    "expect": {
+      "contains": [
+        "\"next\":40,",
+        "\"state\":\"running\""
+      ],
+      "matches": "step 0\\r?\\nstep 1\\r?\\n"
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob1}"
+    },
+    "expect": {
+      "contains": "process tree with taskkill /T /F"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob1}",
+      "since": 100000
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":null",
+        "\"state\":\"ended without status\""
+      ]
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob1}"
+    },
+    "expect": {
+      "error": true,
+      "contains": "is not running"
+    }
+  },
+  {
+    "tool": "job_read",
+    "args": {
+      "vm": "t-win11",
+      "job": "${wjob2}"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":5",
+        "p\u00e4iv\u00e4\u00e4 \u2713 \u65e5\u672c"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Get-ChildItem C:\\ProgramData\\virtmanager-mcp\\jobs | Remove-Item -Recurse -Force\n\"left: $(@(Get-ChildItem C:\\ProgramData\\virtmanager-mcp\\jobs).Count)\""
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "left: 0"
+      ]
+    }
+  }
+]

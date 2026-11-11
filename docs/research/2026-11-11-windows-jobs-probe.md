@@ -100,3 +100,18 @@ Opening, reading and closing four job files through `virsh qemu-agent-command` t
 On the first boot after setup, `guest-ping` answered but the next `guest-exec` timed out after the agent's 10 s limit,
 and the call after it failed the agent's synchronisation; later calls worked. On every later boot `exec` answered at
 once.
+
+### Restarting the agent repeatedly
+
+Building the test-bed cases restarted the `QEMU-GA` service about 22 times, through `exec`, through a process started
+with `Win32_Process.Create`, and inside a job. Four restarts left the agent unreachable: libvirt reported the
+`org.qemu.guest_agent.0` channel `disconnected`, and every call failed with "QEMU guest agent is not connected" until the
+VM was powered off and on. A job that logged the service every second showed, for one of the four, that the restart had
+started a new `qemu-ga.exe` process and that the service stayed `Running` with it; the guest's Application log showed
+no agent call after the restart. The new agent therefore ran but never reopened the virtio-serial port. Six restarts in
+a row inside a job, and six more while the host sent `guest-ping` every 0.3 s, all came back within about 15 s, so the
+trigger is unknown. The ACPI reboot that should have recovered the guest did nothing, because Windows ignores the ACPI
+button while a user is logged on; `virsh shutdown --mode agent` and a power cycle work. The jobs that ran through the
+restarts that came back kept running.
+
+Restarting `QEMU-GA` through `exec` also loses `exec`'s reply, because the agent that would answer stops.

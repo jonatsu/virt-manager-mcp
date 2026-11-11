@@ -55,15 +55,20 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `templates-outside-disk-setup.json`, `templates-outside-disk.json` | A reset and an expiry leave a disk file outside every pool in place; run with the steps below. |
 | `manage-lock.json` | Run it through `run-all.sh`, which holds the management lock from another process with `flock(1)` for 40 s and gives the server its own `HOME`, so servers of live sessions are not held up. Creating `t-lock` fails after 30 s, naming the lock another operation holds; the second create waits for the holder to exit and succeeds; `t-lock` is deleted. |
 | `win-exec.json` | On `t-win11` (see "The Windows guest"), with `t-win11` added to `allowed_vms` and `power_vms`: starts it and waits for the agent; `whoami` returns `nt authority\system` with PowerShell, without CLIXML on stderr, and with `cmd`; the guest is Windows 11 Pro with Secure Boot on, a TPM present and a signed virtio serial driver; a file round-trips through `write_file` and `read_file`; then it shuts down. |
+| `win-jobs.json`, then `win-jobs-reopen.json` | On a running `t-win11`, from one directory, as `jobs.json` and its pair. A job printing `step N` a second reads `running` with output growing; a job printing `päivää ✓ 日本` and a line on stderr returns both as UTF-8, and `exit 5` reads `exited` with code 5; `job_stop` with `force` ends a `ping` job, says that `force` makes no difference on Windows, and the next read shows `ended without status`; `job_list` lists the three. The reopen case lists them again from a new server process, reads the first with `max_bytes` 40, stops it, which leaves `ended without status`, refuses a second stop as not running, and clears the jobs directory. |
+| `win-jobs-refusals.json` | With the jobs directory replaced by a junction, `job_start` is refused naming the junction; with an access entry for `Users` added, it is refused naming the access list; with the directory restored, a job runs again. A malformed job ID is refused, and every job tool is refused on `trial-deb13` as outside `allowed_vms`. |
+| `win-wait.json` | `[command "exit [int](-not (Test-Path C:\ready))"]` times out with `last_exit_code` 1, then matches once `exec` creates the file; `[job_output "step 3"]` matches while the job runs, and `[job_done]` matches with "exited with code 0". |
+| `win-jobs-restart.json` | Manual; `run-all.sh` does not run it. A job keeps running through a restart of the guest agent, started through WMI. See "The Windows guest" for why. |
 
 The screen cases below need the OCR models and the installer guests in "The installer guests". They run with a screen
-config: `config-templates.toml` with `t-inst` and `t-win` added to `allowed_vms` and `power_vms`, and
+config: `config-templates.toml` with `t-inst`, `t-win` and `t-win11` added to `allowed_vms` and `power_vms`, and
 `display.ocr_models` set. `run-all.sh` writes it.
 
 | Case | What it exercises |
 | -- | -- |
 | `screen-installer.json` | Boots `t-inst` from the Debian netinst ISO. `screen_text` matches "Graphical install" on the UEFI GRUB menu and attaches a screenshot; after Enter it matches "Select a language", and `screen_settled` matches. "Italian" is not on screen until a `mouse` scroll of the language list, then it matches. A `mouse` click on "Continue" at (1218, 774) leads to "Select your location". Keys go on through the keyboard, network, hostname, user and time-zone screens to "Partition disks", each one sent once its screen's text matched and the screen held still for 3 s, because the installer drops input that arrives in the first 2 s or so of a new screen. On the changing screen that loads installer components, a `screen_text` wait for text never shown times out after 8 s with its last OCR text (the `__time__` lines measure it). A `screen_text` wait on the title region matches `^Partition disks$`, and a region screenshot of the title reports its size and origin. The VM is then powered off. |
 | `screen-windows.json` | Boots `t-win` from the Windows 11 ISO. `screen_text` matches "Press any key to boot from CD", Enter goes three times a second apart, and `screen_text` matches "Windows 11 Setup" with a screenshot attached. The VM is then powered off. |
+| `win-screen.json` | Restarts a running `t-win11` with `shutdown /r`, checks that it booted in the last 3 minutes, waits until the desktop holds still for 10 s, clicks the Start button at (418, 776) with `mouse`, and matches "Pinned" in the Start menu with a screenshot attached. |
 
 `templates-reset.json` and `templates-expiry.json` need `t-listed`, a VM defined with `virsh` and never started.
 `templates-reset.json` also needs `tpl-scratch.qcow2`, made with
@@ -154,8 +159,11 @@ failed.
 
 It prints `skipped: <reason>` and exits 0 when `virsh` cannot reach `qemu:///system`, or when pool `agent-vms`,
 `trial-deb13` or `tpl-debian13.qcow2` is missing. Without `t-owrt`, it skips the OpenWrt cases and
-`mouse-refusals.json`. The check that needs root, "A failed volume deletion during expiry", stays manual. A full run
-takes about 11 minutes, and about 13 with the screen cases.
+`mouse-refusals.json`. Without `t-win11`, or with less than 5 GiB of memory available for it, it skips the Windows
+cases; otherwise it writes `config-windows.toml` with `t-win11` allowed, starts the VM for the cases after
+`win-exec.json`, and shuts it down through its agent afterwards. The check that needs root, "A failed volume deletion
+during expiry", stays manual. A full run takes about 11 minutes, and about 13 with the screen cases; the Windows cases
+add about 3.5 minutes.
 
 The screen cases run only when `VIRTMANAGER_OCR_MODELS` holds the absolute path of the directory that
 `scripts/fetch-ocr-models.sh` fills; otherwise the summary lists them as skipped with that reason. With it set, the
@@ -271,7 +279,16 @@ of available memory and 70 GiB free in the pool. The guest's local administrator
 password in the answer file is a test value for this offline VM only. `win-exec.json` checks the result.
 
 The serial driver is signed, and Windows enforces that under Secure Boot. `qemu-ga.exe` itself carries no
-Authenticode signature, so its integrity rests on the pinned SHA-256 of the ISO. Remove the guest with
+Authenticode signature, so its integrity rests on the pinned SHA-256 of the ISO.
+
+Windows ignores the ACPI power button while `tester` is logged on, so shut the VM down through its agent:
+`virsh -c qemu:///system shutdown t-win11 --mode agent`. A restart of the `QEMU-GA` service sometimes leaves the agent
+unreachable until the VM is powered off and on: the new agent process runs, but libvirt reports the channel
+disconnected. This happened in 4 of about 22 restarts with `virtio-win` 0.1.302
+([probe note](../../docs/research/2026-11-11-windows-jobs-probe.md)), so `run-all.sh` leaves `win-jobs-restart.json`
+out.
+
+Remove the guest with
 `virsh -c qemu:///system undefine t-win11 --nvram --tpm` and
 `virsh -c qemu:///system vol-delete --pool agent-vms t-win11.qcow2`.
 
