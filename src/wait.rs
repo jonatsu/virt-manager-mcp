@@ -77,7 +77,8 @@ pub enum Condition {
     Agent,
     /// A shell command run through the guest agent exits 0. It runs again after a non-zero exit, and may also run
     /// again when a slow agent's reply to the start is lost; it is never killed. It runs with exec's default shell:
-    /// /bin/sh on Linux, PowerShell on Windows. Refused in read-only mode.
+    /// /bin/sh on Linux, PowerShell on Windows. On Windows, $false is not a failure, so test with
+    /// `exit [int](-not (Test-Path ...))`. Refused in read-only mode.
     Command { command: String },
     /// A job has exited, or has ended without writing its status.
     JobDone {
@@ -1954,6 +1955,8 @@ mod tests {
         os: GuestOs,
         /// The calls that asked for the guest's system.
         os_checks: AtomicU32,
+        /// System checks that fail, as a timed-out agent call does, before any succeeds.
+        os_errors: AtomicU32,
         /// The system each start and each job read was given, in call order.
         given_os: Mutex<Vec<GuestOs>>,
         /// The running domain's ID; 0 means stopped.
@@ -1997,6 +2000,7 @@ mod tests {
             Self {
                 os: GuestOs::Linux,
                 os_checks: AtomicU32::new(0),
+                os_errors: AtomicU32::new(0),
                 given_os: Mutex::new(vec![]),
                 domain: AtomicU32::new(1),
                 pings: AtomicU32::new(0),
@@ -2069,6 +2073,11 @@ mod tests {
         fn os(&self, _: i32) -> Result<GuestOs> {
             self.block();
             self.os_checks.fetch_add(1, Ordering::SeqCst);
+            let failing = self.os_errors.load(Ordering::SeqCst);
+            if failing > 0 {
+                self.os_errors.store(failing - 1, Ordering::SeqCst);
+                bail!("guest agent 'guest-get-osinfo' failed: timed out");
+            }
             Ok(self.os)
         }
 
@@ -3489,6 +3498,29 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_system_check_is_asked_again_and_starts_nothing() {
+        let guest = Arc::new(FakeGuest {
+            os: GuestOs::Windows,
+            os_errors: AtomicU32::new(1),
+            codes: Mutex::new(vec![0]),
+            ..FakeGuest::new()
+        });
+        let env = FakeEnv::new(vec![]);
+        let checks = validate_conditions(
+            &Config::default(),
+            ANY_TIMEOUT,
+            &[Condition::Command {
+                command: "exit 0".into(),
+            }],
+        )
+        .unwrap();
+        let o = run(&env, guest.clone(), checks, Duration::from_secs(10)).unwrap();
+        assert_eq!(matched(&o).0, 0);
+        assert_eq!(guest.os_checks.load(Ordering::SeqCst), 2);
+        assert_eq!(*guest.given_os.lock().unwrap(), [GuestOs::Windows]);
+    }
+
+    #[test]
     fn job_conditions_read_a_windows_job_after_one_system_check() {
         let guest = Arc::new(FakeGuest {
             os: GuestOs::Windows,
@@ -3753,7 +3785,7 @@ mod tests {
             &Config::default(),
             ANY_TIMEOUT,
             &[Condition::Command {
-                command: "Test-Path C:\\ready".into(),
+                command: "exit [int](-not (Test-Path C:\\ready))".into(),
             }],
         )
         .unwrap();

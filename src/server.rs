@@ -1014,8 +1014,9 @@ impl VirtServer {
         agent answers), `command` (a command run through the guest agent with exec's default shell, /bin/sh on Linux \
         and PowerShell on Windows, exits 0; not in read-only mode), `job_done` (a job from job_start has ended) and \
         `job_output` (a job's output from `since` matches a regex); job conditions work in read-only mode too. On \
-        Windows, a PowerShell `command` exits 1 when its last native program or cmdlet fails, and 0 otherwise; a \
-        command that only prints $false still exits 0. `screen_settled` holds once \
+        Windows a `command`'s exit code is the one passed to `exit`, 1 after an uncaught error or when the last \
+        command is a failing native program or cmdlet, and 0 otherwise. $false is not a failure, so a bare \
+        `Test-Path` holds at once; use `exit [int](-not (Test-Path ...))`. `screen_settled` holds once \
         the graphical display, captured every 500 ms, has stopped changing for `settle_secs`; `screen_text` holds \
         once OCR of the display, or of a region, matches a regex over the recognised lines joined by newlines, and \
         needs the server's display.ocr_models. Neither screen kind works in read-only mode; all screen conditions of \
