@@ -329,11 +329,12 @@ unit_windows() {
     return
   fi
   if ! write_windows_config; then
-    record win-exec failed "could not write ${config}"
-    return
+    reason="could not write ${config}"
+  elif ! win_shut_off; then
+    reason="could not shut t-win11 off"
   fi
-  if ! win_shut_off; then
-    record win-exec failed "could not shut t-win11 off"
+  if [[ -n ${reason} ]]; then
+    for case in "${cases[@]}"; do record "${case}" failed "${reason}"; done
     return
   fi
   run_case win-exec "${config}"
@@ -425,10 +426,15 @@ run_unit() {
   esac
 }
 
-# Removes the t-* VMs and volumes this run created, and tpl-scratch.qcow2; never t-owrt or anything listed before.
+# Shuts t-win11 off, and removes the t-* VMs and volumes this run created and tpl-scratch.qcow2; never t-owrt or
+# anything listed before.
 cleanup() {
   local vm vol
   [[ -n ${WORK} ]] || return 0
+  # An interrupted Windows case leaves t-win11 running, and it holds 4 GiB.
+  if is_state t-win11 running; then
+    win_shut_off > /dev/null 2>&1 || echo "cleanup: could not shut t-win11 off"
+  fi
   while read -r vm; do
     [[ ${vm} == t-* && ${vm} != t-owrt ]] || continue
     grep -qxF -- "${vm}" <<< "${PRE_VMS}" && continue
