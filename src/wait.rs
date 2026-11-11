@@ -121,8 +121,7 @@ pub enum Condition {
         /// Display head index (default 0).
         screen: Option<u32>,
     },
-    /// A copy that outlasted its call (copy_to_vm, copy_from_vm, copy_dir_to_vm, copy_dir_from_vm) has finished or
-    /// failed; the result carries the copy's reply or error. It must be the call's only condition, and is answered from
+    /// A copy that outlasted its call and replied with a transfer ID has finished or failed; the result carries the copy's reply or error. It must be the call's only condition, and is answered from
     /// the server's own records whatever state the VM is in.
     TransferDone {
         /// The transfer ID a copy tool returned.

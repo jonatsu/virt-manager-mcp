@@ -95,7 +95,13 @@ impl Transfers {
         let spawned = std::thread::Builder::new()
             .name(format!("transfer-{}", &id[..8]))
             .spawn(move || {
-                let outcome = work(&bytes).map_err(|e| format!("{e:#}"));
+                // A panic would otherwise leave the transfer running for good, holding a slot under the limit.
+                let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    work(&bytes)
+                })) {
+                    Ok(result) => result.map_err(|e| format!("{e:#}")),
+                    Err(_) => Err("the transfer failed with an internal error (a panic)".into()),
+                };
                 finish(&table, &thread_id, outcome);
             });
         if let Err(e) = spawned {
@@ -335,6 +341,24 @@ mod tests {
             status,
             Status::Finished(Err("VM 'vm' is not running".into()))
         );
+    }
+
+    #[test]
+    fn a_panicking_transfer_finishes_and_frees_its_slot() {
+        let transfers = Transfers::default();
+        let id = transfers
+            .start(owner("vm"), 1, |_| panic!("scripted panic"))
+            .unwrap();
+        let status = transfers
+            .wait(&id, "vm", Duration::from_secs(5), &never_cancelled, &|_| {})
+            .unwrap();
+        assert!(
+            matches!(&status, Status::Finished(Err(e)) if e.contains("panic")),
+            "{status:?}"
+        );
+        transfers
+            .start(owner("vm"), 1, |_| Ok("next".into()))
+            .unwrap();
     }
 
     #[test]
