@@ -85,7 +85,9 @@ symlink.
 
 A pull builds its copy in the pull directory's staging directory, `.vmm-staging/`, under a random name created with
 `O_EXCL`. A pull whose destination has a `.vmm-staging` component anywhere is refused, so no pull writes into the
-staging directory of a nested pull directory either. The server sets every mode with `fchmod`, so
+staging directory of a nested pull directory either. Pull directories may nest: a destination that is or holds a
+pull directory is refused, and a destination inside nested pull directories belongs to the innermost, so it stages
+there and on its filesystem. The server sets every mode with `fchmod`, so
 the umask cannot change it: files 644 and directories 755, whatever the guest says. Modification times are the
 pull's own. Only a complete copy moves into place:
 
@@ -292,6 +294,9 @@ that meets a symlinked directory.
    it, because the server unpacks every pull itself.
 5. Concurrent guest-agent commands from several server processes rely on libvirt serializing them per VM. The
    background-transfer case checks it under one process only.
+6. An overwrite deletes the swapped-out tree with `std::fs::remove_dir_all`, which does not stop at mount boundaries.
+   A filesystem that an operator mounts inside a pulled tree would lose its contents, so the README asks operators to
+   mount nothing inside a pull directory.
 
 ## Open questions
 

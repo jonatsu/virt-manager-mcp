@@ -106,7 +106,8 @@ impl Kind {
 impl Destination {
     /// Resolves `host_path` inside one of `pull_dirs`, creating missing parent directories with mode 755. Refuses a
     /// relative path, a `..` component, a path outside every pull directory, a path in or at the staging directory,
-    /// a pull directory itself, and any symlink on the way.
+    /// a pull directory itself or a path holding one, and any symlink on the way. A path inside nested pull
+    /// directories belongs to the innermost.
     pub fn open(pull_dirs: &[PathBuf], host_path: &str) -> Result<Self> {
         let path = Path::new(host_path);
         if !path.is_absolute() {
@@ -115,9 +116,15 @@ impl Destination {
         if path.components().any(|c| c == Component::ParentDir) {
             bail!("{host_path}: host_path may not contain '..'");
         }
+        // Pull directories may nest. A pull never replaces one of them, and a path inside a nested one stages in the
+        // innermost, so an overwrite cannot swap out a pull directory with its staging directory and other pulls.
+        if pull_dirs.iter().any(|d| d.starts_with(path)) {
+            bail!("{host_path} is or holds a pull directory; name a path inside it");
+        }
         let (dir, rest) = pull_dirs
             .iter()
-            .find_map(|d| path.strip_prefix(d).ok().map(|r| (d, r)))
+            .filter_map(|d| path.strip_prefix(d).ok().map(|r| (d, r)))
+            .max_by_key(|(d, _)| d.components().count())
             .ok_or_else(|| anyhow!("{host_path} is not inside host_pull_dirs"))?;
         let parts: Vec<&OsStr> = rest
             .components()
@@ -533,7 +540,10 @@ mod tests {
             ("/etc/passwd".to_string(), "not inside"),
             (dir.path(STAGING), "staging"),
             (dir.path(&format!("{STAGING}/x")), "staging"),
-            (dir.0.to_str().unwrap().to_string(), "pull directory itself"),
+            (
+                dir.0.to_str().unwrap().to_string(),
+                "is or holds a pull directory",
+            ),
         ] {
             let err = match Destination::open(&dirs, &path) {
                 Ok(_) => panic!("{path} accepted"),
@@ -669,6 +679,39 @@ mod tests {
             assert!(err.contains("staging"), "{rel}: {err}");
         }
         assert!(!outer.0.join("a").exists());
+    }
+
+    #[test]
+    fn a_nested_pull_directory_or_its_ancestor_is_never_a_destination() {
+        let outer = PullDir::new("nested-dest");
+        let inner = outer.0.join("a/q");
+        fs::create_dir_all(&inner).unwrap();
+        for dirs in [
+            vec![outer.0.clone(), inner.clone()],
+            vec![inner.clone(), outer.0.clone()],
+        ] {
+            for rel in ["a/q", "a"] {
+                let err = match Destination::open(&dirs, &outer.path(rel)) {
+                    Ok(_) => panic!("{rel} accepted with {dirs:?}"),
+                    Err(e) => e.to_string(),
+                };
+                assert!(err.contains("pull directory"), "{rel}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_in_a_nested_pull_directory_stages_in_the_innermost_one() {
+        let outer = PullDir::new("nested-inner");
+        let inner = outer.0.join("q");
+        fs::create_dir(&inner).unwrap();
+        for dirs in [
+            vec![outer.0.clone(), inner.clone()],
+            vec![inner.clone(), outer.0.clone()],
+        ] {
+            let dest = Destination::open(&dirs, &outer.path("q/out")).unwrap();
+            assert_eq!(dest.staging_path, inner.join(STAGING));
+        }
     }
 
     #[test]
