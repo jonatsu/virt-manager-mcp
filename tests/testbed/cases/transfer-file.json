@@ -1,0 +1,128 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -rf /root/vmm-file && mkdir /root/vmm-file && printf 'guest-file\\n' > /root/vmm-file/f.txt && chmod 4755 /root/vmm-file/f.txt"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/f.txt",
+      "host_path": "${pull}/file/f.txt"
+    },
+    "expect": {
+      "contains": "copied 11 bytes"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/f.txt",
+      "host_path": "${pull}/file/f.txt"
+    },
+    "expect": {
+      "error": true,
+      "contains": "pass overwrite: true"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/f.txt",
+      "host_path": "${pull}/file/f.txt",
+      "overwrite": true
+    },
+    "expect": {
+      "contains": "copied 11 bytes"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/f.txt",
+      "host_path": "${pull}/file",
+      "overwrite": true
+    },
+    "expect": {
+      "error": true,
+      "contains": "is a directory; a file pull replaces only a file"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/f.txt",
+      "host_path": "${pull}/.vmm-staging/x"
+    },
+    "expect": {
+      "error": true,
+      "contains": "staging directory"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/f.txt",
+      "host_path": "${pull}/../escape"
+    },
+    "expect": {
+      "error": true,
+      "contains": "'..'"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/f.txt",
+      "host_path": "/tmp/vmm-escape"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not inside host_pull_dirs"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-file/missing",
+      "host_path": "${pull}/file/missing"
+    },
+    "expect": {
+      "error": true
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "t-not-allowed",
+      "guest_path": "/etc/hostname",
+      "host_path": "${pull}/never/x"
+    },
+    "expect": {
+      "error": true
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -rf /root/vmm-file"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
+    }
+  }
+]

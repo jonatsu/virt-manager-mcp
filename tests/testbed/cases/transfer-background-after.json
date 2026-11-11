@@ -1,0 +1,16 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -rf /root/vmm-bg /var/tmp/vmm-bg; ls -A /root /var/tmp"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0",
+      "absent": [
+        ".vmm-",
+        "vmm-bg"
+      ]
+    }
+  }
+]

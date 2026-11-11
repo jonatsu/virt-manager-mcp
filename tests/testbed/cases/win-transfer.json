@@ -1,0 +1,53 @@
+[
+  {
+    "tool": "copy_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win.txt",
+      "guest_path": "C:\\Windows\\Temp\\vmm-win.txt"
+    },
+    "expect": {
+      "contains": "copied 17 bytes"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "(Get-FileHash C:\\Windows\\Temp\\vmm-win.txt).Hash"
+    },
+    "expect": {
+      "contains": "11F6F2D560D80FC6A1294533DC8EAF04D4C49E24A54EC1CB797D11DC229FC125"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "t-win11",
+      "guest_path": "C:\\Windows\\Temp\\vmm-win.txt",
+      "host_path": "${pull}/win/vmm-win.txt"
+    },
+    "expect": {
+      "contains": "copied 17 bytes"
+    }
+  },
+  {
+    "tool": "vm_addresses",
+    "args": {
+      "vm": "t-win11"
+    },
+    "expect": {
+      "contains": "\"interfaces\":[]"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Remove-Item C:\\Windows\\Temp\\vmm-win.txt; Test-Path C:\\Windows\\Temp\\vmm-win.txt"
+    },
+    "expect": {
+      "contains": "False"
+    }
+  }
+]

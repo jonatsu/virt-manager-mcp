@@ -1,0 +1,61 @@
+[
+  {
+    "tool": "vm_addresses",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": [
+        "\"lease\"",
+        "192.168.122."
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "systemd-run --on-active=30 --timer-property=AccuracySec=1s systemctl start qemu-guest-agent && nohup sh -c 'sleep 1; systemctl stop qemu-guest-agent' >/dev/null 2>&1 &"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0",
+        "Running timer as unit"
+      ]
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 4
+    }
+  },
+  {
+    "tool": "vm_addresses",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "contains": [
+        "\"lease\"",
+        "192.168.122.",
+        "\"agent\""
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "conditions": [
+        {
+          "kind": "agent"
+        }
+      ],
+      "timeout_secs": 50
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  }
+]

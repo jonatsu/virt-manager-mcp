@@ -35,6 +35,18 @@ used the same setup.
 | `screen-settled.json` | `screen_settled` matches the idle login screen and attaches a screenshot. A 0.1 s value is refused. |
 | `screen-no-models.json` | Without `display.ocr_models`, `screen_text` is refused before the wait starts, both alone and next to `screen_settled`. `screen_settled` alone still matches. |
 
+The transfer cases also run on `trial-deb13`, with a config that `run-all.sh` writes into its log directory. It adds a
+share directory and a pull directory there, and builds a fixed tree in the share to push. They read the two
+directories as `${share}`, `${pull}` and `${tree}` from `vars.json`.
+
+| Case | What it exercises |
+| -- | -- |
+| `transfer-file.json` | `copy_from_vm` pulls a file into a new subdirectory of the pull directory. A second pull is refused without `overwrite` and replaces the file with it. A pull onto a directory, into the staging directory, through `..`, outside `host_pull_dirs`, of a missing guest file and from a VM outside `allowed_vms` is refused. The script checks the pulled file's content and mode 644. |
+| `transfer-push.json` | `copy_dir_to_vm` pushes the tree: 4 files with their modes, the symlink that stays inside, and neither the 3 files that `.gitignore` rules in the tree and the share ignore nor the outside link and FIFO, which the reply names. A second push is refused without `replace`, and so are `/usr`, a guest file and a host directory outside `host_share_dirs`. `replace` with `exclude: ["sub/"]` replaces the tree, and no `.vmm-` entry remains. |
+| `transfer-pull.json`, then `transfer-pull-caps.json` | `copy_dir_from_vm` pulls a guest tree with a setuid file, a mode 700 directory, a symlink, a hard link and a FIFO. Three files and a directory arrive, the excluded `*.log` and `build/` entries stay out, and the reply names the skipped entries. A second pull is refused without `overwrite`, and so are a host file as the destination and a guest file as the source. `overwrite` then replaces the tree with the guest's `sub`. The caps case runs with `max_pull_bytes` 64 KiB and `max_pull_entries` 10: 12 files and a 100 KiB file are refused through both pull tools, and nothing is left behind. The script checks that every pulled entry is a file with mode 644 or a directory with mode 755, and that `.vmm-staging` is empty. |
+| `transfer-background.json`, then `transfer-background-after.json` | With `max_wait_secs` 2, a 128 MiB directory pull and push each reply with a running transfer, and `transfer_done` reports each finished. The pushed file's SHA-256 matches, and the script checks the pulled one. A push cut short by a forced `stop_vm` reports an error. The script starts `trial-deb13` again, checks that its log directory holds no file over 1 MiB, and the second case removes the leftovers in the guest. |
+| `addresses.json` | `vm_addresses` names the DHCP lease for `trial-deb13`, also while its guest agent is stopped, when the reply says that the agent is not connected. The agent starts again 30 s later. |
+
 The template cases run with `config-templates.toml`. They need the template volume `tpl-debian13.qcow2`, which
 `scripts/make-template.sh` builds ([`docs/templates.md`](../../docs/templates.md)).
 
@@ -61,6 +73,7 @@ The template cases run with `config-templates.toml`. They need the template volu
 | `win-jobs.json`, then `win-jobs-reopen.json` | Run both on a running `t-win11` from one directory, like `jobs.json` and its pair. A job printing `step N` a second reads `running` with output growing. A job printing `päivää ✓ 日本` and a line on stderr returns both as UTF-8, and `exit 5` reads `exited` with code 5. `job_stop` with `force` ends a `ping` job and says that `force` makes no difference on Windows. The next read shows `ended without status`. `job_list` lists the three jobs. The reopen case runs in a new server process. It lists the jobs again and reads the first with `max_bytes` 40. It stops that job, which leaves `ended without status`, and refuses a second stop as not running. Then it clears the jobs directory. |
 | `win-jobs-refusals.json` | With the jobs directory replaced by a junction, `job_start` is refused naming the junction. With an access entry for `Users` added, it is refused naming the access list. With the directory restored, a job runs again. A malformed job ID is refused, and every job tool is refused on `trial-deb13` as outside `allowed_vms`. |
 | `win-wait.json` | `[command "exit [int](-not (Test-Path C:\ready))"]` times out with `last_exit_code` 1, then matches once `exec` creates the file. `[job_output "step 3"]` matches while the job runs, and `[job_done]` matches with "exited with code 0". |
+| `win-transfer.json` | Runs last, with the share and pull directories of the transfer cases. A file goes to `C:\Windows\Temp` through `copy_to_vm` with a matching `Get-FileHash`, and comes back through `copy_from_vm`, which the script checks. `vm_addresses` lists no interfaces, because the guest has no network interface. The file is then removed. |
 | `win-jobs-restart.json` | Manual: `run-all.sh` does not run it. A job keeps running through a restart of the guest agent, started through WMI. See "The Windows guest" for why. |
 
 The screen cases need the OCR models and the guests in "The installer guests". They run with a screen config:
@@ -157,7 +170,8 @@ tests/testbed/run-all.sh templates-reset jobs.json  # a subset
 The script builds the release binary and runs the cases in a fixed order. Between cases it does the `virsh` steps
 that this README describes. It defines `t-listed`, clones and deletes `tpl-scratch.qcow2`, shuts `trial-deb13` off
 for `console-after-start.json`, and saves `t-u`. It also attaches the outside disk, waits out expiries, runs the
-`sweep` command, and logs root out of `ttyS0`.
+`sweep` command, and logs root out of `ttyS0`. For the transfer cases it builds the share and pull directories in its
+log directory and checks what arrives in the pull directory.
 
 Naming one case of a dependent pair, such as `jobs.json` and `jobs-reopen.json`, runs both. Logs go to a new
 directory under `/tmp`, which the script prints. At the end the script removes the `t-*` VMs and volumes it created

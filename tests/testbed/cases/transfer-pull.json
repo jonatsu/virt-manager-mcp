@@ -1,0 +1,106 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "set -e; rm -rf /root/vmm-pull; mkdir -p /root/vmm-pull/tree/sub /root/vmm-pull/tree/build; cd /root/vmm-pull/tree; printf 'alpha\\n' > a.txt; printf 'beta\\n' > sub/b.txt; chmod 4755 sub/b.txt; chmod 700 sub; printf 'obj\\n' > build/out.o; printf 'log\\n' > run.log; ln -s /etc/passwd sub/link; printf 'h\\n' > h1; ln h1 h2; mkfifo pipe"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-pull/tree",
+      "host_path": "${pull}/tree",
+      "exclude": [
+        "*.log",
+        "build/"
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"files\":3",
+        "\"directories\":1",
+        "\"excluded\":3",
+        "\"sub/link\"",
+        "\"symlink\"",
+        "\"hard link\"",
+        "\"pipe\"",
+        "\"FIFO\""
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-pull/tree",
+      "host_path": "${pull}/tree"
+    },
+    "expect": {
+      "error": true,
+      "contains": "pass overwrite: true"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-pull/tree",
+      "host_path": "${pull}/a-file",
+      "overwrite": true
+    },
+    "expect": {
+      "error": true,
+      "contains": "is a file; a directory pull replaces only a directory"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-pull/tree/a.txt",
+      "host_path": "${pull}/never"
+    },
+    "expect": {
+      "error": true,
+      "contains": "is not a directory in the guest"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "printf 'changed\\n' > /root/vmm-pull/tree/a.txt"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-pull/tree/sub",
+      "host_path": "${pull}/tree",
+      "overwrite": true
+    },
+    "expect": {
+      "contains": "\"files\":1"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -rf /root/vmm-pull; ls -A /var/tmp"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0",
+      "absent": ".vmm-"
+    }
+  }
+]

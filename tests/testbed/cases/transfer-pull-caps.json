@@ -1,0 +1,59 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "set -e; rm -rf /root/vmm-caps; mkdir -p /root/vmm-caps/many /root/vmm-caps/big; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do : > /root/vmm-caps/many/f$i; done; head -c 102400 /dev/zero > /root/vmm-caps/big/f"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-caps/many",
+      "host_path": "${pull}/caps-many"
+    },
+    "expect": {
+      "error": true,
+      "contains": "limits.max_pull_entries"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-caps/big",
+      "host_path": "${pull}/caps-big"
+    },
+    "expect": {
+      "error": true,
+      "contains": "limits.max_pull_bytes"
+    }
+  },
+  {
+    "tool": "copy_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/root/vmm-caps/big/f",
+      "host_path": "${pull}/caps-file"
+    },
+    "expect": {
+      "error": true,
+      "contains": "limits.max_pull_bytes"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -rf /root/vmm-caps; ls -A /var/tmp"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0",
+      "absent": ".vmm-"
+    }
+  }
+]

@@ -1,0 +1,147 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "set -e; rm -rf /var/tmp/vmm-bg /root/vmm-bg; mkdir -p /var/tmp/vmm-bg /root/vmm-bg; yes 'virtmanager-mcp test bed' | head -c 134217728 > /var/tmp/vmm-bg/big.bin; sha256sum /var/tmp/vmm-bg/big.bin"
+    },
+    "expect": {
+      "contains": "bfa16ddec123a5b3cfe4f858f57dfd0c1a24563a61948324e8f2a3b01d04ea24"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "guest_path": "/var/tmp/vmm-bg",
+      "host_path": "${pull}/bg"
+    },
+    "save": {
+      "pulling": "transfer"
+    },
+    "expect": {
+      "contains": "\"state\":\"running\""
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 30
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "conditions": [
+        {
+          "kind": "transfer_done",
+          "transfer": "${pulling}"
+        }
+      ],
+      "timeout_secs": 2
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "134217728"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${share}/big",
+      "guest_path": "/root/vmm-bg/pushed"
+    },
+    "save": {
+      "pushing": "transfer"
+    },
+    "expect": {
+      "contains": "\"state\":\"running\""
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 40
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "conditions": [
+        {
+          "kind": "transfer_done",
+          "transfer": "${pushing}"
+        }
+      ],
+      "timeout_secs": 2
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "134217728"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "sha256sum /root/vmm-bg/pushed/big.bin; ls -A /root/vmm-bg"
+    },
+    "expect": {
+      "contains": "bfa16ddec123a5b3cfe4f858f57dfd0c1a24563a61948324e8f2a3b01d04ea24",
+      "absent": ".vmm-"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${share}/big",
+      "guest_path": "/root/vmm-bg/stopped"
+    },
+    "save": {
+      "stopped": "transfer"
+    },
+    "expect": {
+      "contains": "\"state\":\"running\""
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "force": true
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 5
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "conditions": [
+        {
+          "kind": "transfer_done",
+          "transfer": "${stopped}"
+        }
+      ],
+      "timeout_secs": 2
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"error\""
+      ]
+    }
+  }
+]

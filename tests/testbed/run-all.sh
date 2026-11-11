@@ -5,7 +5,8 @@
 # failed, 2 on bad arguments. It touches only trial-deb13, t-owrt, and the t-* VMs and t-*/tpl-scratch volumes it
 # creates in pool agent-vms on qemu:///system. The OCR cases run only when VIRTMANAGER_OCR_MODELS names the directory
 # scripts/fetch-ocr-models.sh fills; they define t-inst and t-win from the XML files here. The Windows cases run on
-# t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off.
+# t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off. The transfer cases share and
+# pull host files only under the run's work directory.
 set -uo pipefail
 
 readonly URI=qemu:///system
@@ -19,7 +20,8 @@ readonly OCR_MODELS=${VIRTMANAGER_OCR_MODELS:-}
 
 # Units run in this order; each lists the case files it runs, in order.
 readonly UNITS=(
-  smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode console-reopen console-stall
+  smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode transfer-file transfer-push transfer-pull
+  transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
   screen-no-models templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
   templates-outside-disk manage-lock console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
@@ -32,8 +34,14 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["jobs"]="jobs jobs-reopen"
-  ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait"
+  ["transfer-pull"]="transfer-pull transfer-pull-caps"
+  ["transfer-background"]="transfer-background transfer-background-after"
+  ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer"
 )
+# The pattern of the 128 MiB file the background-transfer case moves both ways, and its SHA-256.
+readonly BIG_PATTERN='virtmanager-mcp test bed'
+readonly BIG_BYTES=134217728
+readonly BIG_SHA256=bfa16ddec123a5b3cfe4f858f57dfd0c1a24563a61948324e8f2a3b01d04ea24
 # Memory the host must have available before t-win11 starts, in MiB: its 4 GiB plus 1 GiB.
 readonly WIN_VM_MIB=5120
 
@@ -274,6 +282,123 @@ unit_owrt() { # case
   fi
 }
 
+# Builds $WORK/share, with a fixed tree to push, and the pull directory $WORK/pull, then writes the transfer configs:
+# config-transfer.toml is config.toml with both directories, config-transfer-slow.toml lets a call wait 2 s, and
+# config-transfer-caps.toml caps a pull at 64 KiB and 10 entries. The tree holds ignore rules in itself and in the
+# share, ignored files, a script, a symlink inside and one leaving it, and a FIFO. Does nothing the second time.
+transfer_setup() {
+  local share=${WORK}/share pull=${WORK}/pull tree=${WORK}/share/tree dirs
+  [[ -f ${WORK}/config-transfer.toml ]] && return 0
+  mkdir -p -- "${tree}/sub" "${tree}/build" "${pull}" || return 1
+  printf '*.tmp\nbuild/\n' > "${tree}/.gitignore" || return 1
+  printf '*.secret\n' > "${share}/.gitignore"
+  printf 'alpha\n' > "${tree}/a.txt"
+  printf 'beta\n' > "${tree}/sub/b.txt"
+  printf '#!/bin/sh\necho hi\n' > "${tree}/sub/run.sh"
+  printf 'ignored\n' > "${tree}/skip.tmp"
+  printf 'obj\n' > "${tree}/build/out.o"
+  printf 'secret\n' > "${tree}/k.secret"
+  printf 'outside\n' > "${share}/outside"
+  printf 'windows transfer\n' > "${share}/win.txt"
+  printf 'x\n' > "${pull}/a-file"
+  # Fixed modes, whatever the umask, so the cases can expect them.
+  find "${share}" "${pull}" -type f -exec chmod 644 {} + && find "${share}" "${pull}" -type d -exec chmod 755 {} + \
+    && chmod 755 "${tree}/sub/run.sh" || return 1
+  ln -s a.txt "${tree}/link-in" && ln -s ../outside "${tree}/link-out" && mkfifo "${tree}/pipe" || return 1
+  dirs=$(printf 'host_share_dirs = ["%s"]\nhost_pull_dirs = ["%s"]' "${share}" "${pull}")
+  # Top-level keys go before the first table.
+  { printf '%s\n' "${dirs}" && cat "${TESTBED}/config.toml"; } > "${WORK}/config-transfer.toml.new" || return 1
+  { cat "${WORK}/config-transfer.toml.new" && printf '\n[limits]\nmax_wait_secs = 2\n'; } \
+    > "${WORK}/config-transfer-slow.toml" || return 1
+  { cat "${WORK}/config-transfer.toml.new" && printf '\n[limits]\nmax_pull_bytes = 65536\nmax_pull_entries = 10\n'; } \
+    > "${WORK}/config-transfer-caps.toml" || return 1
+  mv -- "${WORK}/config-transfer.toml.new" "${WORK}/config-transfer.toml"
+}
+
+# Writes the share, pull and tree paths into vars.json, where the transfer cases read them as ${share}, ${pull} and
+# ${tree}; mcp_call.py fills saved values into call arguments only.
+transfer_vars() {
+  printf '{"share": "%s", "pull": "%s", "tree": "%s"}\n' "${WORK}/share" "${WORK}/pull" "${WORK}/share/tree" \
+    > "${WORK}/vars.json"
+}
+
+# Fails case $1 unless every pulled entry is a file with mode 644 or a directory with mode 755, and the staging
+# directory is empty.
+check_pull_dir() {
+  local pull=${WORK}/pull odd
+  odd=$(find "${pull}" -mindepth 1 -path "${pull}/.vmm-staging" -prune -o \
+    \( \( -type f ! -perm 644 \) -o \( -type d ! -perm 755 \) -o \( ! -type f ! -type d \) \) -print)
+  [[ -z ${odd} ]] || record "$1" failed "pulled entries with another mode or type: ${odd//$'\n'/ }"
+  [[ -z $(ls -A -- "${pull}/.vmm-staging" 2> /dev/null) ]] || record "$1" failed "${pull}/.vmm-staging is not empty"
+}
+
+# Fails case $1 unless the pulled file $2, relative to the pull directory, holds exactly $3.
+check_pulled() {
+  cmp -s <(printf '%s' "$3") "${WORK}/pull/$2" || record "$1" failed "pull/$2 does not hold what the guest wrote"
+}
+
+# Fails case $1 when the work directory, which is on tmpfs here, holds a file over 1 MiB.
+check_work_small() {
+  local big
+  big=$(find "${WORK}" -type f -size +1M -print)
+  [[ -z ${big} ]] || record "$1" failed "large files left in ${WORK}: ${big//$'\n'/ }"
+}
+
+unit_transfer() { # case
+  local config=${WORK}/config-transfer.toml big
+  if ! transfer_setup; then
+    record "$1" failed "could not build ${WORK}/share and the transfer configs"
+    return
+  fi
+  if ! trial_ready; then
+    record "$1" failed "trial-deb13 agent does not answer"
+    return
+  fi
+  transfer_vars
+  case $1 in
+    transfer-file)
+      run_case "$1" "${config}"
+      check_pulled "$1" file/f.txt $'guest-file\n'
+      ;;
+    transfer-pull)
+      run_case "$1" "${config}"
+      # The last pull replaced the tree with the guest's sub directory, so only its file is left.
+      check_pulled "$1" tree/b.txt $'beta\n'
+      [[ ! -e ${WORK}/pull/tree/a.txt ]] || record "$1" failed "overwrite left pull/tree/a.txt behind"
+      run_case transfer-pull-caps "${WORK}/config-transfer-caps.toml"
+      [[ -z $(find "${WORK}/pull" -maxdepth 1 -name 'caps-*' -print) ]] \
+        || record transfer-pull-caps failed "a refused pull left pull/caps-* behind"
+      check_pull_dir transfer-pull-caps
+      ;;
+    transfer-background)
+      big=${WORK}/share/big
+      mkdir -p -- "${big}" && chmod 755 "${big}"
+      # yes ends on SIGPIPE, so the file's size is the check.
+      yes "${BIG_PATTERN}" | head -c "${BIG_BYTES}" > "${big}/big.bin"
+      if [[ $(stat -c %s "${big}/big.bin") != "${BIG_BYTES}" ]]; then
+        record "$1" failed "could not write ${big}/big.bin"
+      else
+        chmod 644 "${big}/big.bin"
+        run_case "$1" "${WORK}/config-transfer-slow.toml"
+        [[ $(sha256sum < "${WORK}/pull/bg/big.bin" 2> /dev/null) == "${BIG_SHA256}  -" ]] \
+          || record "$1" failed "pull/bg/big.bin does not match the guest's file"
+      fi
+      check_pull_dir "$1"
+      rm -rf -- "${big:?}" "${WORK:?}/pull/bg"
+      check_work_small "$1"
+      # The stop during a push leaves .vmm-* entries beside its target; the follow-up case deletes them.
+      if trial_ready; then
+        transfer_vars
+        run_case transfer-background-after "${config}"
+      else
+        record transfer-background-after failed "trial-deb13 did not start again"
+      fi
+      ;;
+    *) run_case "$1" "${config}" ;;
+  esac
+  check_pull_dir "$1"
+}
+
 # Writes $WORK/config-screen.toml: config-templates.toml with t-inst, t-win and t-win11 allowed and powered, and the
 # OCR models.
 write_screen_config() {
@@ -285,11 +410,15 @@ write_screen_config() {
   printf '\n[display]\nocr_models = "%s"\n' "${dir}" >> "${file}"
 }
 
-# Writes $WORK/config-windows.toml: config-templates.toml with t-win11 allowed and powered.
+# Writes $WORK/config-windows.toml: config-templates.toml with t-win11 allowed and powered, and the transfer
+# directories that transfer_setup built.
 write_windows_config() {
   local file=${WORK}/config-windows.toml
-  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-win11", /' -e 's/^power_vms = \[/power_vms = ["t-win11", /' \
-    "${TESTBED}/config-templates.toml" > "${file}" || return 1
+  {
+    printf 'host_share_dirs = ["%s"]\nhost_pull_dirs = ["%s"]\n' "${WORK}/share" "${WORK}/pull"
+    sed -e 's/^allowed_vms = \[/allowed_vms = ["t-win11", /' -e 's/^power_vms = \[/power_vms = ["t-win11", /' \
+      "${TESTBED}/config-templates.toml"
+  } > "${file}" || return 1
   [[ $(grep -cF -e 'allowed_vms = ["t-win11", ' -e 'power_vms = ["t-win11", ' "${file}") == 2 ]]
 }
 
@@ -319,16 +448,19 @@ win_shut_off() {
   vsh destroy t-win11 > /dev/null && wait_until 30 is_state t-win11 "shut off"
 }
 
-# win-exec starts t-win11 and shuts it down; the job and wait cases then run on a fresh start, sharing vars.json.
+# win-exec starts t-win11 and shuts it down; the job and wait cases then run on a fresh start, sharing vars.json, and
+# win-transfer last, with vars.json rewritten for the transfer directories.
 unit_windows() {
-  local cases=(win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait) config=${WORK}/config-windows.toml
-  local reason case
+  local cases=(win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer)
+  local config=${WORK}/config-windows.toml reason case
   reason=$(win_blocker)
   if [[ -n ${reason} ]]; then
     for case in "${cases[@]}"; do record "${case}" skipped "${reason}"; done
     return
   fi
-  if ! write_windows_config; then
+  if ! transfer_setup; then
+    reason="could not build ${WORK}/share and the transfer configs"
+  elif ! write_windows_config; then
     reason="could not write ${config}"
   elif ! win_shut_off; then
     reason="could not shut t-win11 off"
@@ -340,7 +472,12 @@ unit_windows() {
   run_case win-exec "${config}"
   rm -f -- "${WORK:?}/vars.json"
   if win_ready; then
-    for case in "${cases[@]:1}"; do run_case "${case}" "${config}"; done
+    for case in "${cases[@]:1}"; do
+      [[ ${case} == win-transfer ]] && transfer_vars
+      run_case "${case}" "${config}"
+    done
+    check_pulled win-transfer win/vmm-win.txt $'windows transfer\n'
+    check_pull_dir win-transfer
   else
     for case in "${cases[@]:1}"; do record "${case}" failed "the t-win11 agent did not answer"; done
   fi
@@ -413,6 +550,7 @@ run_unit() {
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;
     jobs) unit_jobs ;;
+    transfer-* | addresses) unit_transfer "$1" ;;
     manage-lock) unit_manage_lock ;;
     owrt-* | mouse-refusals) unit_owrt "$1" ;;
     screen-installer) unit_screen "$1" t-inst ;;

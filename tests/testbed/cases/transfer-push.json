@@ -1,0 +1,129 @@
+[
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${tree}",
+      "guest_path": "/root/vmm-push/tree"
+    },
+    "expect": {
+      "contains": [
+        "\"files\":4",
+        "\"symlinks\":1",
+        "\"ignored\":3",
+        "link-out",
+        "pipe"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "cd /root/vmm-push/tree && for f in $(find . -type f | sort); do printf '%s %s:' \"$(stat -c %a \"$f\")\" \"$f\"; cat \"$f\"; done; readlink link-in; ls -A /root/vmm-push"
+    },
+    "expect": {
+      "contains": [
+        "644 ./.gitignore:",
+        "644 ./a.txt:alpha",
+        "644 ./sub/b.txt:beta",
+        "755 ./sub/run.sh:#!/bin/sh",
+        "\na.txt\n"
+      ],
+      "absent": [
+        "skip.tmp",
+        "./build",
+        "k.secret",
+        "link-out",
+        "pipe",
+        ".vmm-"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${tree}",
+      "guest_path": "/root/vmm-push/tree"
+    },
+    "expect": {
+      "error": true,
+      "contains": "pass replace: true"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${tree}",
+      "guest_path": "/usr",
+      "replace": true
+    },
+    "expect": {
+      "error": true,
+      "contains": "directly below it"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${tree}",
+      "guest_path": "/etc/hostname",
+      "replace": true
+    },
+    "expect": {
+      "error": true,
+      "contains": "not a directory"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${pull}",
+      "guest_path": "/root/vmm-push/never"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not inside host_share_dirs"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "trial-deb13",
+      "host_path": "${tree}",
+      "guest_path": "/root/vmm-push/tree",
+      "replace": true,
+      "exclude": [
+        "sub/"
+      ]
+    },
+    "expect": {
+      "contains": "\"files\":2"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "test ! -e /root/vmm-push/tree/sub && test -f /root/vmm-push/tree/a.txt && echo replaced; ls -A /root/vmm-push"
+    },
+    "expect": {
+      "contains": "replaced",
+      "absent": ".vmm-"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "command": "rm -rf /root/vmm-push"
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
+    }
+  }
+]
