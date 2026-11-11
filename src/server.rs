@@ -593,19 +593,15 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
-            let answers = addresses::query(&dom, addresses::sources(s.hv.config.read_only));
-            let unavailable: serde_json::Map<String, serde_json::Value> = answers
-                .iter()
-                .filter_map(|(source, a)| {
-                    let key = serde_json::to_value(source).ok()?.as_str()?.to_string();
-                    a.as_ref().err().map(|e| (key, json!(e)))
-                })
-                .collect();
-            let reply = json!({
-                "interfaces": addresses::merge(&answers),
-                "unavailable": unavailable,
-            });
-            Ok(vec![ContentBlock::text(reply.to_string())])
+            let config = &s.hv.config;
+            let answers = addresses::query(
+                &dom,
+                config.limits.agent_timeout_secs,
+                addresses::sources(config),
+            );
+            Ok(vec![ContentBlock::text(
+                addresses::reply(&answers).to_string(),
+            )])
         })
         .await
     }

@@ -3,8 +3,12 @@
 use std::net::IpAddr;
 
 use serde::Serialize;
-use virt::domain::{Domain, Interface};
+use serde_json::{Value, json};
+use virt::domain::{Domain, IPAddress, Interface};
 use virt::sys;
+
+use crate::agent::Agent;
+use crate::config::Config;
 
 /// Where an interface's addresses came from. The order is the order of trust: libvirt's own DHCP server hands out
 /// leases, while the guest agent's answer and the ARP table are what the guest claims.
@@ -19,11 +23,11 @@ pub enum Source {
 impl Source {
     const ALL: [Self; 3] = [Self::Lease, Self::Agent, Self::Arp];
 
-    fn libvirt(self) -> sys::virDomainInterfaceAddressesSource {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::Lease => sys::VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE,
-            Self::Agent => sys::VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT,
-            Self::Arp => sys::VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_ARP,
+            Self::Lease => "lease",
+            Self::Agent => "agent",
+            Self::Arp => "arp",
         }
     }
 }
@@ -47,22 +51,72 @@ pub struct VmInterface {
 /// One source's answer, or why it gave none.
 pub type Answer = Result<Vec<Interface>, String>;
 
-/// Asks each source in `sources` for `dom`'s addresses.
-pub fn query(dom: &Domain, sources: &[Source]) -> Vec<(Source, Answer)> {
+/// Asks each source in `sources` for `dom`'s addresses. Leases and ARP come from libvirt, which takes each MAC
+/// address from the VM's definition. The guest agent is asked through the server's own agent channel instead of
+/// libvirt's agent source, because `virt` 0.4.3 converts an interface's MAC address without checking for NULL, which
+/// libvirt allows for agent answers, and would crash the server.
+pub fn query(dom: &Domain, agent_timeout_secs: i32, sources: &[Source]) -> Vec<(Source, Answer)> {
     sources
         .iter()
         .map(|&s| {
-            let answer = dom
-                .interface_addresses(s.libvirt(), 0)
-                .map_err(|e| e.message().to_string());
+            let answer = match s {
+                Source::Lease => libvirt(dom, sys::VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE),
+                Source::Arp => libvirt(dom, sys::VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_ARP),
+                Source::Agent => Agent::new(dom, agent_timeout_secs)
+                    .call("guest-network-get-interfaces", None)
+                    .map(|v| agent_interfaces(&v))
+                    .map_err(|e| format!("{e:#}")),
+            };
             (s, answer)
         })
         .collect()
 }
 
-/// The sources a call may ask: every source, or only those that never reach the guest in read-only mode.
-pub fn sources(read_only: bool) -> &'static [Source] {
-    if read_only {
+fn libvirt(dom: &Domain, source: sys::virDomainInterfaceAddressesSource) -> Answer {
+    dom.interface_addresses(source, 0)
+        .map_err(|e| e.message().to_string())
+}
+
+/// The interfaces in a `guest-network-get-interfaces` reply. An interface without a hardware address cannot be
+/// matched to the VM's NICs and is left out.
+fn agent_interfaces(reply: &Value) -> Vec<Interface> {
+    let Some(list) = reply.as_array() else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|i| {
+            let hwaddr = i.get("hardware-address")?.as_str()?.to_string();
+            let addrs: Vec<IPAddress> = i
+                .get("ip-addresses")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|a| {
+                    Some(IPAddress {
+                        typed: i64::from(a.get("ip-address-type")?.as_str()? == "ipv6"),
+                        addr: a.get("ip-address")?.as_str()?.to_string(),
+                        prefix: a.get("prefix")?.as_u64()?,
+                    })
+                })
+                .collect();
+            Some(Interface {
+                name: i
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                hwaddr,
+                naddrs: addrs.len() as u64,
+                addrs,
+            })
+        })
+        .collect()
+}
+
+/// The sources a call may ask under `config`: every source, or in read-only mode only those that never reach the
+/// guest.
+pub fn sources(config: &Config) -> &'static [Source] {
+    if config.read_only {
         &[Source::Lease, Source::Arp]
     } else {
         &Source::ALL
@@ -122,10 +176,28 @@ pub fn merge(answers: &[(Source, Answer)]) -> Vec<VmInterface> {
 /// Whether `addr` is worth reporting: a parseable address that is neither loopback nor IPv6 link-local.
 fn usable(addr: &str) -> bool {
     match addr.parse::<IpAddr>() {
-        Ok(IpAddr::V4(a)) => !a.is_loopback(),
-        Ok(IpAddr::V6(a)) => !a.is_loopback() && (a.segments()[0] & 0xffc0) != 0xfe80,
+        Ok(IpAddr::V4(a)) => !a.is_loopback() && !a.is_unspecified(),
+        Ok(IpAddr::V6(a)) => {
+            !a.is_loopback()
+                && !a.is_unspecified()
+                && (a.segments()[0] & 0xffc0) != 0xfe80
+                && !a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
         Err(_) => false,
     }
+}
+
+/// The tool's reply: the merged interfaces, and the sources that failed with their reasons.
+pub fn reply(answers: &[(Source, Answer)]) -> Value {
+    let unavailable: serde_json::Map<String, Value> = answers
+        .iter()
+        .filter_map(|(source, a)| {
+            a.as_ref()
+                .err()
+                .map(|e| (source.as_str().to_string(), json!(e)))
+        })
+        .collect();
+    json!({ "interfaces": merge(answers), "unavailable": unavailable })
 }
 
 #[cfg(test)]
@@ -230,7 +302,73 @@ mod tests {
 
     #[test]
     fn read_only_mode_never_asks_the_agent() {
-        assert!(!sources(true).contains(&Source::Agent));
-        assert_eq!(sources(false), Source::ALL);
+        let read_only: Config = toml::from_str("read_only = true").unwrap();
+        assert!(!sources(&read_only).contains(&Source::Agent));
+        assert_eq!(sources(&Config::default()), Source::ALL);
+    }
+
+    #[test]
+    fn agent_interfaces_without_a_mac_are_left_out() {
+        let reply = json!([
+            {"name": "lo", "hardware-address": "00:00:00:00:00:00",
+             "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "127.0.0.1", "prefix": 8}]},
+            {"name": "wg0", "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "10.9.0.2", "prefix": 32}]},
+            {"name": "enp1s0", "hardware-address": MAC,
+             "ip-addresses": [{"ip-address-type": "ipv6", "ip-address": "fd00::7", "prefix": 64},
+                              {"ip-address-type": "ipv4", "prefix": 24}]}
+        ]);
+        let interfaces = agent_interfaces(&reply);
+        let names: Vec<_> = interfaces.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["lo", "enp1s0"]);
+        assert_eq!(
+            interfaces[1].addrs.len(),
+            1,
+            "an address without ip-address is dropped"
+        );
+        assert_eq!(interfaces[1].addrs[0].typed, 1);
+        assert!(agent_interfaces(&json!({"unexpected": true})).is_empty());
+    }
+
+    #[test]
+    fn unusable_addresses_are_dropped() {
+        for addr in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "::",
+            "::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "nonsense",
+        ] {
+            assert!(!usable(addr), "{addr} kept");
+        }
+        for addr in [
+            "192.168.122.141",
+            "fd00::7",
+            "2001:db8::1",
+            "::ffff:10.0.0.1",
+        ] {
+            assert!(usable(addr), "{addr} dropped");
+        }
+    }
+
+    #[test]
+    fn the_reply_names_failed_sources() {
+        let answers = [
+            (
+                Source::Lease,
+                Ok(vec![iface("vnet3", MAC, &["192.168.122.141"])]),
+            ),
+            (
+                Source::Agent,
+                Err("guest agent is not connected".to_string()),
+            ),
+        ];
+        let reply = reply(&answers);
+        assert_eq!(
+            reply["unavailable"],
+            json!({"agent": "guest agent is not connected"})
+        );
+        assert_eq!(reply["interfaces"][0]["source"], "lease");
     }
 }
