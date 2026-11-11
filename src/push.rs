@@ -210,6 +210,23 @@ fn rules_file(path: &Path) -> Result<bool> {
     }
 }
 
+/// Refuses a rules file above the share that is not, once symlinks are followed, a regular file of at most
+/// `RULES_MAX` bytes. Outside the share the host's own files live, where a symlinked `~/.gitignore` is common.
+fn followed_rules_file(path: &Path) -> Result<()> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() && m.len() > RULES_MAX => bail!(
+            "{} is larger than 1 MiB; a push reads the .gitignore files above its share",
+            path.display()
+        ),
+        Ok(m) if !m.is_file() => bail!(
+            "{} is not a regular file; a push reads the .gitignore files above its share",
+            path.display()
+        ),
+        // A missing or unreadable file is one the walk skips too.
+        _ => Ok(()),
+    }
+}
+
 /// `dir/.git/info/exclude` when `.git` and `info` are real directories and the file passes `rules_file`.
 fn exclude_file(dir: &Path) -> Result<Option<PathBuf>> {
     for sub in [".git", ".git/info"] {
@@ -239,6 +256,10 @@ fn overrides(root: &Path, exclude: &[String]) -> Result<Override> {
 /// checks the tree's own `.gitignore`, which the walk reads before any filter sees it. An unparsable line is left
 /// out, as git and the walk do.
 fn outer_rules(tree: &Tree) -> Result<Vec<Gitignore>> {
+    // The walk also reads, without applying, the `.gitignore` of every directory above the share.
+    for dir in tree.share.ancestors().skip(1) {
+        followed_rules_file(&dir.join(".gitignore"))?;
+    }
     rules_file(&tree.path.join(".gitignore"))?;
     let mut dirs = vec![tree.share.clone()];
     for c in tree.path.strip_prefix(&tree.share)?.components() {
@@ -1349,6 +1370,23 @@ mod tests {
             select(&tree(&share.0, "t"), &options()).err().unwrap()
         );
         assert!(err.contains("at most 1 MiB"), "{err}");
+    }
+
+    #[test]
+    fn a_gitignore_above_the_share_may_be_a_symlink_but_not_a_huge_file() {
+        let base = Temp::new("rules-above");
+        base.write("share/t/f", "x");
+        base.write("real-ignore", "*.log\n");
+        symlink(base.0.join("real-ignore"), base.0.join(".gitignore")).unwrap();
+        let share = base.0.join("share");
+        assert!(select(&tree(&share, "t"), &options()).is_ok());
+
+        fs::write(base.0.join("real-ignore"), vec![b'#'; 2 << 20]).unwrap();
+        let err = format!(
+            "{:#}",
+            select(&tree(&share, "t"), &options()).err().unwrap()
+        );
+        assert!(err.contains("larger than 1 MiB"), "{err}");
     }
 
     #[test]
