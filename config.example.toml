@@ -25,8 +25,8 @@ share_project_dir = false
 # an ISO directory or a libvirt storage pool, because the guest controls what a pull writes.
 # host_pull_dirs = ["/home/me/vm-pulls"]
 
-# When true, only list_vms, read_file, list_dir, stat_path and the console_open/
-# console_read/console_close tools are exposed.
+# When true, only tools that change nothing in a VM or on the host are exposed, such as list_vms,
+# read_file, list_dir, vm_addresses and the console tools. The README's tool table lists them all.
 read_only = false
 
 # VM management. Everything here is off by default; each operation is enabled separately.
@@ -67,7 +67,8 @@ max_output_bytes = 1048576          # stdout/stderr cap per exec call
 max_file_read_bytes = 10485760      # read_file cap
 agent_timeout_secs = 10             # single guest agent request
 console_buffer_bytes = 262144       # serial console scrollback per VM
-max_wait_secs = 50                  # longest a wait_for or paced console_write may block
+max_wait_secs = 50                  # longest a wait_for, paced console_write or copy may block;
+                                    # a longer copy goes on in the background
 max_pull_bytes = 1073741824         # largest file or archive one pull from a guest may write
 max_pull_entries = 100000           # most entries one directory pull may hold
 max_transfers = 4                   # copies running in the background at once

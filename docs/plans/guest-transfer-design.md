@@ -29,7 +29,7 @@ directory transfers on Windows guests.
 | Push target | A new directory, or `replace: true`, which swaps a complete new tree in; no merging | Merging leaves deleted files behind, so the guest drifts from the checkout | resolved |
 | Incremental sync | Not now: every push sends the whole selected tree | A checkout takes seconds; incremental sync needs `rsync` in the guest or a manifest protocol of our own | deferred: repeated pushes of a tree of several hundred MiB take tens of seconds each in an edit-and-test loop. It can be added later without changing these tools |
 | Links in pulled trees | Skipped and named in the reply | A link can point the host anywhere | deferred: copying links whose target stays inside the tree would keep library trees such as `libfoo.so -> libfoo.so.1` usable |
-| Addresses | `vm_addresses`, taking for each interface libvirt's DHCP lease, then the guest agent's answer, then the host's ARP table | A guest cannot forge a lease but controls its agent's answer; where no lease exists, the reply marks the answer as the guest's own claim. Leases and ARP also work without a guest agent, which installers and appliances lack | resolved; an `address` wait condition is deferred until agents need it |
+| Addresses | `vm_addresses`, taking for each interface libvirt's DHCP lease, then the guest agent's answer, then the host's ARP table | A guest cannot forge a lease but controls its agent's answer; where no lease exists, the reply marks the answer as the guest's own claim. Leases and ARP also work without a guest agent, which installers and appliances lack, as long as every NIC has a host-side device name | resolved; an `address` wait condition is deferred until agents need it |
 | Long transfers | Every copy tool, including `copy_to_vm`, returns within `limits.max_wait_secs`; a longer copy continues in the server, and `wait_for` gains `transfer_done`, answered whatever the VM's state | Codex and some Claude Code paths cut calls off at 60 s, and 1 GiB takes about 50 s | resolved |
 | Excludes on a pull | Applied by the server while unpacking, in gitignore syntax as for pushes; never passed to the guest's `tar` | Guest `tar` builds disagree: GNU tar matches unanchored, and busybox may have no `--exclude`. One host-side dialect gives the same result on every guest, at the cost of excluded files crossing the channel | resolved |
 | Cancelling a transfer | No tool | A transfer ends by finishing, failing, or the server exiting | deferred: an agent cannot stop a large mistaken transfer and waits for it |
@@ -68,7 +68,8 @@ ARP sources.
 
 `host_path` and `guest_path` always name the exact destination or source, never a directory to copy into. A copy
 never turns a file into a directory or the reverse: `overwrite` and `replace` replace only an entry of the same type,
-and refuse otherwise. Missing parent directories are created on either side.
+and refuse otherwise. The three new tools create missing parent directories on the destination side. `copy_to_vm`
+keeps its rule that the guest's parent directory must exist.
 
 ### Pulling one file: `copy_from_vm`
 
@@ -207,6 +208,13 @@ libvirt-managed networks, though, and a guest with a static address has none. Th
 then the guest's own claims, and a compromised guest can name another VM's or a host address. The tool description
 says so, and the source field shows which kind each answer is.
 
+The `virt` crate 0.4.3 reads two fields of libvirt's answer without a NULL check, and either crash would take the
+server down. The server therefore asks the guest agent through its own agent channel, with
+`guest-network-get-interfaces`, instead of libvirt's agent source, which may return an interface without a MAC
+address. It asks for leases and ARP entries only when every NIC in the VM's live XML has a `<target dev>`, because
+libvirt returns a NULL device name for a NIC without one, such as a passed-through device. For such a VM the lease
+and ARP sources report that they were skipped, and only the guest agent can answer.
+
 ### Windows guests
 
 Run 1 makes `copy_from_vm`, `copy_to_vm` and `vm_addresses` work on Windows guests, and tests them on `t-win11`. Run 2
@@ -233,16 +241,22 @@ Each needs a test that shows the refusal still happens, as `CLAUDE.md` asks for 
 
 - `src/config.rs`: `host_pull_dirs`, the overlap checks, and the three limits. The pool and `renameat2` checks run
   once the server has connected to libvirt.
-- A new module for the host side: the handle-based walks for pulls and pushes, the staging directory, its locks and
-  `renameat2`, the archive builder for pushes, and the untrusted unpacker for pulls. It adds three crates: `tar`,
-  `ignore`, and `rustix` for `openat`, `fchmod` and `renameat_with`. The unpacker reads entries with the `tar` crate
-  in raw mode but writes every file itself, never through the crate's `unpack`. Each new crate passes
-  `cargo deny check advisories`.
-- `src/agent.rs`: streaming reads to a writer, mirroring `write_from`.
-- A transfer table beside the jobs, and the `transfer_done` condition, answered in `src/server.rs` before the VM
+- `src/pulldir.rs`: the pull directories' staging directories, their locks, the start-up cleanup and the
+  `renameat2` probe.
+- `src/pull.rs`: the host writer, with its handle-based walk, staged copies and the `renameat2` commit, for files and
+  directories.
+- `src/push.rs`: the push walk, the archive builder and the guest steps of `copy_dir_to_vm`.
+- `src/dirpull.rs`: the guest steps of `copy_dir_from_vm` and the untrusted unpacker. It reads entries with the `tar`
+  crate in raw mode but writes every file itself, never through the crate's `unpack`.
+- `src/transfer.rs`: the transfer table, and the `transfer_done` condition, answered in `src/server.rs` before the VM
   lookup.
-- `src/server.rs`: the four tools, `copy_to_vm` moved onto transfers, and the read-only rules.
-- `src/hypervisor.rs`: interface addresses through `Domain::interface_addresses`.
+- `src/addresses.rs`: `vm_addresses`, its sources and their merge.
+- `src/agent.rs`: streaming reads to a writer, mirroring `write_from`, and a file's size.
+- `src/hypervisor.rs`: the storage pools' target paths for the overlap check.
+- `src/server.rs`: the five tools, `copy_to_vm` moved onto transfers, and the read-only rules.
+
+The run adds three crates: `tar`, `ignore`, and `rustix` for `openat`, `fchmod` and `renameat_with`. Each passes
+`cargo deny check advisories`.
 
 ## Test bed
 
@@ -262,7 +276,8 @@ that meets a symlinked directory.
 - A pushed checkout's files match the host's by checksum, and ignored files are absent.
 - A pulled tree matches the guest's by checksum, with every mode 644 or 755.
 - Every refusal in the invariants shows in a case or a unit test.
-- A 200 MiB push finishes, through `transfer_done` when it outlasts the call.
+- A large push finishes, through `transfer_done` when it outlasts the call. The test bed pushes 128 MiB, because its
+  work directory lives on the host's tmpfs.
 - Pulls run at a measured rate, recorded in the probe note, since the probe measured only pushes.
 
 ## Risks

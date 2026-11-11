@@ -36,8 +36,8 @@ used the same setup.
 | `screen-no-models.json` | Without `display.ocr_models`, `screen_text` is refused before the wait starts, both alone and next to `screen_settled`. `screen_settled` alone still matches. |
 
 The transfer cases also run on `trial-deb13`, with a config that `run-all.sh` writes into its log directory. It adds a
-share directory and a pull directory there, and builds a fixed tree in the share to push. They read the two
-directories as `${share}`, `${pull}` and `${tree}` from `vars.json`.
+share directory and a pull directory there, and builds a fixed tree in the share to push. They read the
+share, the pull directory and the tree as `${share}`, `${pull}` and `${tree}` from `vars.json`.
 
 | Case | What it exercises |
 | -- | -- |

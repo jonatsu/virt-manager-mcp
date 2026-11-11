@@ -36,7 +36,7 @@ The path is passed as data, never spliced into shell code.
 | `read_file`, `list_dir`, `stat_path` | ✅ |
 | `vm_addresses`: a running VM's addresses per interface, from libvirt's DHCP lease, else the guest agent, else ARP | ✅ (lease and ARP only) |
 | `console_open`, `console_read`, `console_close` | ✅ |
-| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
+| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text, background copy finished), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
 | `job_read`, `job_list`: a background job's output and state | ✅ |
 | `job_start`, `job_stop`: run a long command detached in a Linux or Windows guest, and stop it | ❌ |
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
@@ -141,7 +141,9 @@ entries beside its target in the guest; delete them through `exec`.
 `vm_addresses` tells an agent where to reach a guest for other ways of moving files, such as `scp`. For each
 interface it takes libvirt's DHCP lease, then the guest agent's answer, then the host's ARP table, and names the
 source. Only a lease comes from outside the guest. The agent's answer and the ARP table are the guest's own claims,
-so a compromised guest can name another VM's address or a host address.
+so a compromised guest can name another VM's address or a host address. When a VM has a network interface without a
+host-side device name, such as a passed-through device, the server skips the lease and ARP sources, and only the
+guest agent can answer.
 
 The directory tools refuse Windows guests for now. `copy_to_vm`, `copy_from_vm` and `vm_addresses` work there.
 

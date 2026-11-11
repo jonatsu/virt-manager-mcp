@@ -17,11 +17,13 @@ Each release's section lists what changed for people who run the server and for 
   its command with PowerShell, as `exec` does by default, and holds when it exits 0.
 - `vm_addresses` lists a running VM's addresses per interface, without a guest agent where libvirt's DHCP server
   leased one. For each interface it prefers the lease, which the guest cannot forge, then the guest agent's answer,
-  then the host's ARP table, and says which source answered. Read-only mode skips the guest agent.
+  then the host's ARP table, and says which source answered. Read-only mode skips the guest agent. It works on Linux
+  and Windows guests.
 - `copy_from_vm` copies a guest file into a pull directory on the host without passing it through the conversation.
   The file arrives with mode 644 and appears only once complete; missing parent directories are created with mode
   755, symlinks are never followed, an existing file is replaced only with `overwrite: true`, and a directory never
-  is. `limits.max_pull_bytes` (default 1 GiB) caps one pull. Read-only mode hides it.
+  is. `limits.max_pull_bytes` (default 1 GiB) caps one pull. It works on Linux and Windows guests. Read-only mode
+  hides it.
 - The `host_pull_dirs` setting names host directories that pulls from a guest may write into. The server refuses to
   start when one overlaps a share directory, the shared project directory, an ISO directory or any libvirt storage
   pool, or sits on a filesystem without `renameat2` support. Each gets a private `.vmm-staging/` directory.
@@ -37,9 +39,9 @@ Each release's section lists what changed for people who run the server and for 
   patterns, applied on the host. An existing directory is replaced as a whole only with `overwrite: true`.
   `limits.max_pull_bytes` caps the archive and the files written, and the new `limits.max_pull_entries` (default
   100,000) the entries, counting the directories their paths imply. Read-only mode hides it.
-- A `copy_to_vm` or `copy_from_vm` that outlasts `limits.max_wait_secs` goes on in the background and replies with
-  a transfer ID instead of failing at the client's call timeout. `wait_for`'s `transfer_done` condition reports how
-  it ended. `limits.max_transfers` (default 4) caps how many run at once.
+- A copy that outlasts `limits.max_wait_secs`, through any of the four copy tools, goes on in the background and
+  replies with a transfer ID instead of failing at the client's call timeout. `wait_for`'s `transfer_done`
+  condition reports how it ended. `limits.max_transfers` (default 4) caps how many run at once.
 
 ### Fixed
 
