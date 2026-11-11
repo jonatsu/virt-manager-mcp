@@ -577,6 +577,43 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_appears_before_a_directory_swap_is_put_back() {
+        let dir = PullDir::new("race-dir");
+        fs::create_dir(dir.0.join("d")).unwrap();
+        fs::write(dir.0.join("d/old"), "old").unwrap();
+        let dest = Destination::open(&dir.dirs(), &dir.path("d")).unwrap();
+        dest.check(Kind::Directory, true).unwrap();
+        let staged = dest.stage_dir().unwrap();
+        let tree = staged.dir().unwrap();
+        rustix::fs::mkdirat(&tree, "new", Mode::from(0o755)).unwrap();
+        let swap_in_a_file = || {
+            fs::remove_dir_all(dir.0.join("d")).unwrap();
+            fs::write(dir.0.join("d"), "theirs").unwrap();
+        };
+        let err = staged
+            .commit_with(&dest, true, &swap_in_a_file)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed while the pull ran"), "{err}");
+        assert_eq!(fs::read(dir.0.join("d")).unwrap(), b"theirs");
+        assert!(dir.staging_is_empty());
+
+        // Without a race, the whole old tree goes.
+        let dest = Destination::open(&dir.dirs(), &dir.path("e")).unwrap();
+        fs::create_dir(dir.0.join("e")).unwrap();
+        fs::write(dir.0.join("e/old"), "old").unwrap();
+        let staged = dest.stage_dir().unwrap();
+        rustix::fs::mkdirat(staged.dir().unwrap(), "new", Mode::from(0o755)).unwrap();
+        staged.commit(&dest, true).unwrap();
+        assert!(dir.0.join("e/new").is_dir() && !dir.0.join("e/old").exists());
+        assert_eq!(
+            fs::metadata(dir.0.join("e")).unwrap().mode() & 0o7777,
+            DIR_MODE
+        );
+        assert!(dir.staging_is_empty());
+    }
+
+    #[test]
     fn a_file_that_appears_meanwhile_is_not_replaced_without_overwrite() {
         let dir = PullDir::new("appear");
         let dest = Destination::open(&dir.dirs(), &dir.path("f")).unwrap();

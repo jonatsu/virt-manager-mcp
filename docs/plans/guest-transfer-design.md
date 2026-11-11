@@ -169,7 +169,10 @@ itself, so it can check every entry:
   in the stream. GNU tar and busybox write neither, and bsdtar writes `size` only for files over 8 GiB;
 - a PAX or long-name header larger than 64 KiB fails the pull, so metadata cannot fill memory;
 - symlinks, hard links, device files, FIFOs and sockets are skipped and named in the reply;
-- passing `max_pull_bytes` or `max_pull_entries` fails the pull.
+- a path longer than 4096 bytes or deeper than 256 levels fails the pull, so a deep tree stays deletable with one
+  handle per level;
+- passing `max_pull_bytes` or `max_pull_entries` fails the pull. The directories an entry's path implies count as
+  entries too, so one long name cannot create thousands of directories.
 
 ### Long transfers
 

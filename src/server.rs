@@ -980,8 +980,9 @@ impl VirtServer {
         replaced as a whole only with overwrite: true, and a file there never is. Files arrive with mode 644 and \
         directories with 755; symlinks, hard links, devices and FIFOs are skipped and named. exclude takes gitignore \
         patterns, applied on the host. limits.max_pull_bytes caps the archive and the files written, and \
-        limits.max_pull_entries the entries; an archive with absolute or '..' paths, repeated paths or sparse files \
-        fails the pull, which then writes nothing. If tar reports that a file changed while it was read, the pull \
+        limits.max_pull_entries the entries, counting the directories their paths imply; an archive with absolute or \
+        '..' paths, paths over 4096 bytes or 256 levels, repeated paths or sparse files fails the pull, which then \
+        writes nothing. If tar reports that a file changed while it was read, the pull \
         succeeds with tar's warning. A pull still running after limits.max_wait_secs continues in the background and \
         replies with a `transfer` ID; wait_for's `transfer_done` condition reports how it ended."
     )]

@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::File;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -30,6 +31,11 @@ use crate::transfer::CountingWriter;
 
 /// The largest long-name or PAX header the unpacker reads, so metadata cannot fill memory.
 const META_MAX: u64 = 64 * 1024;
+/// The longest path the unpacker accepts, in bytes: Linux's own `PATH_MAX`.
+const PATH_MAX: usize = 4096;
+/// The deepest path the unpacker accepts. Deleting a tree keeps a handle open per level, so this stays well under the
+/// usual 1024-handle limit.
+const DEPTH_MAX: usize = 256;
 /// How many skipped entries a reply names; it counts the rest.
 const SKIPPED_SHOWN: usize = 100;
 /// How often the server checks the guest's archive while `tar` builds it.
@@ -105,9 +111,15 @@ pub fn unpack(
 ) -> Result<Unpacked> {
     let mut archive = tar::Archive::new(src);
     let mut out = Unpacked::default();
-    let mut seen = HashSet::new();
+    let mut tree = Tree {
+        root,
+        limits,
+        keys: RandomState::new(),
+        seen: HashSet::new(),
+        dirs: HashSet::new(),
+        entries: 0,
+    };
     let mut long_name: Option<Vec<u8>> = None;
-    let mut entries = 0u64;
     for item in archive.entries().context("reading the archive")?.raw(true) {
         let mut entry = item.context("reading the archive")?;
         let kind = entry.header().entry_type();
@@ -134,13 +146,7 @@ pub fn unpack(
         if kind.is_gnu_sparse() {
             bail!("the archive has a GNU sparse entry, which the unpacker refuses");
         }
-        entries += 1;
-        if entries > limits.max_entries {
-            bail!(
-                "the archive holds more than {} entries (limits.max_pull_entries)",
-                limits.max_entries
-            );
-        }
+        tree.count()?;
         let raw = match long_name.take() {
             Some(name) => name,
             None => entry.header().path_bytes().into_owned(),
@@ -152,7 +158,7 @@ pub fn unpack(
             }
             bail!("an entry other than a directory names the archive's root");
         }
-        if !seen.insert(rel.clone()) {
+        if !tree.seen.insert(tree.key(&rel)) {
             bail!("{} appears twice in the archive", rel.display());
         }
         if exclude
@@ -164,12 +170,11 @@ pub fn unpack(
         }
         match kind {
             EntryType::Regular | EntryType::Continuous => {
-                write_file(&mut entry, root, &rel, limits, &mut out)
+                write_file(&mut entry, &mut tree, &rel, &mut out)
                     .with_context(|| format!("{}", rel.display()))?;
             }
             EntryType::Directory => {
-                let (parent, name) = parent_of(root, &rel)?;
-                pull::open_or_create_dir(&parent, name).map_err(|_| shared_path(&rel))?;
+                tree.dir(&rel)?;
                 out.directories += 1;
             }
             EntryType::Symlink => out.skip(&rel, "symlink"),
@@ -230,13 +235,27 @@ fn pax_path<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<Option<Vec<u8>>> {
     Ok(path)
 }
 
-/// The entry's path relative to the archive's root, refusing an absolute path and `..`.
+/// The entry's path relative to the archive's root, refusing an absolute path, `..`, and a path longer than
+/// `PATH_MAX` bytes or deeper than `DEPTH_MAX` levels.
 fn relative(raw: &[u8]) -> Result<PathBuf> {
+    if raw.len() > PATH_MAX {
+        bail!(
+            "the archive names a path of {} bytes, over the unpacker's {PATH_MAX}-byte limit",
+            raw.len()
+        );
+    }
     let shown = String::from_utf8_lossy(raw);
     let mut rel = PathBuf::new();
+    let mut depth = 0;
     for c in Path::new(OsStr::from_bytes(raw)).components() {
         match c {
-            Component::Normal(name) => rel.push(name),
+            Component::Normal(name) => {
+                depth += 1;
+                if depth > DEPTH_MAX {
+                    bail!("{shown}: the archive names a path deeper than {DEPTH_MAX} levels");
+                }
+                rel.push(name);
+            }
             Component::CurDir => {}
             Component::ParentDir => bail!("{shown}: the archive names a path with '..'"),
             Component::RootDir | Component::Prefix(_) => {
@@ -254,33 +273,86 @@ fn shared_path(rel: &Path) -> anyhow::Error {
     )
 }
 
-/// The directory that holds `rel` below `root`, creating missing ones with mode 755, and `rel`'s last name.
-fn parent_of<'a>(root: &OwnedFd, rel: &'a Path) -> Result<(OwnedFd, &'a OsStr)> {
-    let name = rel.file_name().expect("a relative path with a name");
-    let mut dir = rustix::io::dup(root)?;
-    let mut walked = PathBuf::new();
-    for c in rel.parent().into_iter().flat_map(Path::components) {
-        walked.push(c);
-        dir = pull::open_or_create_dir(&dir, c.as_os_str()).map_err(|_| shared_path(&walked))?;
+/// What `open_or_create_dir` failing at `rel` means: a name that is not a directory, or a system error as it is.
+fn dir_error(e: anyhow::Error, rel: &Path) -> anyhow::Error {
+    if e.chain().any(|c| c.downcast_ref::<Errno>().is_some()) {
+        e.context(format!("{}", rel.display()))
+    } else {
+        shared_path(rel)
     }
-    Ok((dir, name))
+}
+
+/// The tree an unpack builds, and what it has seen. Paths are kept as keyed 64-bit hashes, so memory stays bounded by
+/// `max_pull_entries` whatever names the archive uses; the random key keeps an archive from aiming at a collision.
+struct Tree<'a> {
+    root: &'a OwnedFd,
+    limits: &'a Limits,
+    keys: RandomState,
+    /// Every path the archive named.
+    seen: HashSet<u64>,
+    /// Every directory that exists in the tree, named by the archive or created on the way to an entry.
+    dirs: HashSet<u64>,
+    entries: u64,
+}
+
+impl Tree<'_> {
+    fn key(&self, path: &Path) -> u64 {
+        self.keys.hash_one(path)
+    }
+
+    /// Counts one more entry, archive entries and the directories made on their way alike, against the cap.
+    fn count(&mut self) -> Result<()> {
+        self.entries += 1;
+        if self.entries > self.limits.max_entries {
+            bail!(
+                "the archive holds more than {} entries, counting the directories its paths imply \
+                 (limits.max_pull_entries)",
+                self.limits.max_entries
+            );
+        }
+        Ok(())
+    }
+
+    /// The directory that holds `rel`, creating missing ones with mode 755, each counted as an entry.
+    fn parent_of<'p>(&mut self, rel: &'p Path) -> Result<(OwnedFd, &'p OsStr)> {
+        let name = rel.file_name().expect("a relative path with a name");
+        let mut dir = rustix::io::dup(self.root)?;
+        let mut walked = PathBuf::new();
+        for c in rel.parent().into_iter().flat_map(Path::components) {
+            walked.push(c);
+            let key = self.key(&walked);
+            if !self.dirs.contains(&key) {
+                self.count()?;
+                self.dirs.insert(key);
+            }
+            dir =
+                pull::open_or_create_dir(&dir, c.as_os_str()).map_err(|e| dir_error(e, &walked))?;
+        }
+        Ok((dir, name))
+    }
+
+    /// Creates the directory `rel`, which the archive names itself and so is counted already.
+    fn dir(&mut self, rel: &Path) -> Result<()> {
+        let (parent, name) = self.parent_of(rel)?;
+        pull::open_or_create_dir(&parent, name).map_err(|e| dir_error(e, rel))?;
+        let key = self.key(rel);
+        self.dirs.insert(key);
+        Ok(())
+    }
 }
 
 fn write_file<R: Read>(
     entry: &mut tar::Entry<'_, R>,
-    root: &OwnedFd,
+    tree: &mut Tree<'_>,
     rel: &Path,
-    limits: &Limits,
     out: &mut Unpacked,
 ) -> Result<()> {
     let size = entry.size();
-    if out.bytes.saturating_add(size) > limits.max_bytes {
-        bail!(
-            "the archive's files pass the pull limit of {} bytes (limits.max_pull_bytes)",
-            limits.max_bytes
-        );
+    let max = tree.limits.max_bytes;
+    if out.bytes.saturating_add(size) > max {
+        bail!("the archive's files pass the pull limit of {max} bytes (limits.max_pull_bytes)");
     }
-    let (parent, name) = parent_of(root, rel)?;
+    let (parent, name) = tree.parent_of(rel)?;
     let fd = match rustix::fs::openat(
         &parent,
         name,
@@ -436,8 +508,14 @@ fn pack_and_unpack(
     let pid = guest.start(PACK, &[req.guest_path, archive])?;
     let started = Instant::now();
     let packed = loop {
-        if let Some(ran) = guest.status(pid)? {
-            break ran;
+        // Every way out of this loop but `tar` ending stops `tar`, so it never writes on, uncapped, after the pull.
+        match guest.status(pid) {
+            Ok(Some(ran)) => break ran,
+            Ok(None) => {}
+            Err(e) => {
+                guest.kill(pid);
+                return Err(e.context("asking the guest whether tar finished"));
+            }
         }
         // The archive may not exist yet in the first moments, which reads as empty.
         if guest.size(archive).unwrap_or(0) > max {
@@ -722,7 +800,23 @@ mod tests {
                 vec![file(b"a/b"), file(b"a")],
                 "share this path",
             ),
-            ("gnu-sparse", vec![raw(b'S', b"big", b"")], "GNU sparse"),
+            ("gnu-sparse", vec![sparse_tib()], "GNU sparse"),
+            (
+                "too-deep",
+                vec![
+                    raw(b'L', b"././@LongLink", &"d/".repeat(300).into_bytes()),
+                    file(b"x"),
+                ],
+                "deeper than 256 levels",
+            ),
+            (
+                "too-long",
+                vec![
+                    raw(b'L', b"././@LongLink", &"n".repeat(5000).into_bytes()),
+                    file(b"x"),
+                ],
+                "4096-byte limit",
+            ),
             (
                 "pax-sparse",
                 vec![
@@ -808,6 +902,41 @@ mod tests {
         assert!(err.contains("max_pull_bytes"), "{err}");
         assert!(!pull.0.join("out").exists());
         assert!(pull.staging_is_empty());
+
+        // One entry, but three directories on its way: four against a cap of three.
+        let pull = Temp::pull_dir("implied");
+        let data = archive(&[raw(b'0', b"a/b/c/f", b"")]);
+        let err = format!("{:#}", unpack_to(&pull, &data, &tight, &[]).unwrap_err());
+        assert!(err.contains("directories its paths imply"), "{err}");
+        assert!(pull.staging_is_empty());
+    }
+
+    /// A GNU sparse entry that declares a 1 TiB file and carries no data.
+    fn sparse_tib() -> Vec<u8> {
+        let mut header = tar::Header::new_gnu();
+        header.set_path("big").unwrap();
+        header.set_entry_type(EntryType::GNUSparse);
+        header.set_size(0);
+        header.as_gnu_mut().unwrap().set_real_size(1 << 40);
+        header.set_cksum();
+        header.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn a_deep_tree_that_then_fails_still_leaves_staging_empty() {
+        let pull = Temp::pull_dir("deep");
+        let deep = format!("{}f", "d/".repeat(250));
+        let data = archive(&[
+            raw(b'L', b"././@LongLink", deep.as_bytes()),
+            raw(b'0', b"x", b"deep"),
+            raw(b'0', b"../escape", b""),
+        ]);
+        let err = unpack_to(&pull, &data, &LIMITS, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'..'"), "{err}");
+        assert!(!pull.0.join("out").exists());
+        assert!(pull.staging_is_empty());
     }
 
     #[test]
@@ -835,9 +964,12 @@ mod tests {
         assert!(excludes(&["a{b".into()]).is_err());
     }
 
-    /// A guest that runs each script with the host's `sh` and `tar`, with `PATH` replaced when `path_env` is set.
+    /// A guest that runs each script with the host's `sh` and `tar`, with `PATH` replaced when `path_env` is set. With
+    /// `cut_read`, reading the archive fails after that many bytes; with `fail_status`, every status query fails.
     struct LocalGuest {
         path_env: Option<String>,
+        cut_read: Option<u64>,
+        fail_status: bool,
         children: RefCell<Vec<Child>>,
     }
 
@@ -845,8 +977,17 @@ mod tests {
         fn new(path_env: Option<String>) -> Self {
             Self {
                 path_env,
+                cut_read: None,
+                fail_status: false,
                 children: RefCell::new(Vec::new()),
             }
+        }
+
+        fn all_ended(&self) -> bool {
+            self.children
+                .borrow_mut()
+                .iter_mut()
+                .all(|c| c.try_wait().unwrap().is_some())
         }
 
         fn command(&self, script: &str, args: &[&str]) -> Command {
@@ -881,6 +1022,9 @@ mod tests {
         }
 
         fn status(&self, pid: i64) -> Result<Option<Ran>> {
+            if self.fail_status {
+                bail!("scripted status failure");
+            }
             let mut children = self.children.borrow_mut();
             let child = children
                 .iter_mut()
@@ -912,6 +1056,10 @@ mod tests {
 
         fn read(&self, path: &str, out: &mut dyn Write, max_bytes: u64) -> Result<u64> {
             let mut file = File::open(path)?;
+            if let Some(cut) = self.cut_read {
+                io::copy(&mut (&mut file).take(cut), out)?;
+                bail!("scripted read failure after {cut} bytes");
+            }
             let copied = io::copy(&mut (&mut file).take(max_bytes + 1), out)?;
             if copied > max_bytes {
                 bail!("{path} is larger than the pull limit (limits.max_pull_bytes)");
@@ -1127,5 +1275,34 @@ mod tests {
         assert!(err.contains("over the pull limit"), "{err}");
         assert!(bed.tmp_is_empty());
         assert!(bed.pull.staging_is_empty());
+    }
+
+    #[test]
+    fn a_read_cut_at_an_entry_boundary_fails_the_pull() {
+        let bed = Bed::new("cut");
+        let guest = LocalGuest {
+            // GNU tar's first entry is the root directory, a header alone: the unpacker sees a clean end here.
+            cut_read: Some(512),
+            ..LocalGuest::new(None)
+        };
+        let err = format!("{:#}", bed.pull(&guest, false, &LIMITS).unwrap_err());
+        assert!(err.contains("reading the archive from the guest"), "{err}");
+        assert!(!bed.pull.0.join("out").exists());
+        assert!(bed.pull.staging_is_empty());
+        assert!(bed.tmp_is_empty());
+    }
+
+    #[test]
+    fn a_failed_status_query_stops_tar() {
+        let bed = Bed::new("status");
+        let tools = Temp::new("status-tools");
+        let guest = LocalGuest {
+            fail_status: true,
+            ..LocalGuest::new(Some(fake_tar(&tools.0, "exec sleep 60")))
+        };
+        let err = format!("{:#}", bed.pull(&guest, false, &LIMITS).unwrap_err());
+        assert!(err.contains("whether tar finished"), "{err}");
+        assert!(guest.all_ended(), "tar still runs");
+        assert!(bed.tmp_is_empty());
     }
 }
