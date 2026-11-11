@@ -138,8 +138,10 @@ it is built.
      and the command and job conditions on Windows, with the Windows 11 guest `t-win11`
      ([probe note](../research/2026-11-11-windows-jobs-probe.md)).
 3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
-   passing them through its context, and reaches services in the guest. This covers copying from the VM, directory
-   sync, the guest's IP address and port forwarding. Each new path out of the guest needs a guardrail.
+   passing them through its context, and reaches services in the guest at its address. Design:
+   [`guest-transfer-design.md`](guest-transfer-design.md), accepted. It covers pulling files and directories into
+   operator-set pull directories, pushing directories, background copies, and `vm_addresses`, in two runs: Linux, then
+   directory transfers on Windows. Port forwarding is left to outcomes 5 and 6, where the host cannot route to a guest.
 4. **Seeing what happened.** When something fails in the guest, an agent can find out why. This covers console output
    buffered from VM start, guest resource usage, and events such as a crash or reboot.
 5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
@@ -172,5 +174,5 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 3, moving code and results in and out, needs its design first. Follow-up 18 comes soon, once its details are
-settled. Follow-ups 15 to 17 can land at any time.
+Outcome 3, moving code and results in and out, has an accepted design and needs its plan for run 1. Follow-up 18
+comes soon, once its details are settled. Follow-ups 15 to 17 can land at any time.
