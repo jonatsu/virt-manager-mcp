@@ -13,6 +13,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -30,10 +31,12 @@ use crate::transfer::CountingReader;
 const SETID_BITS: u32 = 0o6000;
 /// How long one guest step other than unpacking may take.
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long unpacking may take in the guest.
-const UNPACK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long unpacking, or deleting a replaced tree, may take in the guest.
+const LONG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How much of a guest step's stderr an error quotes.
 const STDERR_MAX: usize = 4096;
+/// The largest `.gitignore` or `.git/info/exclude` file a push reads.
+const RULES_MAX: u64 = 1 << 20;
 
 /// What a push selects.
 #[derive(Debug, Clone)]
@@ -105,12 +108,12 @@ pub struct Selection {
 
 /// Selects what a push of `tree` sends.
 pub fn select(tree: &Tree, options: &Options) -> Result<Selection> {
-    let parents = if options.respect_gitignore {
-        parent_rules(tree)?
+    let outer = if options.respect_gitignore {
+        outer_rules(tree)?
     } else {
         Vec::new()
     };
-    let selected = walk(tree, options, options.respect_gitignore, parents)?;
+    let selected = walk(tree, options, options.respect_gitignore, outer)?;
     let ignored = if options.respect_gitignore {
         let everything = walk(tree, options, false, Vec::new())?;
         non_dirs(&everything).saturating_sub(non_dirs(&selected))
@@ -127,43 +130,97 @@ fn non_dirs(entries: &[(PathBuf, bool)]) -> u64 {
     entries.iter().filter(|(_, is_dir)| !is_dir).count() as u64
 }
 
-/// The tree's paths with whether each is a directory. `gitignore` applies `.gitignore` and `.git/info/exclude` files
-/// in the tree and the `parents` rules of directories above it inside the share.
+/// The tree's paths with whether each is a directory. With `gitignore`, the walk applies the `.gitignore` files in
+/// the tree and the `outer` rules, and fails on an entry it cannot read. Without it, the walk only counts, so it
+/// skips what it cannot read.
 fn walk(
     tree: &Tree,
     options: &Options,
     gitignore: bool,
-    parents: Vec<Gitignore>,
+    outer: Vec<Gitignore>,
 ) -> Result<Vec<(PathBuf, bool)>> {
     let mut builder = WalkBuilder::new(&tree.path);
     // The standard filters also read the host user's global excludes and hidden-file rules, which differ between
-    // machines, and ripgrep's `.ignore` files.
+    // machines, and ripgrep's `.ignore` files. The walk's own `.git/info/exclude` support follows a `.git` file to
+    // any path it names, so `outer_rules` reads those files instead.
     builder
         .standard_filters(false)
         .git_ignore(gitignore)
-        .git_exclude(gitignore)
         .require_git(false)
         .follow_links(false)
         .overrides(overrides(&tree.path, &options.exclude)?)
         .sort_by_file_name(|a, b| a.cmp(b));
     let include_git = options.include_git;
+    let refused: Arc<Mutex<Option<anyhow::Error>>> = Arc::default();
+    let refusal = refused.clone();
     builder.filter_entry(move |entry| {
         if !include_git && entry.file_name() == ".git" {
             return false;
         }
         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-        !ignored_by(&parents, entry.path(), is_dir)
+        if ignored_by(&outer, entry.path(), is_dir) {
+            return false;
+        }
+        // The walk reads a directory's `.gitignore` once this returns true, so check it here.
+        if gitignore
+            && is_dir
+            && let Err(e) = rules_file(&entry.path().join(".gitignore"))
+        {
+            let mut refusal = refusal.lock().expect("no thread panics holding this lock");
+            refusal.get_or_insert(e);
+            return false;
+        }
+        true
     });
     let mut out = Vec::new();
     for item in builder.build() {
-        let entry = item.context("selecting the files to push")?;
+        let entry = match item {
+            Ok(entry) => entry,
+            Err(e) if gitignore => return Err(e).context("selecting the files to push"),
+            Err(_) => continue,
+        };
         if entry.depth() == 0 {
             continue;
         }
         let rel = entry.path().strip_prefix(&tree.path)?.to_path_buf();
         out.push((rel, entry.file_type().is_some_and(|t| t.is_dir())));
     }
+    if let Some(e) = refused
+        .lock()
+        .expect("no thread panics holding this lock")
+        .take()
+    {
+        return Err(e);
+    }
     Ok(out)
+}
+
+/// Whether the rules file at `path` exists, refusing one that is not a regular file of at most `RULES_MAX` bytes.
+/// Rules files are read by path, so a symlink to `/dev/zero`, a FIFO or a huge file there would exhaust memory or
+/// block the push; git itself refuses a symlinked `.gitignore`.
+fn rules_file(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_file() && m.len() <= RULES_MAX => Ok(true),
+        Ok(_) => bail!(
+            "{} is not a regular file of at most 1 MiB; a push reads only such rules files",
+            path.display()
+        ),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("checking {}", path.display())),
+    }
+}
+
+/// `dir/.git/info/exclude` when `.git` and `info` are real directories and the file passes `rules_file`.
+fn exclude_file(dir: &Path) -> Result<Option<PathBuf>> {
+    for sub in [".git", ".git/info"] {
+        match std::fs::symlink_metadata(dir.join(sub)) {
+            Ok(m) if m.file_type().is_dir() => {}
+            // A `.git` file belongs to a worktree whose exclude rules live elsewhere; they are not read.
+            _ => return Ok(None),
+        }
+    }
+    let path = dir.join(".git/info/exclude");
+    Ok(rules_file(&path)?.then_some(path))
 }
 
 /// `exclude` as override globs, which the walk treats as ignore rules because each starts with `!`.
@@ -177,22 +234,27 @@ fn overrides(root: &Path, exclude: &[String]) -> Result<Override> {
     Ok(builder.build()?)
 }
 
-/// The ignore rules of the share directory and each directory below it above the tree, outermost first.
-fn parent_rules(tree: &Tree) -> Result<Vec<Gitignore>> {
+/// The rules the walk does not read itself, outermost first: the `.gitignore` files of the share directory and each
+/// directory below it above the tree, and the `.git/info/exclude` files of those directories and the tree. Also
+/// checks the tree's own `.gitignore`, which the walk reads before any filter sees it. An unparsable line is left
+/// out, as git and the walk do.
+fn outer_rules(tree: &Tree) -> Result<Vec<Gitignore>> {
+    rules_file(&tree.path.join(".gitignore"))?;
+    let mut dirs = vec![tree.share.clone()];
+    for c in tree.path.strip_prefix(&tree.share)?.components() {
+        let next = dirs.last().expect("the share is first").join(c);
+        dirs.push(next);
+    }
+    let last = dirs.len() - 1;
     let mut rules = Vec::new();
-    let mut dir = tree.share.clone();
-    let below: Vec<_> = tree.path.strip_prefix(&tree.share)?.components().collect();
-    for i in 0..below.len() {
-        if i > 0 {
-            dir.push(below[i - 1]);
+    for (i, dir) in dirs.iter().enumerate() {
+        let mut builder = GitignoreBuilder::new(dir);
+        let gitignore = dir.join(".gitignore");
+        if i < last && rules_file(&gitignore)? {
+            let _partial = builder.add(&gitignore);
         }
-        let mut builder = GitignoreBuilder::new(&dir);
-        for file in [dir.join(".gitignore"), dir.join(".git/info/exclude")] {
-            if file.is_file()
-                && let Some(e) = builder.add(&file)
-            {
-                return Err(e).with_context(|| format!("reading {}", file.display()));
-            }
+        if let Some(exclude) = exclude_file(dir)? {
+            let _partial = builder.add(&exclude);
         }
         rules.push(builder.build()?);
     }
@@ -558,10 +620,9 @@ impl Guest for Agent<'_> {
         // The script is a constant and every path is a separate argument, so no path is ever parsed as shell code.
         let mut argv = vec!["-c".to_string(), script.to_string(), "sh".to_string()];
         argv.extend(args.iter().map(|a| (*a).to_string()));
-        let timeout = if step == Step::Unpack {
-            UNPACK_TIMEOUT
-        } else {
-            STEP_TIMEOUT
+        let timeout = match step {
+            Step::Unpack | Step::Cleanup => LONG_TIMEOUT,
+            _ => STEP_TIMEOUT,
         };
         let out = self.exec(&ExecSpec::new("/bin/sh", argv), timeout, STDERR_MAX)?;
         if out.timed_out {
@@ -592,12 +653,14 @@ else
   mkdir -p -- "$2" || exit 13
 fi"#;
 
-/// Unpacks archive `$1` into the new directory `$2`, without restoring the archive's owners.
-const UNPACK: &str = r#"mkdir -m 755 -- "$2" && tar -x -o -f "$1" -C "$2""#;
+/// Unpacks archive `$1` into the new directory `$2`, without restoring the archive's owners. `tar` replaces the
+/// shell, so stopping the step after a timeout stops `tar` too.
+const UNPACK: &str = r#"mkdir -m 755 -- "$2" && exec tar -x -o -f "$1" -C "$2""#;
 
 /// Moves the unpacked tree `$2` to the target `$1`. An existing target, allowed only when `$4` is 1, moves aside to
-/// `$3` first and is deleted once the new tree is in; when the new tree cannot move in, the old one moves back.
-const SWAP: &str = r#"t=$1 d=$2 o=$3
+/// `$3` first; when the new tree cannot move in, the old one moves back. `mv` moves a tree into a directory that
+/// appeared at the target meanwhile, so the script checks for that afterwards and moves it back out.
+const SWAP: &str = r#"t=$1 d=$2 o=$3 n=${2##*/}
 if [ -e "$t" ] || [ -L "$t" ]; then
   [ "$4" = 1 ] || exit 11
   if [ -L "$t" ] || [ ! -d "$t" ]; then exit 12; fi
@@ -606,13 +669,16 @@ if [ -e "$t" ] || [ -L "$t" ]; then
     mv -- "$o" "$t" || exit 18
     exit 15
   fi
-  rm -rf -- "$o"
+  if [ -e "$t/$n" ]; then mv -- "$t/$n" "$d"; exit 19; fi
 else
   mv -- "$d" "$t" || exit 16
-fi"#;
+  if [ -e "$t/$n" ]; then mv -- "$t/$n" "$d"; exit 11; fi
+fi
+exit 0"#;
 
-/// Deletes the push's temporary archive `$1` and unpacked tree `$2`; both are the push's own `.vmm-` names.
-const CLEANUP: &str = r#"rm -rf -- "$1" "$2""#;
+/// Deletes the push's own `.vmm-` entries named in its arguments. `rm` replaces the shell, so stopping the step
+/// after a timeout stops `rm` too.
+const CLEANUP: &str = r#"exec rm -rf -- "$@""#;
 
 /// Pushes the archive that `archive` writes to `target`. Nothing is sent when the target exists without `replace`,
 /// or exists as anything but a directory. A failure after that deletes the temporary entries and leaves the old tree.
@@ -651,21 +717,23 @@ pub fn push(
         archive,
         [&packed, &unpacked, &old],
     );
-    let cleanup = guest.run(Step::Cleanup, CLEANUP, &[&packed, &unpacked]);
+    // The old tree goes only once the new one is in place; after a failed swap it may be all that is left of it.
+    let mut leftovers = vec![packed.as_str(), unpacked.as_str()];
+    if result.is_ok() {
+        leftovers.push(&old);
+    }
+    let cleanup = guest.run(Step::Cleanup, CLEANUP, &leftovers);
     let mut summary = result?;
-    match cleanup {
-        Ok(ran) if ran.code == Some(0) => {}
-        Ok(ran) => {
-            summary.note = Some(format!(
-                "could not delete {packed} and {unpacked} in the guest: {}",
-                ran.describe()
-            ))
-        }
-        Err(e) => {
-            summary.note = Some(format!(
-                "could not delete {packed} and {unpacked} in the guest: {e:#}"
-            ))
-        }
+    let failure = match cleanup {
+        Ok(ran) if ran.code == Some(0) => None,
+        Ok(ran) => Some(ran.describe()),
+        Err(e) => Some(format!("{e:#}")),
+    };
+    if let Some(failure) = failure {
+        summary.note = Some(format!(
+            "the new tree is in place, but deleting {} in the guest failed: {failure}",
+            leftovers.join(", ")
+        ));
     }
     Ok(summary)
 }
@@ -720,6 +788,11 @@ fn send_and_swap(
             "could not move the new tree into {}, nor the old tree back; the old tree is at {old}: {}",
             target.path,
             ran.describe()
+        ),
+        Some(19) => bail!(
+            "{} appeared again in the guest while the old tree was moved aside; nothing was replaced, and the old \
+             tree is at {old}",
+            target.path
         ),
         _ => bail!(
             "could not move the new tree into {}; the old tree is unchanged: {}",
@@ -884,6 +957,10 @@ mod tests {
         symlink(".", t.join("b")).unwrap();
         symlink("b/../x", t.join("a")).unwrap();
         symlink("missing", t.join("dangling")).unwrap();
+        // Read as text, `a` names t/x; through `b` it really names the share's x, outside the tree. Both exist, so
+        // only the check of every hop can refuse it.
+        share.write("t/x", "inside");
+        share.write("x", "outside");
         let tree = tree(&share.0, "t");
 
         let (entries, summary) = archived(&tree);
@@ -969,10 +1046,12 @@ mod tests {
         assert!(t.temp("d").starts_with("/.vmm-"), "{}", t.temp("d"));
     }
 
-    /// A guest that runs each step's script with the host's `sh` and `tar`, failing the step named in `fail`.
+    /// A guest that runs each step's script with the host's `sh` and `tar`, failing the step named in `fail`, with
+    /// `PATH` replaced when `path_env` is set, and creating the directory `appear` just before the swap.
     struct LocalGuest {
         fail: Option<Step>,
         path_env: Option<String>,
+        appear: Option<PathBuf>,
     }
 
     impl LocalGuest {
@@ -980,6 +1059,7 @@ mod tests {
             Self {
                 fail: None,
                 path_env: None,
+                appear: None,
             }
         }
     }
@@ -988,6 +1068,11 @@ mod tests {
         fn run(&self, step: Step, script: &str, args: &[&str]) -> Result<Ran> {
             if self.fail == Some(step) {
                 bail!("scripted failure at {step:?}");
+            }
+            if step == Step::Swap
+                && let Some(dir) = &self.appear
+            {
+                fs::create_dir_all(dir)?;
             }
             let mut cmd = Command::new("/bin/sh");
             cmd.arg("-c").arg(script).arg("sh").args(args);
@@ -1105,7 +1190,7 @@ mod tests {
             let bed = Bed::new(&format!("fail-{step:?}"));
             let guest = LocalGuest {
                 fail: Some(step),
-                path_env: None,
+                ..LocalGuest::new()
             };
             let err = format!("{:#}", bed.push("app", true, &guest).unwrap_err());
             assert!(err.contains("scripted failure"), "{step:?}: {err}");
@@ -1187,6 +1272,7 @@ mod tests {
             let guest = LocalGuest {
                 fail: None,
                 path_env: Some(failing_mv(&tools.0, fail_at)),
+                appear: None,
             };
             let err = bed.push("app", true, &guest).unwrap_err().to_string();
             assert!(err.contains(why), "{fail_at:?}: {err}");
@@ -1202,6 +1288,7 @@ mod tests {
         let guest = LocalGuest {
             fail: None,
             path_env: Some(failing_mv(&tools.0, &[2, 3])),
+            appear: None,
         };
         let err = bed.push("app", true, &guest).unwrap_err().to_string();
         assert!(err.contains("the old tree is at"), "{err}");
@@ -1210,5 +1297,138 @@ mod tests {
         assert!(entries[0].starts_with(".vmm-") && entries[0].ends_with(".old"));
         let kept = bed.guest.0.join(&entries[0]).join("old.txt");
         assert_eq!(fs::read_to_string(kept).unwrap(), "old");
+    }
+
+    /// A `PATH` whose `name` is the shell script `body`, which may run the real tool as `$REAL`.
+    fn fake_tool(dir: &Path, name: &str, body: &str) -> String {
+        let real = Command::new("/bin/sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .unwrap();
+        let real = String::from_utf8(real.stdout).unwrap();
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(
+            bin.join(name),
+            format!("#!/bin/sh\nREAL={}\n{body}\n", real.trim()),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+    }
+
+    #[test]
+    fn a_rules_file_that_is_not_a_small_regular_file_refuses_the_push() {
+        let outside = Temp::new("rules-outside");
+        outside.write("ignore", "*.log\n");
+        for (name, rel) in [
+            ("root", ".gitignore"),
+            ("sub", "sub/.gitignore"),
+            ("parent", "../.gitignore"),
+            ("exclude", ".git/info/exclude"),
+        ] {
+            let share = Temp::new(&format!("rules-{name}"));
+            share.write("t/sub/f", "x");
+            let path = share.0.join("t").join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            symlink(outside.0.join("ignore"), &path).unwrap();
+            let tree = tree(&share.0, "t");
+            let err = format!("{:#}", select(&tree, &options()).err().unwrap());
+            assert!(err.contains("not a regular file"), "{name}: {err}");
+            let plain = Options {
+                respect_gitignore: false,
+                ..options()
+            };
+            assert!(select(&tree, &plain).is_ok(), "{name}");
+        }
+        let share = Temp::new("rules-big");
+        share.write("t/f", "x");
+        fs::write(share.0.join("t/.gitignore"), vec![b'#'; 2 << 20]).unwrap();
+        let err = format!(
+            "{:#}",
+            select(&tree(&share.0, "t"), &options()).err().unwrap()
+        );
+        assert!(err.contains("at most 1 MiB"), "{err}");
+    }
+
+    #[test]
+    fn an_unreadable_directory_that_gitignore_leaves_out_does_not_fail_the_push() {
+        let share = Temp::new("unreadable");
+        share.write("t/.gitignore", "data/\n");
+        share.write("t/data/locked/secret", "x");
+        share.write("t/keep", "x");
+        let locked = share.0.join("t/data/locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let selected = select(&tree(&share.0, "t"), &options());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let names: Vec<_> = selected
+            .unwrap()
+            .entries
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(names, [".gitignore", "keep"]);
+    }
+
+    #[test]
+    fn a_target_that_appears_before_the_swap_gets_nothing_moved_into_it() {
+        let bed = Bed::new("appear");
+        let guest = LocalGuest {
+            appear: Some(bed.guest.0.join("new")),
+            ..LocalGuest::new()
+        };
+        let err = bed.push("new", false, &guest).unwrap_err().to_string();
+        assert!(err.contains("appeared"), "{err}");
+        assert_eq!(fs::read_dir(bed.guest.0.join("new")).unwrap().count(), 0);
+        assert_eq!(bed.guest_entries(), ["app", "new"]);
+    }
+
+    #[test]
+    fn a_target_that_reappears_during_a_replace_keeps_the_old_tree_aside() {
+        let bed = Bed::new("reappear");
+        let tools = Temp::new("reappear-tools");
+        // The first `mv -- t o` moves the old tree aside; then something creates `t` again.
+        let count = tools.0.join("count");
+        let body = format!(
+            "n=$(($(cat {c} 2>/dev/null || echo 0) + 1)); echo $n > {c}\n\"$REAL\" \"$@\" || exit\n\
+             if [ $n = 1 ]; then mkdir \"$2\"; fi",
+            c = count.display()
+        );
+        let guest = LocalGuest {
+            path_env: Some(fake_tool(&tools.0, "mv", &body)),
+            ..LocalGuest::new()
+        };
+        let err = bed.push("app", true, &guest).unwrap_err().to_string();
+        assert!(
+            err.contains("appeared again") && err.contains("old tree is at"),
+            "{err}"
+        );
+        let entries = bed.guest_entries();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(fs::read_dir(bed.guest.0.join("app")).unwrap().count(), 0);
+        let old = bed.guest.0.join(&entries[0]).join("old.txt");
+        assert_eq!(fs::read_to_string(old).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_replace_whose_old_tree_cannot_be_deleted_still_succeeds_with_a_note() {
+        let bed = Bed::new("rm-fails");
+        let tools = Temp::new("rm-fails-tools");
+        let guest = LocalGuest {
+            path_env: Some(fake_tool(
+                &tools.0,
+                "rm",
+                "case \"$*\" in *.old*) echo 'rm: busy' >&2; exit 1;; esac\nexec \"$REAL\" \"$@\"",
+            )),
+            ..LocalGuest::new()
+        };
+        let summary = bed.push("app", true, &guest).unwrap();
+        let note = summary.note.unwrap();
+        assert!(
+            note.contains("new tree is in place") && note.contains("rm: busy"),
+            "{note}"
+        );
+        assert!(bed.guest.0.join("app/main.rs").exists());
+        assert!(!bed.guest.0.join("app/old.txt").exists());
     }
 }
