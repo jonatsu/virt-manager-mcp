@@ -112,8 +112,10 @@ impl Destination {
         let Some((name, parents)) = parts.split_last() else {
             bail!("{host_path} is a pull directory itself; name a path inside it");
         };
-        if parts[0] == STAGING {
-            bail!("{host_path} is inside the staging directory {STAGING}");
+        // Any component, not only the first: with one pull directory nested in another, the inner one's staging
+        // directory lies deeper in the outer one.
+        if parts.contains(&OsStr::new(STAGING)) {
+            bail!("{host_path} is inside a staging directory {STAGING}");
         }
         let pull_dir = rustix::fs::open(
             dir,
@@ -227,10 +229,12 @@ impl StagedFile {
             .expect("the staged file is open until commit");
         rustix::fs::fchmod(&file, Mode::from(FILE_MODE))
             .context("setting the pulled file's mode")?;
+        // On disk before the rename, so a host crash cannot leave a short file under the destination's name.
+        file.sync_all().context("flushing the pulled file")?;
         drop(file);
         let existing = dest.existing()?;
         if existing == Existing::Nothing || !overwrite {
-            return self.rename_new(dest);
+            return self.rename_new(dest, overwrite);
         }
         if existing != Existing::File {
             dest.check_file(overwrite)?;
@@ -245,7 +249,7 @@ impl StagedFile {
         ) {
             Ok(()) => {}
             // The old file went away meanwhile: place the new one as if it never existed.
-            Err(Errno::NOENT) => return self.rename_new(dest),
+            Err(Errno::NOENT) => return self.rename_new(dest, overwrite),
             Err(e) => return Err(e).context(format!("replacing {}", dest.path.display())),
         }
         // What came back must be the file that was checked; anything else moved in meanwhile, so put it back.
@@ -266,7 +270,7 @@ impl StagedFile {
         Ok(())
     }
 
-    fn rename_new(&self, dest: &Destination) -> Result<()> {
+    fn rename_new(&self, dest: &Destination, overwrite: bool) -> Result<()> {
         match rustix::fs::renameat_with(
             &self.staging,
             &self.id,
@@ -275,10 +279,15 @@ impl StagedFile {
             RenameFlags::NOREPLACE,
         ) {
             Ok(()) => Ok(()),
-            Err(Errno::EXIST) => bail!(
-                "{} appeared while the pull ran; pass overwrite: true to replace it",
-                dest.path.display()
-            ),
+            Err(Errno::EXIST) => {
+                // Name what appeared, as the check before the copy would have.
+                dest.check_file(overwrite)
+                    .context("it appeared while the pull ran")?;
+                bail!(
+                    "{} appeared while the pull ran; nothing was replaced, so pull again",
+                    dest.path.display()
+                )
+            }
             Err(e) => Err(e).context(format!("placing {}", dest.path.display())),
         }
     }
@@ -502,10 +511,54 @@ mod tests {
         let mut staged = dest.stage_file().unwrap();
         staged.file().write_all(b"new").unwrap();
         fs::write(dir.0.join("f"), "theirs").unwrap();
-        let err = staged.commit(&dest, false).unwrap_err().to_string();
+        let err = format!("{:#}", staged.commit(&dest, false).unwrap_err());
         assert!(err.contains("appeared"), "{err}");
+        assert!(err.contains("overwrite: true"), "{err}");
         assert_eq!(fs::read(dir.0.join("f")).unwrap(), b"theirs");
         assert!(dir.staging_is_empty());
+    }
+
+    #[test]
+    fn a_directory_that_appears_meanwhile_is_named_as_one() {
+        let dir = PullDir::new("appear-dir");
+        let dest = Destination::open(&dir.dirs(), &dir.path("f")).unwrap();
+        let mut staged = dest.stage_file().unwrap();
+        staged.file().write_all(b"new").unwrap();
+        fs::create_dir(dir.0.join("f")).unwrap();
+        let err = format!("{:#}", staged.commit(&dest, false).unwrap_err());
+        assert!(err.contains("is a directory"), "{err}");
+        assert!(!err.contains("overwrite: true"), "{err}");
+        assert!(dir.0.join("f").is_dir());
+        assert!(dir.staging_is_empty());
+    }
+
+    #[test]
+    fn a_file_that_vanishes_before_the_swap_is_placed_anew() {
+        let dir = PullDir::new("vanish");
+        pull(&dir, "f", b"old", false).unwrap();
+        let dest = Destination::open(&dir.dirs(), &dir.path("f")).unwrap();
+        let mut staged = dest.stage_file().unwrap();
+        staged.file().write_all(b"new").unwrap();
+        let remove = || fs::remove_file(dir.0.join("f")).unwrap();
+        staged.commit_with(&dest, true, &remove).unwrap();
+        assert_eq!(fs::read(dir.0.join("f")).unwrap(), b"new");
+        assert!(dir.staging_is_empty());
+    }
+
+    #[test]
+    fn a_nested_pull_directorys_staging_is_refused_too() {
+        let outer = PullDir::new("nested");
+        let inner = outer.0.join("q");
+        fs::create_dir(&inner).unwrap();
+        let dirs = vec![outer.0.clone(), inner];
+        for rel in [format!("q/{STAGING}/x"), format!("a/{STAGING}/x")] {
+            let err = match Destination::open(&dirs, &outer.path(&rel)) {
+                Ok(_) => panic!("{rel} accepted"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("staging"), "{rel}: {err}");
+        }
+        assert!(!outer.0.join("a").exists());
     }
 
     #[test]

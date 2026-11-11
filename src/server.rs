@@ -838,10 +838,11 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let config = &s.hv.config;
+            // The VM first, so a call naming a hidden or missing VM creates no directories on the host.
+            let dom = s.hv.domain(&p.vm)?;
             let dest = pull::Destination::open(&config.host_pull_dirs, &p.host_path)?;
             dest.check_file(p.overwrite)?;
             let claim = s.pulls.claim(dest.path())?;
-            let dom = s.hv.domain(&p.vm)?;
             let (timeout, max) = (
                 config.limits.agent_timeout_secs,
                 config.limits.max_pull_bytes,
@@ -2253,5 +2254,15 @@ mod tests {
         for tool in managed {
             assert!(hidden.contains(&tool), "{tool} stays visible");
         }
+    }
+
+    #[test]
+    fn copy_from_vm_shows_only_with_pull_directories() {
+        assert!(hidden_tools(&Config::default()).contains(&"copy_from_vm"));
+        let pulls = Config {
+            host_pull_dirs: vec!["/pull".into()],
+            ..Config::default()
+        };
+        assert!(!hidden_tools(&pulls).contains(&"copy_from_vm"));
     }
 }
