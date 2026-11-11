@@ -477,6 +477,7 @@ unit_windows() {
       run_case "${case}" "${config}"
     done
     check_pulled win-transfer win/vmm-win.txt $'windows transfer\n'
+    [[ ! -e ${WORK}/pull/win-dir ]] || record win-transfer failed "a refused Windows pull created pull/win-dir"
     check_pull_dir win-transfer
   else
     for case in "${cases[@]:1}"; do record "${case}" failed "the t-win11 agent did not answer"; done

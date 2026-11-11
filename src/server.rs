@@ -205,6 +205,15 @@ fn yes() -> bool {
     true
 }
 
+/// Refuses a Windows guest for a directory tool before the call touches the host or takes a transfer slot. Run 2
+/// adds directory transfers on Windows.
+fn refuse_windows(dom: &virt::domain::Domain, timeout_secs: i32, tool: &str) -> Result<()> {
+    if Agent::new(dom, timeout_secs).os()? == agent::GuestOs::Windows {
+        bail!("{tool} does not support Windows guests yet");
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct CopyDirFromVmParams {
     pub vm: String,
@@ -940,6 +949,8 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
+            let timeout = s.hv.config.limits.agent_timeout_secs;
+            refuse_windows(&dom, timeout, "copy_dir_to_vm")?;
             let tree = push::Tree::resolve(&s.hv.config.host_share_dirs, &p.host_path)?;
             let options = push::Options {
                 respect_gitignore: p.respect_gitignore,
@@ -948,14 +959,10 @@ impl VirtServer {
             };
             tree.check(&options)?;
             let target = push::Target::parse(&p.guest_path, p.replace)?;
-            let timeout = s.hv.config.limits.agent_timeout_secs;
             let guest = dom.clone();
             let replace = p.replace;
             s.copy(&p.vm, &dom, move |bytes| {
                 let agent = Agent::new(&guest, timeout);
-                if agent.os()? == agent::GuestOs::Windows {
-                    bail!("copy_dir_to_vm does not support Windows guests yet");
-                }
                 let summary = push::push(&agent, &target, replace, bytes, |out| {
                     push::write_archive(&tree, &push::select(&tree, &options)?, out)
                 })?;
@@ -994,6 +1001,8 @@ impl VirtServer {
             let config = &s.hv.config;
             // The VM first, so a call naming a hidden or missing VM creates no directories on the host.
             let dom = s.hv.domain(&p.vm)?;
+            let timeout = config.limits.agent_timeout_secs;
+            refuse_windows(&dom, timeout, "copy_dir_from_vm")?;
             if !p.guest_path.starts_with('/') {
                 bail!("{}: guest_path must be absolute", p.guest_path);
             }
@@ -1005,14 +1014,10 @@ impl VirtServer {
                 max_bytes: config.limits.max_pull_bytes,
                 max_entries: config.limits.max_pull_entries,
             };
-            let timeout = config.limits.agent_timeout_secs;
             let guest = dom.clone();
             s.copy(&p.vm, &dom, move |bytes| {
                 let _claim = claim;
                 let agent = Agent::new(&guest, timeout);
-                if agent.os()? == agent::GuestOs::Windows {
-                    bail!("copy_dir_from_vm does not support Windows guests yet");
-                }
                 let request = dirpull::Request {
                     guest_path: &p.guest_path,
                     dest: &dest,

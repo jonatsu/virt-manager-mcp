@@ -41,6 +41,30 @@
     }
   },
   {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "C:\\Windows\\Temp\\vmm-tree"
+    },
+    "expect": {
+      "error": true,
+      "contains": "copy_dir_to_vm does not support Windows guests yet"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "t-win11",
+      "guest_path": "C:\\Windows\\Temp",
+      "host_path": "${pull}/win-dir/sub/temp"
+    },
+    "expect": {
+      "error": true,
+      "contains": "copy_dir_from_vm does not support Windows guests yet"
+    }
+  },
+  {
     "tool": "exec",
     "args": {
       "vm": "t-win11",
