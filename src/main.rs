@@ -8,6 +8,7 @@ mod hypervisor;
 mod jobs;
 mod manage;
 mod mouse;
+mod pulldir;
 mod seed;
 mod server;
 mod sweep;
@@ -147,6 +148,19 @@ async fn run() -> Result<()> {
 
     if let Some(Command::Sweep) = cli.command {
         return sweep::run_command(&state);
+    }
+    if !config.host_pull_dirs.is_empty() {
+        let pools = state.hv.pool_targets()?;
+        let pools: Vec<(String, Vec<PathBuf>)> = pools
+            .into_iter()
+            .map(|(name, path)| (format!("storage pool {name}"), vec![path]))
+            .collect();
+        let named: Vec<(&str, &[PathBuf])> = pools
+            .iter()
+            .map(|(name, paths)| (name.as_str(), paths.as_slice()))
+            .collect();
+        config::refuse_overlaps(&config.host_pull_dirs, &named)?;
+        pulldir::prepare(&config.host_pull_dirs)?;
     }
     sweep::spawn(state.clone())?;
 

@@ -1,5 +1,6 @@
 //! libvirt connection handling and access control.
 
+use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -61,6 +62,22 @@ impl Hypervisor {
             *conn = open(&self.config.uri)?;
         }
         f(&conn)
+    }
+
+    /// The target path of every storage pool on the connection that has one, by pool name, resolved where it exists.
+    /// Pull directories may not overlap any of them, so a guest cannot replace a VM's disk.
+    pub fn pool_targets(&self) -> Result<Vec<(String, PathBuf)>> {
+        self.with_conn(|conn| {
+            let mut targets = Vec::new();
+            for pool in conn.list_all_storage_pools(0)? {
+                let name = pool.get_name()?;
+                let xml = pool.get_xml_desc(0)?;
+                if let Some(path) = pool_target(&xml)? {
+                    targets.push((name, path.canonicalize().unwrap_or(path)));
+                }
+            }
+            Ok(targets)
+        })
     }
 
     /// Looks up a VM by name, enforcing the allow-list. VMs created by this server
@@ -216,4 +233,41 @@ fn open(uri: &str) -> Result<Connect> {
             e.message()
         )
     })
+}
+
+/// The `<target><path>` of a storage pool's XML, if it has one.
+fn pool_target(xml: &str) -> Result<Option<PathBuf>> {
+    let doc = roxmltree::Document::parse(xml).context("parsing storage pool XML")?;
+    Ok(doc
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("target"))
+        .and_then(|t| t.children().find(|n| n.has_tag_name("path")))
+        .and_then(|p| p.text())
+        .map(|p| PathBuf::from(p.trim()))
+        .filter(|p| p.is_absolute()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_target_reads_the_target_path_only() {
+        let dir = r#"<pool type="dir"><name>agent-vms</name><source/>
+            <target><path>/var/lib/libvirt/images/agent-vms</path></target></pool>"#;
+        assert_eq!(
+            pool_target(dir).unwrap(),
+            Some(PathBuf::from("/var/lib/libvirt/images/agent-vms"))
+        );
+        let no_target =
+            r#"<pool type="rbd"><name>ceph</name><source><name>rbd</name></source></pool>"#;
+        assert_eq!(pool_target(no_target).unwrap(), None);
+        let source_path = r#"<pool type="logical"><name>vg</name>
+            <source><device path="/dev/sdb"/></source><target><path>/dev/vg</path></target></pool>"#;
+        assert_eq!(
+            pool_target(source_path).unwrap(),
+            Some(PathBuf::from("/dev/vg"))
+        );
+    }
 }

@@ -20,6 +20,11 @@ power_vms = ["fedora-test"]
 # that directory is / or your home directory.
 share_project_dir = false
 
+# Host directories that pulls from a guest may write into. Empty (the default) hides the pull
+# tools. The server refuses to start when one overlaps a share directory, the project directory,
+# an ISO directory or a libvirt storage pool, because the guest controls what a pull writes.
+# host_pull_dirs = ["/home/me/vm-pulls"]
+
 # When true, only list_vms, read_file, list_dir, stat_path and the console_open/
 # console_read/console_close tools are exposed.
 read_only = false

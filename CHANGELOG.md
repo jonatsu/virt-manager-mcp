@@ -15,6 +15,9 @@ Each release's section lists what changed for people who run the server and for 
   64 MiB of its output waits in memory; beyond that, the log records how many bytes were dropped.
 - `wait_for`'s `command`, `job_done` and `job_output` conditions work on Windows guests. The `command` condition runs
   its command with PowerShell, as `exec` does by default, and holds when it exits 0.
+- The `host_pull_dirs` setting names host directories that pulls from a guest may write into. The server refuses to
+  start when one overlaps a share directory, the shared project directory, an ISO directory or any libvirt storage
+  pool, or sits on a filesystem without `renameat2` support. Each gets a private `.vmm-staging/` directory.
 
 ### Fixed
 

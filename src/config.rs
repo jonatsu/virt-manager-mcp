@@ -23,6 +23,9 @@ pub struct Config {
     /// Also lets `copy_to_vm` read from the directory the server was started in.
     /// Claude Code starts stdio servers in the session's project directory.
     pub share_project_dir: bool,
+    /// Host directories that pulls from a guest may write into. Empty by default, which hides the pull tools. A
+    /// pull directory may not overlap a share directory, an ISO directory or a storage pool.
+    pub host_pull_dirs: Vec<PathBuf>,
     /// Disables command execution, file writes, console input, keyboard input,
     /// screenshots and guest info queries.
     pub read_only: bool,
@@ -147,6 +150,7 @@ impl Default for Config {
             power_vms: Vec::new(),
             host_share_dirs: Vec::new(),
             share_project_dir: false,
+            host_pull_dirs: Vec::new(),
             read_only: false,
             limits: Limits::default(),
             http: Http::default(),
@@ -275,6 +279,17 @@ impl Config {
                 Err(e) => tracing::warn!("share_project_dir: {e:#}"),
             }
         }
+        canonicalize_dirs(&mut self.host_pull_dirs, "host_pull_dirs")?;
+        refuse_overlaps(
+            &self.host_pull_dirs,
+            &[
+                (
+                    "host_share_dirs (or the shared project directory)",
+                    &self.host_share_dirs,
+                ),
+                ("manage.iso_dirs", &self.manage.iso_dirs),
+            ],
+        )?;
         Ok(())
     }
 
@@ -325,6 +340,27 @@ fn canonicalize_dirs(dirs: &mut [PathBuf], key: &str) -> Result<()> {
             bail!("{key}: {} is not a directory", dir.display());
         }
         *dir = real;
+    }
+    Ok(())
+}
+
+/// Refuses a pull directory that equals, contains or lies inside any of `others`, each a named list of canonical
+/// directories. A guest writes into pull directories, so it must not reach what a push reads, an install image, or a
+/// VM's disk.
+pub fn refuse_overlaps(pull_dirs: &[PathBuf], others: &[(&str, &[PathBuf])]) -> Result<()> {
+    for pull in pull_dirs {
+        for (key, dirs) in others {
+            if let Some(other) = dirs
+                .iter()
+                .find(|d| pull.starts_with(d) || d.starts_with(pull))
+            {
+                bail!(
+                    "host_pull_dirs: {} overlaps {} in {key}; a guest could write there",
+                    pull.display(),
+                    other.display()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -427,6 +463,71 @@ mod tests {
         assert!(config.share_file(&s(&share.join("sub"))).is_err());
         assert!(config.share_file("sub/ok.txt").is_err());
         assert!(config.iso_file(&s(&share.join("sub/ok.txt"))).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A guest writes into pull directories, so each overlap with a directory a push reads, an ISO directory or a
+    /// storage pool is refused, in either direction.
+    #[test]
+    fn pull_dirs_may_not_overlap_shares_isos_or_pools() {
+        let root =
+            std::env::temp_dir().join(format!("virtmanager-mcp-pull-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["a/inner", "b", "c"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let (a, inner, b, c) = (
+            root.join("a"),
+            root.join("a/inner"),
+            root.join("b"),
+            root.join("c"),
+        );
+        let config = |pull: &Path, share: &Path, iso: &Path| Config {
+            host_pull_dirs: vec![pull.to_path_buf()],
+            host_share_dirs: vec![share.to_path_buf()],
+            manage: Manage {
+                iso_dirs: vec![iso.to_path_buf()],
+                ..Manage::default()
+            },
+            ..Config::default()
+        };
+
+        config(&c, &a, &b).validate().unwrap();
+        for (pull, share, iso, key) in [
+            (&a, &a, &b, "host_share_dirs"),
+            (&inner, &a, &b, "host_share_dirs"),
+            (&a, &inner, &b, "host_share_dirs"),
+            (&a, &b, &a, "manage.iso_dirs"),
+            (&inner, &b, &a, "manage.iso_dirs"),
+            (&a, &b, &inner, "manage.iso_dirs"),
+        ] {
+            let err = config(pull, share, iso).validate().unwrap_err().to_string();
+            assert!(err.contains(key), "{} with {key}: {err}", pull.display());
+        }
+
+        // A pull directory reached through a symlink is compared by its real path.
+        std::os::unix::fs::symlink(&a, root.join("link")).unwrap();
+        let err = config(&root.join("link"), &a, &b)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("host_share_dirs"), "{err}");
+
+        // Storage pool targets are checked at start, through the same function.
+        let pool = [("storage pool agent-vms", std::slice::from_ref(&inner))];
+        let err = refuse_overlaps(std::slice::from_ref(&a), &pool)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("storage pool agent-vms"), "{err}");
+        refuse_overlaps(std::slice::from_ref(&c), &pool).unwrap();
+
+        // A missing pull directory is refused before anything else.
+        let err = config(&root.join("missing"), &a, &b)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("host_pull_dirs"), "{err}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
