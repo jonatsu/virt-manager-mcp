@@ -3,8 +3,7 @@
 Status: accepted, with the recommended lifetime policy and Debian 13 as the first template, and revised for two
 plan-critic reviews, which settled the reset, expiry-order and lifetime-cap choices. Once built, the code wins and this
 design follows it.
-Basis: roadmap outcome 1 in [`fork-roadmap.md`](fork-roadmap.md), shaped by the confirmed draft
-[`disposable-vms-draft.md`](disposable-vms-draft.md), with evidence in
+Basis: roadmap outcome 1 in [`fork-roadmap.md`](fork-roadmap.md), with evidence in
 [`2026-11-09-cloud-init-overlay-probe.md`](../research/2026-11-09-cloud-init-overlay-probe.md).
 
 ## Summary

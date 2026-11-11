@@ -218,6 +218,13 @@ Open questions for the designs:
 
 - Outcome 5: should it bring its own network policy, or wait for outcome 6?
 
+Parked ideas, which no outcome includes yet:
+
+- **Agents promote a configured VM to a template.** It builds on outcome 1, but adds a trust boundary, because a bad
+  template spreads to every VM built on it.
+- **The server builds templates from a cloud image URL and checksum.** It means trusting outside images, and the first
+  boot needs network access.
+
 ## Next
 
 The baseline, the defects, outcome 1 and follow-ups 7 to 9 are done. Outcome 1 was re-verified in full at `aa44f14`,
