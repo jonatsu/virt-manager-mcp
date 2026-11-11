@@ -26,7 +26,8 @@ Each release's section lists what changed for people who run the server and for 
   hides it.
 - The `host_pull_dirs` setting names host directories that pulls from a guest may write into. The server refuses to
   start when one overlaps a share directory, the shared project directory, an ISO directory or any libvirt storage
-  pool, or sits on a filesystem without `renameat2` support. Each gets a private `.vmm-staging/` directory.
+  pool, or sits on a filesystem without `renameat2` support. Each gets a private `.vmm-staging/` directory. Pull
+  directories may nest, but a pull never replaces one, or a directory that holds one.
 - `copy_dir_to_vm` pushes a host directory from a share into a Linux guest that has `tar`, such as a checkout. It
   follows `.gitignore` rules in the tree and in its parent directories inside the share, leaves `.git` out, and takes
   extra `exclude` patterns. A symlink goes along only when it stays inside the tree; other links, FIFOs, sockets and

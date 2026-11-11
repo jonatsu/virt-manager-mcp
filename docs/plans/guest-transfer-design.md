@@ -255,7 +255,7 @@ Each needs a test that shows the refusal still happens, as `CLAUDE.md` asks for 
 - `src/addresses.rs`: `vm_addresses`, its sources and their merge.
 - `src/agent.rs`: streaming reads to a writer, mirroring `write_from`, and a file's size.
 - `src/hypervisor.rs`: the storage pools' target paths for the overlap check.
-- `src/server.rs`: the five tools, `copy_to_vm` moved onto transfers, and the read-only rules.
+- `src/server.rs`: the four new tools, `copy_to_vm` moved onto transfers, and the read-only rules.
 
 The run adds three crates: `tar`, `ignore`, and `rustix` for `openat`, `fchmod` and `renameat_with`. Each passes
 `cargo deny check advisories`.
