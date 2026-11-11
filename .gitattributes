@@ -22,6 +22,10 @@ Cargo.lock text linguist-generated=true
 *.bat      text eol=crlf
 *.cmd      text eol=crlf
 
+# The server compiles these PowerShell scripts in with include_str!, so every checkout keeps them LF and builds the
+# same bytes, whatever a global attributes file says about *.ps1.
+src/jobs/*.ps1 text eol=lf
+
 # Serialization
 *.env      text eol=lf
 *.json     text
