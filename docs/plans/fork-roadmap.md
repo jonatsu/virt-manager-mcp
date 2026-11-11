@@ -104,6 +104,12 @@ Reviews of earlier work found these. None blocks the server's use.
     restarts left libvirt reporting the channel disconnected until a power cycle
     ([probe note](../research/2026-11-11-windows-jobs-probe.md)). Retry with a newer `virtio-win`, and report it
     upstream if it persists. `win-jobs-restart.json` reproduces it.
+17. **`exec` ignores `args` given with `command`.** It runs the command line without the arguments and reports no
+    error, so `sha256sum` with `args` hashed empty input
+    ([probe note](../research/2026-11-11-transfer-probe.md)). Refuse the combination, with a test.
+18. **Change how the OCR models are obtained.** Today the operator runs `scripts/fetch-ocr-models.sh` by hand and sets
+    `display.ocr_models` ([how-to](../how-to/ocr-models.md)). The logic changes slightly; the details are still to
+    come, so settle them before this is planned. Handle it soon, ahead of the remaining outcomes.
 
 ## Outcomes
 
@@ -166,4 +172,5 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 3, moving code and results in and out, needs its design first. Follow-ups 15 and 16 can land at any time.
+Outcome 3, moving code and results in and out, needs its design first. Follow-up 18 comes soon, once its details are
+settled. Follow-ups 15 to 17 can land at any time.
