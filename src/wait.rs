@@ -443,7 +443,14 @@ impl Guest for LiveGuest {
         max_bytes: usize,
         timeout_secs: i32,
     ) -> Result<Option<jobs::Read>> {
-        jobs::read(&Agent::new(&self.0, timeout_secs), job, since, max_bytes)
+        // Job conditions refuse Windows guests before they read, until the wait loop learns the guest's system.
+        jobs::read(
+            &Agent::new(&self.0, timeout_secs),
+            GuestOs::Linux,
+            job,
+            since,
+            max_bytes,
+        )
     }
 
     fn capture(&self, screen: u32) -> Result<RgbImage> {

@@ -5,6 +5,14 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+### Added
+
+- Background jobs on Windows guests: `job_start`, `job_read`, `job_stop` and `job_list` run a PowerShell command as
+  `SYSTEM`, started through WMI so it survives an agent restart, with UTF-8 output that can be read while the job
+  runs. The job directory under `C:\ProgramData\virtmanager-mcp` must be owned by `SYSTEM` or `Administrators` and
+  grant access to no one else, or `job_start` refuses. `job_stop` ends a Windows job's process tree at once, with or
+  without `force`, and the job then reads "ended without status".
+
 ### Fixed
 
 - `exec` with PowerShell on Windows no longer fills stderr with CLIXML progress records such as "Preparing modules

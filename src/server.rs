@@ -242,7 +242,11 @@ pub struct ConsoleReadParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct JobStartParams {
     pub vm: String,
-    /// Shell command (`/bin/sh`) to run in the background as root. It is stored in the guest as data and run as is.
+    /// Command to run in the background: a `/bin/sh` command as root on Linux, a PowerShell script as SYSTEM on
+    /// Windows. It is stored in the guest as data and run as is. On Windows the exit code is the one passed to `exit`,
+    /// 1 after an uncaught error, and otherwise 0, even after a failing native program: end with
+    /// `exit $LASTEXITCODE` to pass a program's code on, and `exit [int](-not (...))` for a test, since `$false` is
+    /// not a failure.
     pub command: String,
 }
 
@@ -263,7 +267,8 @@ pub struct JobStopParams {
     pub vm: String,
     /// The job ID that job_start returned.
     pub job: String,
-    /// Send SIGKILL instead of SIGTERM. A killed job records no exit code and reads "ended without status".
+    /// Send SIGKILL instead of SIGTERM. A killed job records no exit code and reads "ended without status". Windows
+    /// has no SIGTERM, so a Windows job's process tree always ends at once, whatever this says.
     #[serde(default)]
     pub force: bool,
 }
@@ -1104,13 +1109,14 @@ impl VirtServer {
             destructive_hint = true,
             idempotent_hint = false
         ),
-        description = "Start a long-running shell command in a Linux guest as a background job, and return its job \
-        ID at once. The job runs detached from the guest agent (through systemd-run, or setsid without systemd), so \
-        it survives an agent restart and a server restart. Its stdout and stderr go to one log; read it with \
-        job_read, stop it with job_stop, and find jobs again with job_list. A reset or deletion of the VM removes its \
-        jobs. Where the guest's env lacks --default-signal (busybox, coreutils before 9), the job starts with \
-        SIGINT and SIGQUIT ignored. Under systemd, SIGPIPE keeps its default action, so pipelines such as \
-        `cmd | head` end quietly."
+        description = "Start a long-running command in a Linux or Windows guest as a background job, and return its \
+        job ID at once. The job runs detached from the guest agent (on Linux through systemd-run, or setsid without \
+        systemd; on Windows through WMI), so it survives an agent restart and a server restart. Its stdout and stderr \
+        go to one log; read it with job_read, stop it with job_stop, and find jobs again with job_list. A reset or \
+        deletion of the VM removes its jobs. On Linux the command runs with /bin/sh as root; where the guest's env \
+        lacks --default-signal (busybox, coreutils before 9), the job starts with SIGINT and SIGQUIT ignored, and \
+        under systemd SIGPIPE keeps its default action, so pipelines such as `cmd | head` end quietly. On Windows \
+        the command is a PowerShell script run as SYSTEM in session 0, without a desktop, and its output is UTF-8."
     )]
     async fn job_start(
         &self,
@@ -1119,8 +1125,8 @@ impl VirtServer {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let agent = s.agent(&dom);
-            jobs::require_linux(&agent)?;
-            let (id, how) = jobs::start(&agent, &p.command)?;
+            let os = agent.os()?;
+            let (id, how) = jobs::start(&agent, os, &p.command)?;
             Ok(vec![json_block(
                 &json!({ "job": id.hyphenated().to_string(), "started": how }),
             )?])
@@ -1146,9 +1152,9 @@ impl VirtServer {
             let id = jobs::parse_id(&p.job)?;
             let dom = s.hv.domain(&p.vm)?;
             let agent = s.agent(&dom);
-            jobs::require_linux(&agent)?;
+            let os = agent.os()?;
             let max = p.max_bytes.unwrap_or(s.hv.config.limits.max_output_bytes);
-            let r = jobs::read(&agent, &id, p.since, max)?
+            let r = jobs::read(&agent, os, &id, p.since, max)?
                 .ok_or_else(|| anyhow!("no job {id} in this guest"))?;
             let meta = json!({
                 "job": p.job,
@@ -1170,8 +1176,10 @@ impl VirtServer {
             destructive_hint = true,
             idempotent_hint = true
         ),
-        description = "Stop a running job: SIGTERM to its process group, which still records the exit code, or \
-        SIGKILL with force. Refused when the job's process is no longer the one it started."
+        description = "Stop a running job. On Linux: SIGTERM to its process group, which still records the exit \
+        code, or SIGKILL with force. On Windows: its process tree ends at once (taskkill /T /F), with or without \
+        force, and the job reads \"ended without status\"; processes it detached from its tree keep running. Refused \
+        when the job's process is no longer the one it started."
     )]
     async fn job_stop(
         &self,
@@ -1181,8 +1189,10 @@ impl VirtServer {
             let id = jobs::parse_id(&p.job)?;
             let dom = s.hv.domain(&p.vm)?;
             let agent = s.agent(&dom);
-            jobs::require_linux(&agent)?;
-            Ok(vec![ContentBlock::text(jobs::stop(&agent, &id, p.force)?)])
+            let os = agent.os()?;
+            Ok(vec![ContentBlock::text(jobs::stop(
+                &agent, os, &id, p.force,
+            )?)])
         })
         .await
     }
@@ -1193,7 +1203,7 @@ impl VirtServer {
             destructive_hint = false,
             idempotent_hint = true
         ),
-        description = "List the jobs in a Linux guest with their state and start time (seconds since the epoch)."
+        description = "List the jobs in a guest with their state and start time (seconds since the epoch)."
     )]
     async fn job_list(
         &self,
@@ -1202,8 +1212,8 @@ impl VirtServer {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let agent = s.agent(&dom);
-            jobs::require_linux(&agent)?;
-            Ok(vec![json_block(&jobs::list(&agent)?)?])
+            let os = agent.os()?;
+            Ok(vec![json_block(&jobs::list(&agent, os)?)?])
         })
         .await
     }
@@ -1773,7 +1783,7 @@ impl ServerHandler for VirtServer {
                  serial console; screenshot/send_keys/type_text use the graphical display. To wait for a prompt, a \
                  boot, a command or a job, use wait_for instead of sleeping and rereading: it returns on the first \
                  of several conditions, so list failure signs such as \"Kernel panic\" next to the success you \
-                 expect. For work longer than an exec timeout on a Linux guest, use job_start, then job_read or \
+                 expect. For work longer than an exec timeout, use job_start, then job_read or \
                  wait_for with job_done or job_output; job_list finds jobs again.{extra}"
             ))
     }

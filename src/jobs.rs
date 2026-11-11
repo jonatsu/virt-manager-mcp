@@ -1,8 +1,11 @@
-//! Background jobs in Linux guests: the launcher, the job file layout, and how a job's state is read.
+//! Background jobs in Linux and Windows guests: the launchers, the job file layout, and how a job's state is read.
 //!
-//! A job lives in `/var/lib/virtmanager-mcp/jobs/<id>/` in the guest: `cmd` holds the command, `out` its merged
-//! stdout and stderr, `pid` the wrapper's PID and start time, and `exit` the exit code once it ends. The guest-side
-//! scripts are fixed texts in `src/jobs/`; ids and commands reach them only as arguments and stdin.
+//! On Linux a job lives in `/var/lib/virtmanager-mcp/jobs/<id>/` in the guest: `cmd` holds the command, `out` its
+//! merged stdout and stderr, `pid` the wrapper's PID and start time, and `exit` the exit code once it ends. On Windows
+//! it lives in `C:\ProgramData\virtmanager-mcp\jobs\<id>\`: `cmd.ps1` holds the PowerShell command, `out` the merged
+//! output, `pid` the wrapper's process ID and start time, `exit` the exit code, and `lock` a file the wrapper holds
+//! open while it runs. The guest-side scripts are fixed texts in `src/jobs/`; IDs reach them only as arguments or
+//! quoted literals, and commands only as stdin.
 
 use std::time::Duration;
 
@@ -10,19 +13,28 @@ use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::agent::{Agent, ExecSpec, GuestOs};
+use crate::agent::{Agent, ExecSpec, GuestOs, powershell, ps_quote};
 
 const LAUNCHER: &str = include_str!("jobs/launcher.sh");
 const WRAPPER: &str = include_str!("jobs/wrapper.sh");
 const STOP: &str = include_str!("jobs/stop.sh");
 const LIST: &str = include_str!("jobs/list.sh");
+const WIN_LAUNCHER: &str = include_str!("jobs/launcher.ps1");
+const WIN_WRAPPER: &str = include_str!("jobs/wrapper.ps1");
+const WIN_STOP: &str = include_str!("jobs/stop.ps1");
+const WIN_LIST: &str = include_str!("jobs/list.ps1");
 
 /// Where jobs live in a Linux guest.
 pub const JOBS_DIR: &str = "/var/lib/virtmanager-mcp/jobs";
+/// Where jobs live in a Windows guest.
+pub const WIN_JOBS_DIR: &str = r"C:\ProgramData\virtmanager-mcp\jobs";
 /// Time the launcher and the stop and list helpers get.
 const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
 /// Most output a helper may return.
 const HELPER_OUTPUT: usize = 256 * 1024;
+/// How often, and how long apart, a Windows read retries the log while the wrapper is appending to it.
+const BUSY_TRIES: u32 = 10;
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
 
 /// A job ID: a UUID v4 in its hyphenated lower-case form, so it can never become another path.
 pub fn parse_id(id: &str) -> Result<Uuid> {
@@ -33,45 +45,45 @@ pub fn parse_id(id: &str) -> Result<Uuid> {
     Ok(parsed)
 }
 
-fn job_dir(id: &Uuid) -> String {
-    format!("{JOBS_DIR}/{}", id.hyphenated())
-}
-
-/// Refuses guests other than Linux; Windows jobs come later.
-pub fn require_linux(agent: &Agent) -> Result<()> {
-    linux_only(agent.os()?)
-}
-
-fn linux_only(os: GuestOs) -> Result<()> {
+fn job_dir(os: GuestOs, id: &Uuid) -> String {
     match os {
-        GuestOs::Linux => Ok(()),
-        GuestOs::Windows => bail!(
-            "jobs are not available for Windows guests yet; they come with Windows job support (live-interaction \
-             run 3)"
-        ),
+        GuestOs::Linux => format!("{JOBS_DIR}/{}", id.hyphenated()),
+        GuestOs::Windows => format!(r"{WIN_JOBS_DIR}\{}", id.hyphenated()),
     }
 }
 
-/// The `guest-exec` call that starts job `id` running `command`. The command travels on stdin.
-fn launch_spec(id: &Uuid, command: &str) -> ExecSpec {
-    let mut spec = ExecSpec::new(
-        "/bin/sh",
-        [
-            "-c",
-            LAUNCHER,
-            "launcher",
-            &id.hyphenated().to_string(),
-            WRAPPER,
-        ],
-    );
+/// A path inside job `id`'s directory.
+fn job_file(os: GuestOs, id: &Uuid, name: &str) -> String {
+    match os {
+        GuestOs::Linux => format!("{}/{name}", job_dir(os, id)),
+        GuestOs::Windows => format!(r"{}\{name}", job_dir(os, id)),
+    }
+}
+
+/// The `guest-exec` call that starts job `id` running `command`. The command travels on stdin. On Windows the ID and
+/// the wrapper's text are set as quoted PowerShell literals before the fixed launcher text.
+fn launch_spec(os: GuestOs, id: &Uuid, command: &str) -> ExecSpec {
+    let id = id.hyphenated().to_string();
+    let mut spec = match os {
+        GuestOs::Linux => ExecSpec::new("/bin/sh", ["-c", LAUNCHER, "launcher", &id, WRAPPER]),
+        GuestOs::Windows => powershell(&format!(
+            "$id = {}\n$wrapper = {}\n{WIN_LAUNCHER}",
+            ps_quote(&id),
+            ps_quote(WIN_WRAPPER)
+        )),
+    };
     spec.stdin = Some(command.as_bytes().to_vec());
     spec
 }
 
 /// Starts `command` as a new job and returns its ID and how it started.
-pub fn start(agent: &Agent, command: &str) -> Result<(Uuid, String)> {
+pub fn start(agent: &Agent, os: GuestOs, command: &str) -> Result<(Uuid, String)> {
     let id = Uuid::new_v4();
-    let out = agent.exec(&launch_spec(&id, command), HELPER_TIMEOUT, HELPER_OUTPUT)?;
+    let out = agent.exec(
+        &launch_spec(os, &id, command),
+        HELPER_TIMEOUT,
+        HELPER_OUTPUT,
+    )?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     match out.exit_code {
         Some(0) => Ok((id, text)),
@@ -87,15 +99,31 @@ pub fn start(agent: &Agent, command: &str) -> Result<(Uuid, String)> {
     }
 }
 
-/// Signals a running job's process group: TERM, or KILL with `force`.
-pub fn stop(agent: &Agent, id: &Uuid, force: bool) -> Result<String> {
+/// The `guest-exec` call that stops job `id`: on Linux it signals the process group with `number`, on Windows it ends
+/// the process tree.
+fn stop_spec(os: GuestOs, id: &Uuid, number: &str) -> ExecSpec {
+    match os {
+        GuestOs::Linux => ExecSpec::new("/bin/sh", ["-c", STOP, "stop", &job_dir(os, id), number]),
+        GuestOs::Windows => powershell(&format!(
+            "$id = {}\n{WIN_STOP}",
+            ps_quote(&id.hyphenated().to_string())
+        )),
+    }
+}
+
+/// Stops a running job. On Linux it signals the process group: TERM, or KILL with `force`. On Windows a console
+/// process has no equivalent of TERM, so it always ends the process tree, and the job reads "ended without status".
+pub fn stop(agent: &Agent, os: GuestOs, id: &Uuid, force: bool) -> Result<String> {
     let (name, number) = if force { ("KILL", "9") } else { ("TERM", "15") };
-    let dir = job_dir(id);
-    let spec = ExecSpec::new("/bin/sh", ["-c", STOP, "stop", &dir, number]);
-    let out = agent.exec(&spec, HELPER_TIMEOUT, HELPER_OUTPUT)?;
+    let out = agent.exec(&stop_spec(os, id, number), HELPER_TIMEOUT, HELPER_OUTPUT)?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     match out.exit_code {
-        Some(0) => Ok(format!("sent {name} to job {id}")),
+        Some(0) => Ok(match os {
+            GuestOs::Linux => format!("sent {name} to job {id}"),
+            GuestOs::Windows => format!(
+                "ended job {id}'s process tree with taskkill /T /F; on Windows, force makes no difference"
+            ),
+        }),
         Some(3 | 4) => bail!("job {id} is {text}"),
         Some(6) => bail!("no job {id} in this guest"),
         _ => bail!("could not stop job {id}: {text}"),
@@ -112,8 +140,11 @@ pub struct Listed {
     pub exit_code: Option<i64>,
 }
 
-pub fn list(agent: &Agent) -> Result<Vec<Listed>> {
-    let spec = ExecSpec::new("/bin/sh", ["-c", LIST, "list"]);
+pub fn list(agent: &Agent, os: GuestOs) -> Result<Vec<Listed>> {
+    let spec = match os {
+        GuestOs::Linux => ExecSpec::new("/bin/sh", ["-c", LIST, "list"]),
+        GuestOs::Windows => powershell(WIN_LIST),
+    };
     let out = agent.exec(&spec, HELPER_TIMEOUT, HELPER_OUTPUT)?;
     if out.exit_code != Some(0) {
         bail!(
@@ -263,37 +294,75 @@ pub fn trim_read(data: &mut Vec<u8>, max_bytes: usize) -> bool {
     cut
 }
 
+/// Whether a Windows job's wrapper holds its lock file, as the guest agent finds when it tries to open it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lock {
+    /// The agent cannot open the file: the wrapper holds it, so the job runs.
+    Held,
+    /// The agent opened the file: no wrapper holds it, after an exit, a kill or a reboot.
+    Free,
+    Missing,
+}
+
+/// A Windows job's state from its `exit` file, whether its `pid` file exists, and its lock. The wrapper takes the lock
+/// before it writes `pid`, and writes `exit` before it lets go, so a recorded job whose lock is free has ended.
+pub fn windows_state(exit: Option<&str>, pid: bool, lock: Lock) -> State {
+    if let Some(code) = exit_code(exit) {
+        return State::Exited(code);
+    }
+    if !pid {
+        return State::Starting;
+    }
+    match lock {
+        Lock::Held => State::Running,
+        Lock::Free | Lock::Missing => State::EndedWithoutStatus,
+    }
+}
+
 /// Reads job `id`'s output from `since`, at most `max_bytes`, and its state, through the agent's file calls.
 /// Returns `None` when the guest has no such job.
-pub fn read(agent: &Agent, id: &Uuid, since: u64, max_bytes: usize) -> Result<Option<Read>> {
-    let dir = job_dir(id);
-    if small_file(agent, &format!("{dir}/cmd"))?.is_none() {
+pub fn read(
+    agent: &Agent,
+    os: GuestOs,
+    id: &Uuid,
+    since: u64,
+    max_bytes: usize,
+) -> Result<Option<Read>> {
+    let file = |name: &str| job_file(os, id, name);
+    let command = match os {
+        GuestOs::Linux => "cmd",
+        GuestOs::Windows => "cmd.ps1",
+    };
+    if small_file(agent, &file(command))?.is_none() {
         return Ok(None);
     }
     // The state comes first: output read after an exit code is complete.
-    let exit = small_file(agent, &format!("{dir}/exit"))?;
-    let pid = small_file(agent, &format!("{dir}/pid"))?;
-    let stat = match pid.as_deref().and_then(|p| p.split_whitespace().next()) {
-        Some(p) if p.bytes().all(|b| b.is_ascii_digit()) => {
-            small_file(agent, &format!("/proc/{p}/stat"))?
+    let exit = small_file(agent, &file("exit"))?;
+    let pid = small_file(agent, &file("pid"))?;
+    let mut state = match os {
+        GuestOs::Linux => {
+            let stat = match pid.as_deref().and_then(|p| p.split_whitespace().next()) {
+                Some(p) if p.bytes().all(|b| b.is_ascii_digit()) => {
+                    small_file(agent, &format!("/proc/{p}/stat"))?
+                }
+                _ => None,
+            };
+            let boot = small_file(agent, "/proc/sys/kernel/random/boot_id")?;
+            state(
+                exit.as_deref(),
+                pid.as_deref(),
+                stat.as_deref(),
+                boot.as_deref(),
+            )
         }
-        _ => None,
+        GuestOs::Windows => {
+            windows_state(exit.as_deref(), pid.is_some(), lock(agent, &file("lock"))?)
+        }
     };
-    let boot = small_file(agent, "/proc/sys/kernel/random/boot_id")?;
-    let mut state = state(
-        exit.as_deref(),
-        pid.as_deref(),
-        stat.as_deref(),
-        boot.as_deref(),
-    );
     if state == State::EndedWithoutStatus {
-        state = recheck(state, small_file(agent, &format!("{dir}/exit"))?.as_deref());
+        state = recheck(state, small_file(agent, &file("exit"))?.as_deref());
     }
-    let mut data = match agent.read_file(&format!("{dir}/out"), since, max_bytes) {
-        Ok((data, _)) => data,
-        Err(e) if is_missing(&e) => Vec::new(),
-        Err(e) => return Err(e),
-    };
+    let mut data = read_log(agent, &file("out"), since, max_bytes)?;
     let cut = trim_read(&mut data, max_bytes);
     Ok(Some(Read {
         state,
@@ -301,6 +370,34 @@ pub fn read(agent: &Agent, id: &Uuid, since: u64, max_bytes: usize) -> Result<Op
         data,
         cut,
     }))
+}
+
+/// Output from `since` in the log at `path`. A Windows wrapper holds the log for a moment while it appends a chunk, and
+/// the agent cannot open it then; after a few tries the read returns nothing, and the next read gets the output.
+fn read_log(agent: &Agent, path: &str, since: u64, max_bytes: usize) -> Result<Vec<u8>> {
+    for _ in 1..BUSY_TRIES {
+        match agent.read_file(path, since, max_bytes) {
+            Ok((data, _)) => return Ok(data),
+            Err(e) if is_missing(&e) => return Ok(Vec::new()),
+            Err(e) if is_busy(&e) => std::thread::sleep(BUSY_PAUSE),
+            Err(e) => return Err(e),
+        }
+    }
+    match agent.read_file(path, since, max_bytes) {
+        Ok((data, _)) => Ok(data),
+        Err(e) if is_missing(&e) || is_busy(&e) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a Windows wrapper holds the lock file at `path`.
+fn lock(agent: &Agent, path: &str) -> Result<Lock> {
+    match agent.read_file(path, 0, 1) {
+        Ok(_) => Ok(Lock::Free),
+        Err(e) if is_busy(&e) => Ok(Lock::Held),
+        Err(e) if is_missing(&e) => Ok(Lock::Missing),
+        Err(e) => Err(e),
+    }
 }
 
 /// A small file's text, or `None` when it does not exist.
@@ -312,14 +409,35 @@ fn small_file(agent: &Agent, path: &str) -> Result<Option<String>> {
     }
 }
 
-/// Whether a guest file call failed because the file does not exist.
+/// Whether a guest file call failed because the file or its directory does not exist. Linux's text is the same for
+/// both; Windows' differ, and follow the guest's display language, which the test bed has as English.
 fn is_missing(e: &anyhow::Error) -> bool {
-    format!("{e:#}").contains("No such file or directory")
+    let text = format!("{e:#}");
+    [
+        "No such file or directory",
+        "The system cannot find the file specified",
+        "The system cannot find the path specified",
+    ]
+    .iter()
+    .any(|missing| text.contains(missing))
+}
+
+/// Whether a Windows guest file call failed because another process holds the file open.
+fn is_busy(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("being used by another process")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use serde_json::{Value, json};
+
     use super::*;
+    use crate::agent::Channel;
 
     #[test]
     fn only_lower_case_hyphenated_v4_ids_pass() {
@@ -341,7 +459,7 @@ mod tests {
     fn the_command_never_appears_in_the_script_text() {
         let id = Uuid::new_v4();
         let command = "echo \"$HOME\" '${VAR}' `id`; rm -rf /tmp/x\nprintf '%s' $(date)";
-        let spec = launch_spec(&id, command);
+        let spec = launch_spec(GuestOs::Linux, &id, command);
         assert_eq!(spec.stdin.as_deref(), Some(command.as_bytes()));
         assert_eq!(spec.path, "/bin/sh");
         assert_eq!(
@@ -438,11 +556,320 @@ mod tests {
         assert_eq!(listed[2].state, "ended without status");
     }
 
+    /// What a scripted Windows guest answers when a file is opened.
+    #[derive(Clone)]
+    enum Guarded {
+        Present(&'static [u8]),
+        /// Another process holds the file open, as the wrapper holds its lock.
+        Held,
+        Missing,
+    }
+
+    /// A Windows guest that serves files by path and answers every `guest-exec` with one exit code and output. A path
+    /// with several answers gives them in turn and then keeps the last; a path with none is missing.
+    struct WinGuest {
+        files: RefCell<HashMap<String, Vec<Guarded>>>,
+        exit_code: i64,
+        stdout: &'static str,
+        execs: RefCell<Vec<Value>>,
+        handles: RefCell<Vec<Vec<u8>>>,
+    }
+
+    impl WinGuest {
+        fn new(exit_code: i64, stdout: &'static str) -> Self {
+            Self {
+                files: RefCell::default(),
+                exit_code,
+                stdout,
+                execs: RefCell::default(),
+                handles: RefCell::default(),
+            }
+        }
+
+        fn file(self, id: &Uuid, name: &str, answers: &[Guarded]) -> Self {
+            self.files
+                .borrow_mut()
+                .insert(job_file(GuestOs::Windows, id, name), answers.to_vec());
+            self
+        }
+    }
+
+    impl Channel for WinGuest {
+        fn command(&self, request: &str, _: i32) -> std::result::Result<String, String> {
+            let req: Value = serde_json::from_str(request).unwrap();
+            let args = &req["arguments"];
+            let ret = match req["execute"].as_str().unwrap() {
+                "guest-exec" => {
+                    self.execs.borrow_mut().push(args.clone());
+                    json!({ "pid": 1 })
+                }
+                "guest-exec-status" => json!({
+                    "exited": true,
+                    "exitcode": self.exit_code,
+                    "out-data": B64.encode(self.stdout),
+                }),
+                "guest-file-open" => {
+                    let path = args["path"].as_str().unwrap();
+                    let missing = format!(
+                        "unable to execute QEMU agent command 'guest-file-open': failed to open file '{path}': The \
+                         system cannot find the file specified."
+                    );
+                    let mut files = self.files.borrow_mut();
+                    let answers = files.get_mut(path).ok_or_else(|| missing.clone())?;
+                    let answer = if answers.len() > 1 {
+                        answers.remove(0)
+                    } else {
+                        answers[0].clone()
+                    };
+                    match answer {
+                        Guarded::Missing => return Err(missing),
+                        Guarded::Held => {
+                            return Err(format!(
+                                "unable to execute QEMU agent command 'guest-file-open': failed to open file \
+                                 '{path}': The process cannot access the file because it is being used by another \
+                                 process."
+                            ));
+                        }
+                        Guarded::Present(data) => {
+                            self.handles.borrow_mut().push(data.to_vec());
+                            json!(self.handles.borrow().len() - 1)
+                        }
+                    }
+                }
+                "guest-file-seek" => {
+                    let handle = args["handle"].as_u64().unwrap() as usize;
+                    let offset = args["offset"].as_u64().unwrap() as usize;
+                    let mut handles = self.handles.borrow_mut();
+                    let data = &mut handles[handle];
+                    *data = data.split_off(offset.min(data.len()));
+                    json!({ "position": offset, "eof": false })
+                }
+                "guest-file-read" => {
+                    let handle = args["handle"].as_u64().unwrap() as usize;
+                    let data = std::mem::take(&mut self.handles.borrow_mut()[handle]);
+                    json!({ "count": data.len(), "buf-b64": B64.encode(&data), "eof": true })
+                }
+                _ => Value::Null,
+            };
+            Ok(json!({ "return": ret }).to_string())
+        }
+    }
+
+    fn win_read(guest: &WinGuest, id: &Uuid, since: u64) -> Option<Read> {
+        read(&Agent::new(guest, 10), GuestOs::Windows, id, since, 1 << 20).unwrap()
+    }
+
+    /// The script a Windows `ExecSpec` carries in its `-EncodedCommand` argument.
+    fn encoded_script(spec: &Value) -> String {
+        let bytes = B64
+            .decode(
+                spec["arg"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        let utf16: Vec<u16> = bytes
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&utf16).unwrap()
+    }
+
     #[test]
-    fn jobs_refuse_a_windows_guest_naming_run_3() {
-        assert!(linux_only(GuestOs::Linux).is_ok());
-        let error = linux_only(GuestOs::Windows).unwrap_err().to_string();
-        assert!(error.contains("run 3"), "{error}");
+    fn a_windows_job_runs_while_its_wrapper_holds_the_lock() {
+        let id = Uuid::new_v4();
+        let guest = WinGuest::new(0, "")
+            .file(&id, "cmd.ps1", &[Guarded::Present(b"\xEF\xBB\xBFping")])
+            .file(
+                &id,
+                "pid",
+                &[Guarded::Present(b"4242 639299647847946337\r\n")],
+            )
+            .file(&id, "lock", &[Guarded::Held])
+            .file(&id, "out", &[Guarded::Present(b"step 1\r\nstep 2\r\n")]);
+        let r = win_read(&guest, &id, 8).unwrap();
+        assert_eq!(r.state, State::Running);
+        assert_eq!(r.data, b"step 2\r\n");
+        assert_eq!(r.next, 16);
+    }
+
+    #[test]
+    fn a_windows_job_reads_as_its_files_say() {
+        let id = Uuid::new_v4();
+        let cmd = [Guarded::Present(b"exit 7")];
+        let pid = [Guarded::Present(b"4242 1\r\n")];
+        let free = [Guarded::Present(b"")];
+
+        let starting = WinGuest::new(0, "").file(&id, "cmd.ps1", &cmd);
+        assert_eq!(win_read(&starting, &id, 0).unwrap().state, State::Starting);
+
+        let exited = WinGuest::new(0, "")
+            .file(&id, "cmd.ps1", &cmd)
+            .file(&id, "pid", &pid)
+            .file(&id, "lock", &free)
+            .file(&id, "exit", &[Guarded::Present(b"7\r\n")]);
+        assert_eq!(win_read(&exited, &id, 0).unwrap().state, State::Exited(7));
+
+        // A free lock without an exit code: the wrapper was killed or the guest rebooted.
+        let ended = WinGuest::new(0, "")
+            .file(&id, "cmd.ps1", &cmd)
+            .file(&id, "pid", &pid)
+            .file(&id, "lock", &free);
+        assert_eq!(
+            win_read(&ended, &id, 0).unwrap().state,
+            State::EndedWithoutStatus
+        );
+
+        let no_job = WinGuest::new(0, "");
+        assert!(win_read(&no_job, &id, 0).is_none());
+    }
+
+    #[test]
+    fn a_windows_exit_code_written_after_the_first_check_wins() {
+        let id = Uuid::new_v4();
+        // The job ends between the first read of `exit` and the lock check: the lock is free, and the re-read of
+        // `exit` finds the code.
+        let guest = WinGuest::new(0, "")
+            .file(&id, "cmd.ps1", &[Guarded::Present(b"exit 3")])
+            .file(&id, "pid", &[Guarded::Present(b"4242 1\r\n")])
+            .file(&id, "lock", &[Guarded::Present(b"")])
+            .file(&id, "exit", &[Guarded::Missing, Guarded::Present(b"3\r\n")]);
+        assert_eq!(win_read(&guest, &id, 0).unwrap().state, State::Exited(3));
+    }
+
+    #[test]
+    fn a_log_the_wrapper_keeps_holding_reads_as_no_new_output() {
+        let id = Uuid::new_v4();
+        let guest = WinGuest::new(0, "")
+            .file(&id, "cmd.ps1", &[Guarded::Present(b"ping")])
+            .file(&id, "pid", &[Guarded::Present(b"4242 1\r\n")])
+            .file(&id, "lock", &[Guarded::Held])
+            .file(&id, "out", &[Guarded::Held]);
+        let r = win_read(&guest, &id, 5).unwrap();
+        assert_eq!((r.state, r.data.len(), r.next), (State::Running, 0, 5));
+
+        let once = WinGuest::new(0, "")
+            .file(&id, "cmd.ps1", &[Guarded::Present(b"ping")])
+            .file(&id, "pid", &[Guarded::Present(b"4242 1\r\n")])
+            .file(&id, "lock", &[Guarded::Held])
+            .file(&id, "out", &[Guarded::Held, Guarded::Present(b"hello")]);
+        assert_eq!(win_read(&once, &id, 0).unwrap().data, b"hello");
+    }
+
+    #[test]
+    fn the_windows_launcher_gets_the_command_on_stdin_and_the_id_as_a_literal() {
+        let command = "Write-Output 'päivää'; Remove-Item C:\\x -Recurse\nexit 5";
+        let guest = WinGuest::new(0, "started with Win32_Process.Create\r\n");
+        let (started, how) = start(&Agent::new(&guest, 10), GuestOs::Windows, command).unwrap();
+        assert_eq!(how, "started with Win32_Process.Create");
+        let execs = guest.execs.borrow();
+        let spec = &execs[0];
+        assert_eq!(spec["path"], "powershell.exe");
+        assert_eq!(
+            B64.decode(spec["input-data"].as_str().unwrap()).unwrap(),
+            command.as_bytes()
+        );
+        let script = encoded_script(spec);
+        let expected_head = format!(
+            "$id = '{}'\n$wrapper = {}\n",
+            started.hyphenated(),
+            ps_quote(WIN_WRAPPER)
+        );
+        assert!(script.starts_with(&expected_head), "{script}");
+        assert!(script.ends_with(WIN_LAUNCHER));
+        assert!(!script.contains("Remove-Item C:\\x"));
+    }
+
+    #[test]
+    fn a_refused_windows_launch_names_the_reason() {
+        let guest = WinGuest::new(
+            3,
+            "refused: C:\\ProgramData\\virtmanager-mcp\\jobs is a junction or symbolic link\r\n",
+        );
+        let error = start(&Agent::new(&guest, 10), GuestOs::Windows, "ping")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("the job did not start: refused: C:\\ProgramData\\virtmanager-mcp\\jobs is a junction"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_windows_stop_ends_the_tree_and_says_force_changes_nothing() {
+        let id = Uuid::new_v4();
+        let guest = WinGuest::new(0, "ended\r\n");
+        let message = stop(&Agent::new(&guest, 10), GuestOs::Windows, &id, false).unwrap();
+        assert!(message.contains("taskkill /T /F"), "{message}");
+        assert!(message.contains("force makes no difference"), "{message}");
+        let script = encoded_script(&guest.execs.borrow()[0]);
+        assert!(script.starts_with(&format!("$id = '{}'\n", id.hyphenated())));
+        assert!(script.ends_with(WIN_STOP));
+
+        let reused = WinGuest::new(4, "not running\r\n");
+        let error = stop(&Agent::new(&reused, 10), GuestOs::Windows, &id, true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, format!("job {id} is not running"));
+    }
+
+    #[test]
+    fn the_windows_list_reads_crlf_lines() {
+        let id = Uuid::new_v4().hyphenated().to_string();
+        let guest = WinGuest::new(
+            0,
+            Box::leak(
+                format!("{id} 1794368699 exited 7\r\n{id} 1794368703 ended\r\n").into_boxed_str(),
+            ),
+        );
+        let listed = list(&Agent::new(&guest, 10), GuestOs::Windows).unwrap();
+        assert_eq!((listed[0].state, listed[0].exit_code), ("exited", Some(7)));
+        assert_eq!(listed[1].state, "ended without status");
+        assert!(encoded_script(&guest.execs.borrow()[0]).ends_with(WIN_LIST));
+    }
+
+    #[test]
+    fn the_windows_scripts_hold_their_checks() {
+        for check in [
+            "[IO.FileAttributes]::ReparsePoint",
+            "is not owned by SYSTEM or Administrators",
+            "AreAccessRulesProtected",
+            "grants access to",
+            "[IO.Directory]::CreateDirectory($path, $acl)",
+            "[Console]::OpenStandardInput()",
+            "Win32_Process -MethodName Create",
+        ] {
+            assert!(WIN_LAUNCHER.contains(check), "{check}");
+        }
+        assert!(WIN_STOP.contains("StartTime.ToUniversalTime().Ticks -ne [long]$recorded[1]"));
+        assert!(WIN_STOP.contains("taskkill.exe /T /F /PID"));
+        // The exit code is written before the lock is let go, so a free lock without one means the job was ended.
+        let exit = WIN_WRAPPER.find("\"$dir\\exit\"").unwrap();
+        let unlock = WIN_WRAPPER.find("$lock.Close()").unwrap();
+        assert!(exit < unlock);
+        for script in [WIN_LAUNCHER, WIN_WRAPPER, WIN_STOP, WIN_LIST] {
+            assert!(!script.contains("Invoke-Expression"), "{script}");
+        }
+    }
+
+    #[test]
+    fn windows_missing_and_busy_errors_are_recognised() {
+        for text in [
+            "failed to open file 'C:\\x\\exit': The system cannot find the file specified.",
+            "failed to open file 'C:\\nojob\\out': The system cannot find the path specified.",
+        ] {
+            assert!(is_missing(&anyhow!("{text}")), "{text}");
+            assert!(!is_busy(&anyhow!("{text}")), "{text}");
+        }
+        let busy = anyhow!(
+            "failed to open file 'C:\\x\\lock': The process cannot access the file because it is being used by \
+             another process."
+        );
+        assert!(is_busy(&busy) && !is_missing(&busy));
     }
 
     #[test]
