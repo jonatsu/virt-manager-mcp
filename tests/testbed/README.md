@@ -54,6 +54,7 @@ The template cases below run with `config-templates.toml`. They need the templat
 | `wait-for.json` | Creates `t-w` without waiting for its agent. In order: `[agent]` matches once the agent answers; after Enter, `[console "login:"]` matches with `next` and `generation`, and `console_read` still returns that output; the same wait again times out, because the cursor moved past the match; `[console "marker-42", command "test -e /tmp/ready"]` times out after 5 s with a resume point and `last_exit_code` 1; after `exec` creates the file and writes the marker to `/dev/ttyS0`, the command wait matches with its output `ready`, and a console wait matches `marker-42`, written between the calls; with a sysrq crash 3 s away, `[console "login:", console "Kernel panic", command "false"]` matches index 1 within about 3 s while the agent hangs (the `__time__` lines measure it); after a restart and a `poweroff` 5 s away, a wait for text that never appears ends as `closed` because the console stream ended; after another restart and `poweroff`, `[command "false"]` ends as `closed` with "the VM is not running"; `trial-deb13` is refused as outside `allowed_vms`, and a bad pattern is refused; `t-w` is deleted. |
 | `templates-outside-disk-setup.json`, `templates-outside-disk.json` | A reset and an expiry leave a disk file outside every pool in place; run with the steps below. |
 | `manage-lock.json` | Run it through `run-all.sh`, which holds the management lock from another process with `flock(1)` for 40 s and gives the server its own `HOME`, so servers of live sessions are not held up. Creating `t-lock` fails after 30 s, naming the lock another operation holds; the second create waits for the holder to exit and succeeds; `t-lock` is deleted. |
+| `win-exec.json` | On `t-win11` (see "The Windows guest"), with `t-win11` added to `allowed_vms` and `power_vms`: starts it and waits for the agent; `whoami` returns `nt authority\system` with PowerShell, without CLIXML on stderr, and with `cmd`; the guest is Windows 11 Pro with Secure Boot on, a TPM present and a signed virtio serial driver; a file round-trips through `write_file` and `read_file`; then it shuts down. |
 
 The screen cases below need the OCR models and the installer guests in "The installer guests". They run with a screen
 config: `config-templates.toml` with `t-inst` and `t-win` added to `allowed_vms` and `power_vms`, and
@@ -244,6 +245,35 @@ virsh -c qemu:///system define "$REPO/tests/testbed/t-win.xml"
 Run a screen case with a config that allows them and sets `display.ocr_models`, such as the one `run-all.sh` writes.
 Remove them with `virsh -c qemu:///system undefine --nvram t-inst`, the same for `t-win`, and
 `virsh -c qemu:///system vol-delete --pool agent-vms t-inst.qcow2`.
+
+## The Windows guest
+
+`t-win11` is a persistent Windows 11 Pro VM for the Windows jobs, waits and screen cases. `t-win11.xml` gives it 4 GiB,
+2 vCPUs, UEFI with Secure Boot and Microsoft's keys, an emulated TPM 2.0, a 64 GiB SATA disk `t-win11.qcow2`, a USB
+tablet, SPICE with virtio video, the guest-agent channel, no network and no serial console. Its disk boots first, so
+the DVD's "press any key" prompt shows only while the disk is empty.
+
+`win11/build.sh` installs it unattended from `tpl-win11-26h2.iso` with `win11/autounattend.xml`, which selects Pro by
+Microsoft's public KMS client key, so the guest stays unactivated. At first logon, the answer file installs the
+`virtio-win` serial driver with `pnputil` and the QEMU guest agent from its MSI. The script needs a local copy of
+`virtio-win-0.1.302.iso`, whose SHA-256 it pins because the `virtio-win` project publishes checksums only for its
+RPMs. Download it from the `archive-virtio/virtio-win-0.1.302-1/` directory on `fedorapeople.org`, then run:
+
+```sh
+tests/testbed/win11/build.sh ~/Downloads/virtio-win-0.1.302.iso
+```
+
+It uploads the ISO and the answer ISO as `tpl-virtio-win-0.1.302.iso` and `tpl-win11-answer.iso`; an existing
+`tpl-virtio-win-0.1.302.iso` is reused only when it hashes to the pinned sum, and an interrupted upload leaves no
+volume. It then installs Windows
+(about 10 minutes on this host), waits for the guest agent, then shuts the VM down and ejects the ISOs. It needs 5 GiB
+of available memory and 70 GiB free in the pool. The guest's local administrator `tester` logs on automatically; its
+password in the answer file is a test value for this offline VM only. `win-exec.json` checks the result.
+
+The serial driver is signed, and Windows enforces that under Secure Boot. `qemu-ga.exe` itself carries no
+Authenticode signature, so its integrity rests on the pinned SHA-256 of the ISO. Remove the guest with
+`virsh -c qemu:///system undefine t-win11 --nvram --tpm` and
+`virsh -c qemu:///system vol-delete --pool agent-vms t-win11.qcow2`.
 
 ## Credentials
 

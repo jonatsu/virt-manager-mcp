@@ -1,0 +1,98 @@
+<!--
+  Windows 11 Pro test guest for run 3 (tests/testbed/win11/build.sh). UEFI with Secure Boot and Microsoft's keys,
+  an emulated TPM 2.0, 4 GiB, a 64 GiB SATA disk, no network interface and no serial console. The disk boots first, so
+  the DVD's "press any key" prompt shows only while the disk is still empty. build.sh ejects the three ISOs once the
+  guest agent answers.
+-->
+<domain type="kvm">
+  <name>t-win11</name>
+  <metadata>
+    <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
+      <libosinfo:os id="http://microsoft.com/win/11"/>
+    </libosinfo:libosinfo>
+  </metadata>
+  <memory unit="MiB">4096</memory>
+  <currentMemory unit="MiB">4096</currentMemory>
+  <vcpu>2</vcpu>
+  <os firmware="efi">
+    <firmware>
+      <feature enabled="yes" name="secure-boot"/>
+      <feature enabled="yes" name="enrolled-keys"/>
+    </firmware>
+    <type arch="x86_64" machine="q35">hvm</type>
+    <boot dev="hd"/>
+    <boot dev="cdrom"/>
+  </os>
+  <features>
+    <smm state="on"/>
+    <acpi/>
+    <apic/>
+    <hyperv>
+      <relaxed state="on"/>
+      <vapic state="on"/>
+      <spinlocks state="on" retries="8191"/>
+      <vpindex state="on"/>
+      <runtime state="on"/>
+      <synic state="on"/>
+      <stimer state="on"/>
+      <frequencies state="on"/>
+      <tlbflush state="on"/>
+      <ipi state="on"/>
+    </hyperv>
+    <vmport state="off"/>
+  </features>
+  <cpu mode="host-passthrough"/>
+  <clock offset="localtime">
+    <timer name="rtc" tickpolicy="catchup"/>
+    <timer name="pit" tickpolicy="delay"/>
+    <timer name="hpet" present="no"/>
+    <timer name="hypervclock" present="yes"/>
+  </clock>
+  <pm>
+    <suspend-to-mem enabled="no"/>
+    <suspend-to-disk enabled="no"/>
+  </pm>
+  <on_reboot>restart</on_reboot>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2" discard="unmap"/>
+      <source file="/var/lib/libvirt/images/agent-vms/t-win11.qcow2"/>
+      <target dev="sda" bus="sata"/>
+    </disk>
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="/var/lib/libvirt/images/agent-vms/tpl-win11-26h2.iso"/>
+      <target dev="sdb" bus="sata"/>
+      <readonly/>
+    </disk>
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="/var/lib/libvirt/images/agent-vms/tpl-win11-answer.iso"/>
+      <target dev="sdc" bus="sata"/>
+      <readonly/>
+    </disk>
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="/var/lib/libvirt/images/agent-vms/tpl-virtio-win-0.1.302.iso"/>
+      <target dev="sdd" bus="sata"/>
+      <readonly/>
+    </disk>
+    <controller type="usb" model="qemu-xhci" ports="15"/>
+    <controller type="virtio-serial"/>
+    <channel type="unix">
+      <target type="virtio" name="org.qemu.guest_agent.0"/>
+    </channel>
+    <input type="tablet" bus="usb"/>
+    <tpm model="tpm-crb">
+      <backend type="emulator" version="2.0"/>
+    </tpm>
+    <graphics type="spice" autoport="yes">
+      <image compression="off"/>
+    </graphics>
+    <video>
+      <model type="virtio"/>
+    </video>
+    <memballoon model="none"/>
+  </devices>
+</domain>

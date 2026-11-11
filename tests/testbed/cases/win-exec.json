@@ -1,0 +1,75 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-win11",
+      "wait_for_agent_secs": 300
+    },
+    "expect": {
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "whoami"
+    },
+    "expect": {
+      "contains": "nt authority\\system",
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "whoami",
+      "shell": "cmd"
+    },
+    "expect": {
+      "contains": "nt authority\\system"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "(Get-CimInstance Win32_OperatingSystem).Caption; Confirm-SecureBootUEFI; (Get-Tpm).TpmPresent; (Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName -like '*VirtIO Serial*' }).IsSigned"
+    },
+    "expect": {
+      "matches": "Windows 11 Pro\\s+True\\s+True\\s+True",
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "t-win11",
+      "path": "C:\\Windows\\Temp\\vmm-roundtrip.txt",
+      "content": "round trip\n"
+    },
+    "expect": {
+      "contains": "wrote 11 bytes"
+    }
+  },
+  {
+    "tool": "read_file",
+    "args": {
+      "vm": "t-win11",
+      "path": "C:\\Windows\\Temp\\vmm-roundtrip.txt"
+    },
+    "expect": {
+      "contains": "round trip"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-win11"
+    },
+    "expect": {
+      "contains": "VM 't-win11' is shut off"
+    }
+  }
+]
