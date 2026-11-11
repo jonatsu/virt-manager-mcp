@@ -140,8 +140,13 @@ it is built.
 3. **Moving code and results in and out.** An agent pushes a checkout in and pulls artifacts or logs back without
    passing them through its context, and reaches services in the guest at its address. Design:
    [`guest-transfer-design.md`](guest-transfer-design.md), accepted. It covers pulling files and directories into
-   operator-set pull directories, pushing directories, background copies, and `vm_addresses`, in two runs: Linux, then
-   directory transfers on Windows. Port forwarding is left to outcomes 5 and 6, where the host cannot route to a guest.
+   operator-set pull directories, pushing directories, background copies, and `vm_addresses`, in two runs. Port
+   forwarding is left to outcomes 5 and 6, where the host cannot route to a guest.
+   - Done: [run 1](guest-transfer-run-1-implementation-plan.md) built `copy_from_vm`, `copy_dir_to_vm`,
+     `copy_dir_from_vm`, background copies with `transfer_done`, and `vm_addresses`, for Linux guests. On `t-win11`
+     the file tools work, and `vm_addresses` returns an empty list because that guest has no network interface. Its
+     execution record holds the commits, test-bed results and reviews.
+   - Next: run 2, directory transfers on Windows through the guest's `tar.exe`.
 4. **Seeing what happened.** When something fails in the guest, an agent can find out why. This covers console output
    buffered from VM start, guest resource usage, and events such as a crash or reboot.
 5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
@@ -174,5 +179,5 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 3, moving code and results in and out, has an accepted design and needs its plan for run 1. Follow-up 18
+Run 2 of outcome 3, directory transfers on Windows, needs its plan. Follow-up 18
 comes soon, once its details are settled. Follow-ups 15 to 17 can land at any time.
