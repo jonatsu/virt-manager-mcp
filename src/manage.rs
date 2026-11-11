@@ -4,8 +4,11 @@
 //! marker is what makes them accessible, power-controllable and manageable without
 //! being listed in the config file.
 
-use std::path::Path;
-use std::sync::{Mutex, PoisonError};
+use std::ffi::OsString;
+use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -34,8 +37,69 @@ const UNDEFINE_FLAGS: u32 = sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
     | sys::VIR_DOMAIN_UNDEFINE_NVRAM
     | sys::VIR_DOMAIN_UNDEFINE_TPM;
 
-/// Serialises operations that check limits or pick names and then act on them.
-static LOCK: Mutex<()> = Mutex::new(());
+/// How long an operation waits for another holder to release the management lock.
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// Takes the management lock, so that a limit checked here, such as `max_vms`, still holds when the operation acts.
+/// The lock is an exclusive `flock` on a lock file. Every open of the file has its own lock, so it excludes other
+/// threads of this process as well as other server processes and `sweep` commands of this account. The kernel
+/// releases it when the returned file is dropped or the process dies.
+fn lock() -> Result<File> {
+    lock_file(&lock_path(std::env::var_os("HOME"))?, LOCK_WAIT)
+}
+
+/// The lock file, `~/.cache/virtmanager-mcp/manage.lock`. It depends only on the home directory, which every process
+/// of one account shares, so a server and a `sweep` timer that lacks a login session's variables find the same file.
+fn lock_path(home: Option<OsString>) -> Result<PathBuf> {
+    let home = home
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| {
+            anyhow!("cannot place the management lock file: HOME is not an absolute path")
+        })?;
+    Ok(home
+        .join(".cache")
+        .join("virtmanager-mcp")
+        .join("manage.lock"))
+}
+
+/// Opens `path`, creating it and its directory for this account only, and locks it exclusively, waiting up to `wait`
+/// for another holder to let go.
+fn lock_file(path: &Path, wait: Duration) -> Result<File> {
+    if let Some(dir) = path.parent() {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening the management lock file {}", path.display()))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(TryLockError::WouldBlock) => bail!(
+                "another virtmanager-mcp operation has held the management lock {} for over {} s; try again once it \
+                 ends",
+                path.display(),
+                wait.as_secs()
+            ),
+            Err(TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
+            }
+        }
+    }
+}
 
 /// Whether `dom` was created by this server.
 pub fn is_owned(dom: &Domain) -> bool {
@@ -148,7 +212,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         None => m.networks.first().cloned(),
     };
 
-    let _guard = LOCK.lock().unwrap();
+    let _guard = lock()?;
     hv.with_conn(|conn| {
         if let Some(n) = &network {
             check_network(conn, m, n)?;
@@ -413,7 +477,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
     let expires = expiry(m, vm.lifetime_minutes, now_epoch())?;
     let network = vm.network.clone().or_else(|| m.networks.first().cloned());
 
-    let _guard = LOCK.lock().unwrap();
+    let _guard = lock()?;
     hv.with_conn(|conn| {
         if let Some(n) = &network {
             check_network(conn, m, n)?;
@@ -500,7 +564,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
 pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Result<String> {
     let m = &hv.config.manage;
     let dom = hv.manage_domain(name)?;
-    let _guard = LOCK.lock().unwrap();
+    let _guard = lock()?;
     // can_manage also passes VMs listed in manage_vms, so ownership and the template come from the owner element.
     let owner =
         owner_of(&dom).ok_or_else(|| anyhow!("VM '{name}' was not created by this server"))?;
@@ -707,8 +771,7 @@ pub fn owned_with_expiry(hv: &Hypervisor) -> Result<Vec<(String, Owner)>> {
 /// `None` when there was nothing to do.
 pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
     let m = &hv.config.manage;
-    // The lock guards no data, so a panic elsewhere while holding it must not stop expiry for good.
-    let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let _guard = lock()?;
     hv.with_conn(|conn| {
         // Another process may delete the VM at any step; finding it gone means the work is done.
         let gone = |e: &virt::error::Error| e.code() == ErrorNumber::NoDomain;
@@ -837,7 +900,7 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
     if dom.is_active()? {
         bail!("VM '{name}' is running; shut it down with stop_vm first");
     }
-    let _guard = LOCK.lock().unwrap();
+    let _guard = lock()?;
     let disks: Vec<DiskInfo> = parse_disks(&inactive_xml(&dom)?)?
         .into_iter()
         .filter(|d| d.device == "disk")
@@ -994,7 +1057,7 @@ pub fn attach_disk(hv: &Hypervisor, name: &str, size_gib: u64) -> Result<String>
     let m = &hv.config.manage;
     check_disk(m, size_gib)?;
     let dom = hv.manage_domain(name)?;
-    let _guard = LOCK.lock().unwrap();
+    let _guard = lock()?;
     let used: Vec<String> = parse_disks(&inactive_xml(&dom)?)?
         .into_iter()
         .map(|d| d.target)
@@ -1034,7 +1097,7 @@ pub fn detach_disk(hv: &Hypervisor, name: &str, target: &str) -> Result<String> 
             "VM '{name}' is running; shut it down with stop_vm first (the disk is deleted after detaching)"
         );
     }
-    let _guard = LOCK.lock().unwrap();
+    let _guard = lock()?;
     let xml = inactive_xml(&dom)?;
     let disk = parse_disks(&xml)?
         .into_iter()
@@ -1077,7 +1140,7 @@ pub fn set_cdrom(
 ) -> Result<String> {
     let iso = iso.map(|p| hv.config.iso_file(p)).transpose()?;
     let dom = hv.manage_domain(name)?;
-    let _guard = LOCK.lock().unwrap();
+    let _guard = lock()?;
     let active = dom.is_active()?;
     // The live definition carries the fields libvirt compares when changing media.
     let xml = if active {
@@ -1773,6 +1836,94 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh directory for one lock test, removed by the test.
+    fn lock_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "virtmanager-mcp-lock-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_held_lock_file_makes_another_holder_wait_and_then_fail() {
+        let dir = lock_test_dir("held");
+        let path = dir.join("virtmanager-mcp").join("manage.lock");
+        // Each open file has its own lock, as in another process, so a second open conflicts with the first.
+        let first = lock_file(&path, Duration::ZERO).unwrap();
+
+        let started = Instant::now();
+        let err = lock_file(&path, Duration::from_millis(300))
+            .unwrap_err()
+            .to_string();
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(
+            err.contains("another virtmanager-mcp operation has held the management lock"),
+            "{err}"
+        );
+
+        drop(first);
+        let second = lock_file(&path, Duration::ZERO);
+        assert!(second.is_ok(), "{second:?}");
+        drop(second);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_waiting_holder_gets_the_lock_file_once_it_is_released() {
+        let dir = lock_test_dir("released");
+        let path = dir.join("manage.lock");
+        let first = lock_file(&path, Duration::ZERO).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(first);
+        });
+        assert!(lock_file(&path, Duration::from_secs(10)).is_ok());
+        releaser.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_lock_file_and_its_directory_belong_to_this_account_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = lock_test_dir("modes");
+        let path = dir.join("virtmanager-mcp").join("manage.lock");
+        drop(lock_file(&path, Duration::ZERO).unwrap());
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_lock_file_sits_in_the_home_directory_cache() {
+        assert_eq!(
+            lock_path(Some("/home/me".into())).unwrap(),
+            Path::new("/home/me/.cache/virtmanager-mcp/manage.lock")
+        );
+        for home in [None, Some(OsString::new()), Some("home/me".into())] {
+            let err = lock_path(home).unwrap_err().to_string();
+            assert!(err.contains("HOME is not an absolute path"), "{err}");
+        }
+    }
+
+    #[test]
+    fn two_threads_of_one_process_exclude_each_other() {
+        let dir = lock_test_dir("threads");
+        let path = dir.join("manage.lock");
+        let first = lock_file(&path, Duration::ZERO).unwrap();
+        let other = path.clone();
+        let err = std::thread::spawn(move || lock_file(&other, Duration::ZERO).map(drop))
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has held the management lock"), "{err}");
+        drop(first);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn names() {

@@ -21,7 +21,7 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
   screen-no-models templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
-  templates-outside-disk console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
+  templates-outside-disk manage-lock console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   screen-installer screen-windows
 )
 # Memory the host must have available before an OCR case starts its VM, in MiB: the VM's own plus 1 GiB.
@@ -234,6 +234,26 @@ unit_templates_outside_disk() {
   rm -f -- "${WORK:?}/outside/outside.img" && rmdir -- "${WORK:?}/outside"
 }
 
+# Another process, flock(1), holds the management lock for 40 s while the case runs. The server gets its own HOME, so
+# its lock file is ${WORK}/home/.cache/virtmanager-mcp/manage.lock and servers of live sessions are not held up. The
+# server's first create waits 30 s and fails; its second waits until the holder exits and succeeds.
+unit_manage_lock() {
+  local home=${WORK}/home holder
+  if ! command -v flock > /dev/null; then
+    record manage-lock skipped "flock is not installed"
+    return
+  fi
+  if ! install -d -m 700 "${home}" "${home}/.cache" "${home}/.cache/virtmanager-mcp"; then
+    record manage-lock failed "could not make ${home}"
+    return
+  fi
+  flock -x "${home}/.cache/virtmanager-mcp/manage.lock" sleep 40 &
+  holder=$!
+  sleep 1
+  HOME=${home} run_case manage-lock config-templates.toml
+  wait "${holder}" || record manage-lock failed "the flock holder failed"
+}
+
 unit_jobs() {
   rm -f -- "${WORK:?}/vars.json"
   run_case jobs config-templates.toml
@@ -305,6 +325,7 @@ run_unit() {
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;
     jobs) unit_jobs ;;
+    manage-lock) unit_manage_lock ;;
     owrt-* | mouse-refusals) unit_owrt "$1" ;;
     screen-installer) unit_screen "$1" t-inst ;;
     screen-windows) unit_screen "$1" t-win ;;

@@ -180,10 +180,11 @@ before it is built, and each feature from the earlier list sits under one of the
 5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
    and it needs a network policy for each VM, which outcome 6 would otherwise bring.
 6. **Operator trust and control.** An operator can let agents run with less supervision. This covers an audit log of
-   mutating calls (following `akarasulu/nested-mcp-server`), `max_vms` enforced across processes (today only an
-   in-process lock guards it, so several stdio instances can race past it), network policies for each VM, scoping per
-   session, and tested `qemu:///session` support. Session scope is the survey's strongest guardrail: VMs there cannot
-   reach the user's system VMs at all, and `uri` is already a config key but untested.
+   mutating calls (following `akarasulu/nested-mcp-server`), network policies for each VM, scoping per session, and
+   tested `qemu:///session` support. Session scope is the survey's strongest guardrail: VMs there cannot reach the
+   user's system VMs at all, and `uri` is already a config key but untested. Done ahead of the rest: `max_vms` holds
+   across every server process of one account, because management operations take a lock file; the test-bed case
+   `manage-lock.json` holds that lock from another process and shows a create waiting, failing, then succeeding.
 
 Two items stand outside the outcomes, because their result is already clear. Either can land at any time.
 

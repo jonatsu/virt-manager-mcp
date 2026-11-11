@@ -161,7 +161,8 @@ These follow from the design and the code as it stands:
 
 1. A template changed by hand under its VMs corrupts all of them. The server's checks and the versioned names reduce
    this, but cannot prevent it.
-2. `max_vms` holds only within one process, so several agent sessions can exceed it, until outcome 6.
+2. `max_vms` holds across the server processes of one account, through a lock file in the home directory. Processes
+   running as different accounts against the same libvirt can still exceed it.
 3. An expired VM lingers while no server process and no timer runs.
 
 ## Open questions

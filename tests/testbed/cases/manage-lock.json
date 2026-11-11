@@ -1,0 +1,42 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-lock",
+      "template": "debian13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "another virtmanager-mcp operation has held the management lock"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-lock",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "created VM 't-lock' from template 'debian13'"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-lock",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-lock' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-lock"
+    },
+    "expect": {
+      "contains": "deleted VM 't-lock'"
+    }
+  }
+]
