@@ -14,6 +14,7 @@ mod pulldir;
 mod seed;
 mod server;
 mod sweep;
+mod transfer;
 mod wait;
 
 use std::path::PathBuf;
@@ -147,6 +148,7 @@ async fn run() -> Result<()> {
         consoles: Consoles::default(),
         ocr: Default::default(),
         pulls: Default::default(),
+        transfers: Default::default(),
     });
 
     if let Some(Command::Sweep) = cli.command {

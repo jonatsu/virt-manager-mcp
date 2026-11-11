@@ -364,6 +364,10 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
   between. A console condition without `since` starts where the last `console_write` began, and a match moves that
   point past it. A wait never changes what `console_read` returns.
+- `copy_to_vm` and `copy_from_vm` wait for the copy up to `limits.max_wait_secs`. A longer copy goes on in the
+  background and replies with a transfer ID, and `wait_for` with a lone `transfer_done` condition reports how it
+  ended. At most `limits.max_transfers` (default 4) copies run at once, and the server keeps the newest 64 results.
+  A background copy lives in the server process, so it ends when the server does.
 - `console_write` can pause between bytes (`inter_char_delay_ms`) or between chunks (`chunk_size` with
   `chunk_delay_ms`), up to 1000 ms each, for firmware and bootloaders that drop input sent back to back. A write
   whose pauses would exceed `limits.max_wait_secs` is refused.

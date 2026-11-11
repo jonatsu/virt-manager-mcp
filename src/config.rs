@@ -132,6 +132,8 @@ pub struct Limits {
     pub max_wait_secs: u64,
     /// Most file bytes one pull from a guest may write on the host.
     pub max_pull_bytes: u64,
+    /// Most copies one server process runs at once.
+    pub max_transfers: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -200,6 +202,7 @@ impl Default for Limits {
             console_buffer_bytes: 256 * 1024,
             max_wait_secs: 50,
             max_pull_bytes: 1 << 30,
+            max_transfers: 4,
         }
     }
 }
@@ -242,6 +245,9 @@ impl Config {
         }
         if self.limits.console_buffer_bytes == 0 {
             bail!("limits.console_buffer_bytes must be positive");
+        }
+        if self.limits.max_transfers == 0 {
+            bail!("limits.max_transfers must be positive");
         }
         if self.limits.max_pull_bytes == 0 {
             bail!("limits.max_pull_bytes must be positive");

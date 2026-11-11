@@ -25,6 +25,9 @@ Each release's section lists what changed for people who run the server and for 
 - The `host_pull_dirs` setting names host directories that pulls from a guest may write into. The server refuses to
   start when one overlaps a share directory, the shared project directory, an ISO directory or any libvirt storage
   pool, or sits on a filesystem without `renameat2` support. Each gets a private `.vmm-staging/` directory.
+- A `copy_to_vm` or `copy_from_vm` that outlasts `limits.max_wait_secs` goes on in the background and replies with
+  a transfer ID instead of failing at the client's call timeout. `wait_for`'s `transfer_done` condition reports how
+  it ended. `limits.max_transfers` (default 4) caps how many run at once.
 
 ### Fixed
 

@@ -22,7 +22,7 @@ use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
 use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
-use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, pull, wait};
+use crate::{addresses, ansi, display, fsops, jobs, manage, mouse, pull, transfer, wait};
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
 const WRITE_MARGIN: Duration = Duration::from_secs(10);
@@ -78,6 +78,8 @@ pub struct State {
     pub ocr: Mutex<Option<Arc<display::Recognizer>>>,
     /// Host destinations of the pulls running in this process.
     pub pulls: pull::Destinations,
+    /// Copies running in, or finished by, this process.
+    pub transfers: transfer::Transfers,
 }
 
 #[derive(Clone)]
@@ -784,7 +786,9 @@ impl VirtServer {
         ),
         description = "Copy a file from the host into the guest via the QEMU guest agent. The file is streamed \
         directly by the server, so it can be large and never passes through the conversation. Only files inside the \
-        shared host directories (named in the server instructions) can be copied."
+        shared host directories (named in the server instructions) can be copied. A copy still running after \
+        limits.max_wait_secs continues in the background and replies with a `transfer` ID; wait_for's \
+        `transfer_done` condition reports how it ended."
     )]
     async fn copy_to_vm(
         &self,
@@ -795,17 +799,21 @@ impl VirtServer {
             let src = s.hv.config.share_file(&p.host_path)?;
             let file = std::fs::File::open(&src)
                 .with_context(|| format!("cannot open {}", src.display()))?;
-            let n = s.agent(&dom).write_from(
-                &p.guest_path,
-                std::io::BufReader::new(file),
-                false,
-                None,
-            )?;
-            Ok(vec![ContentBlock::text(format!(
-                "copied {n} bytes from {} to {}",
-                src.display(),
-                p.guest_path
-            ))])
+            let timeout = s.hv.config.limits.agent_timeout_secs;
+            let guest = dom.clone();
+            s.copy(&p.vm, &dom, move |bytes| {
+                let reader = transfer::CountingReader {
+                    inner: std::io::BufReader::new(file),
+                    count: bytes,
+                };
+                let n =
+                    Agent::new(&guest, timeout).write_from(&p.guest_path, reader, false, None)?;
+                Ok(format!(
+                    "copied {n} bytes from {} to {}",
+                    src.display(),
+                    p.guest_path
+                ))
+            })
         })
         .await
     }
@@ -820,7 +828,9 @@ impl VirtServer {
         the conversation. host_path must lie inside one of the pull directories named in the server instructions; \
         missing parent directories there are created. The file arrives with mode 644, never executable, and appears \
         only once it is complete. An existing file at host_path is replaced only with overwrite: true; a directory, \
-        symlink or special file there is never replaced. Files over limits.max_pull_bytes are refused."
+        symlink or special file there is never replaced. Files over limits.max_pull_bytes are refused. A copy still \
+        running after limits.max_wait_secs continues in the background and replies with a `transfer` ID; wait_for's \
+        `transfer_done` condition reports how it ended."
     )]
     async fn copy_from_vm(
         &self,
@@ -830,20 +840,28 @@ impl VirtServer {
             let config = &s.hv.config;
             let dest = pull::Destination::open(&config.host_pull_dirs, &p.host_path)?;
             dest.check_file(p.overwrite)?;
-            let _claim = s.pulls.claim(dest.path())?;
+            let claim = s.pulls.claim(dest.path())?;
             let dom = s.hv.domain(&p.vm)?;
-            let mut staged = dest.stage_file()?;
-            let n = s.agent(&dom).read_to(
-                &p.guest_path,
-                staged.file(),
+            let (timeout, max) = (
+                config.limits.agent_timeout_secs,
                 config.limits.max_pull_bytes,
-            )?;
-            staged.commit(&dest, p.overwrite)?;
-            Ok(vec![ContentBlock::text(format!(
-                "copied {n} bytes from {} to {}",
-                p.guest_path,
-                dest.path().display()
-            ))])
+            );
+            let guest = dom.clone();
+            s.copy(&p.vm, &dom, move |bytes| {
+                let _claim = claim;
+                let mut staged = dest.stage_file()?;
+                let mut writer = transfer::CountingWriter {
+                    inner: staged.file(),
+                    count: bytes,
+                };
+                let n = Agent::new(&guest, timeout).read_to(&p.guest_path, &mut writer, max)?;
+                staged.commit(&dest, p.overwrite)?;
+                Ok(format!(
+                    "copied {n} bytes from {} to {}",
+                    p.guest_path,
+                    dest.path().display()
+                ))
+            })
         })
         .await
     }
@@ -1118,7 +1136,9 @@ impl VirtServer {
         `screenshot: true`, a match attaches a screenshot and gives \
         its size as `screenshot`, or a `screenshot_note` when it could not be taken. A console condition without \
         `since` starts where the last console_write began, so write first, then wait. A wait never changes what \
-        console_read returns."
+        console_read returns. `transfer_done` (a copy that replied with a `transfer` ID has ended) must be the only \
+        condition of its wait and takes no screenshot; it matches with the copy's own reply as `text`, or its \
+        failure as `error`, and times out with the bytes moved so far. It answers even after the VM stopped."
     )]
     async fn wait_for(
         &self,
@@ -1134,14 +1154,6 @@ impl VirtServer {
         self.blocking(move |s| {
             let max = s.hv.config.limits.max_wait_secs;
             let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(max).min(max));
-            let checks = wait::validate_conditions(&s.hv.config, timeout, &p.conditions)?;
-            let attach = attachment_wanted(&s.hv.config, p.screenshot)?;
-            let dom = s.hv.domain(&p.vm)?;
-            let recogniser = if checks.iter().any(wait::Check::reads_text) {
-                Some(s.recogniser()?)
-            } else {
-                None
-            };
             let notify = |waited: Duration| {
                 if let Some((token, peer)) = &progress {
                     let mut param =
@@ -1152,6 +1164,30 @@ impl VirtServer {
                         let _ = peer.notify_progress(param).await;
                     });
                 }
+            };
+            // A lone transfer_done is answered from the transfer table before the VM is looked up, so a copy cut off
+            // by a stopped, expired or deleted VM still reports how it ended.
+            if let [wait::Condition::TransferDone { transfer }] = p.conditions.as_slice() {
+                if p.screenshot == Some(true) {
+                    bail!("transfer_done takes no screenshot attachment");
+                }
+                let result = transfer::transfer_done(
+                    &s.transfers,
+                    &p.vm,
+                    transfer,
+                    timeout,
+                    &|| ct.is_cancelled(),
+                    &notify,
+                )?;
+                return Ok(vec![ContentBlock::text(result.to_string())]);
+            }
+            let checks = wait::validate_conditions(&s.hv.config, timeout, &p.conditions)?;
+            let attach = attachment_wanted(&s.hv.config, p.screenshot)?;
+            let dom = s.hv.domain(&p.vm)?;
+            let recogniser = if checks.iter().any(wait::Check::reads_text) {
+                Some(s.recogniser()?)
+            } else {
+                None
             };
             let env = wait::LiveEnv {
                 consoles: &s.consoles,
@@ -1886,6 +1922,30 @@ impl State {
 
     fn consoles_has(&self, vm: &str) -> bool {
         self.consoles.is_open(vm)
+    }
+
+    /// Runs a copy of `dom` as a transfer and waits for it up to `limits.max_wait_secs`. The reply is the copy's
+    /// own once it finished in time, or the transfer's ID and progress while it still runs.
+    fn copy(
+        &self,
+        vm: &str,
+        dom: &virt::domain::Domain,
+        work: impl FnOnce(&std::sync::atomic::AtomicU64) -> Result<String> + Send + 'static,
+    ) -> Result<Vec<ContentBlock>> {
+        let limits = &self.hv.config.limits;
+        let owner = transfer::Owner {
+            vm: vm.to_string(),
+            uuid: dom.get_uuid_string().unwrap_or_default(),
+        };
+        let id = self.transfers.start(owner, limits.max_transfers, work)?;
+        let wait = Duration::from_secs(limits.max_wait_secs);
+        match self.transfers.wait(&id, vm, wait, &|| false, &|_| {})? {
+            transfer::Status::Finished(Ok(reply)) => Ok(vec![ContentBlock::text(reply)]),
+            transfer::Status::Finished(Err(error)) => Err(anyhow::anyhow!(error)),
+            transfer::Status::Running { bytes } => Ok(vec![ContentBlock::text(
+                transfer::running_reply(&id, bytes).to_string(),
+            )]),
+        }
     }
 
     /// The shared OCR recogniser, loaded on first use. A failed load is not kept, so the next call tries again once

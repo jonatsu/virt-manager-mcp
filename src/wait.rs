@@ -121,6 +121,13 @@ pub enum Condition {
         /// Display head index (default 0).
         screen: Option<u32>,
     },
+    /// A copy that outlasted its call (copy_to_vm, copy_from_vm, copy_dir_to_vm, copy_dir_from_vm) has finished or
+    /// failed; the result carries the copy's reply or error. It must be the call's only condition, and is answered from
+    /// the server's own records whatever state the VM is in.
+    TransferDone {
+        /// The transfer ID a copy tool returned.
+        transfer: String,
+    },
 }
 
 impl Condition {
@@ -134,6 +141,7 @@ impl Condition {
             Condition::JobOutput { .. } => "job_output",
             Condition::ScreenSettled { .. } => "screen_settled",
             Condition::ScreenText { .. } => "screen_text",
+            Condition::TransferDone { .. } => "transfer_done",
         }
     }
 
@@ -147,7 +155,8 @@ impl Condition {
             | Condition::Agent
             | Condition::Command { .. }
             | Condition::JobDone { .. }
-            | Condition::JobOutput { .. } => None,
+            | Condition::JobOutput { .. }
+            | Condition::TransferDone { .. } => None,
         }
     }
 }
@@ -236,6 +245,9 @@ pub fn validate_conditions(
                     }
                 }
                 Condition::Agent => Check::Agent,
+                Condition::TransferDone { .. } => {
+                    bail!("condition {i}: transfer_done must be the only condition of its wait")
+                }
                 Condition::Command { command } => {
                     if config.read_only {
                         bail!("condition {i}: command conditions are disabled in read-only mode");
@@ -2685,6 +2697,23 @@ mod tests {
         assert!(
             validate_conditions(&Config::default(), ANY_TIMEOUT, &[settled(None, None)]).is_ok()
         );
+    }
+
+    #[test]
+    fn transfer_done_is_refused_beside_another_condition() {
+        let done = Condition::TransferDone {
+            transfer: "abc".into(),
+        };
+        for conditions in [
+            vec![done.clone(), settled(None, None)],
+            vec![settled(None, None), done],
+        ] {
+            let err = validate_conditions(&Config::default(), ANY_TIMEOUT, &conditions)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(err.contains("must be the only condition"), "{err}");
+        }
     }
 
     /// Runs `conditions` on `guest` for up to 10 s, then takes the attachment as `wait_for` does.
