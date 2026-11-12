@@ -99,7 +99,8 @@ directory holding the file it points to. A pull with `a.txt` held open with `Fil
 `Couldn't open ./a.txt: Permission denied`, and a pull of the self-junction failed with `Cannot stat`. A second pull
 to the same host directory was refused without `overwrite`. A pull of a 4 GiB file with `max_pull_bytes` at 64 MiB
 failed with the message for an archive that passed the limit while `tar` built it: the size poll, not the final
-measurement, stopped `tar.exe`, and the archive was deleted.
+measurement, stopped `tar.exe`, and the archive was deleted. Afterwards the temporary directory held no `.vmm-*`
+entry and no `tar` process ran.
 
 ## Pushes through the server
 
@@ -119,5 +120,4 @@ Later on 2026-11-12, `copy_dir_to_vm` from the run 2 work in progress pushed a t
 - The first attempt failed at once with the server's own "mode is only supported on Linux guests": the push asked
   for mode 600 on the archive, which the server sets only on Linux.
 
-After each push the target's directory held no `.vmm-*` entry and no `tar` process ran. Afterwards the temporary
-directory held no `.vmm-*` entry and no `tar` process ran.
+After each push the target's directory held no `.vmm-*` entry and no `tar` process ran.

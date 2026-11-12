@@ -1003,20 +1003,28 @@ pub fn push(
     if result.is_ok() {
         leftovers.push(&old);
     }
-    let cleanup = guest.run(Step::Cleanup, &leftovers);
-    let mut summary = result?;
-    let failure = match cleanup {
+    let failure = match guest.run(Step::Cleanup, &leftovers) {
         Ok(ran) if ran.code == Some(0) => None,
         Ok(ran) => Some(ran.describe()),
         Err(e) => Some(format!("{e:#}")),
     };
-    if let Some(failure) = failure {
-        summary.note = Some(format!(
-            "the new tree is in place, but deleting {} in the guest failed: {failure}",
+    let left = |failure| {
+        format!(
+            "deleting {} in the guest failed: {failure}",
             leftovers.join(", ")
-        ));
+        )
+    };
+    match (result, failure) {
+        (Ok(summary), None) => Ok(summary),
+        (Ok(mut summary), Some(failure)) => {
+            summary.note = Some(format!("the new tree is in place, but {}", left(failure)));
+            Ok(summary)
+        }
+        (Err(e), None) => Err(e),
+        (Err(e), Some(failure)) => {
+            Err(e.context(format!("the push failed, and {}", left(failure))))
+        }
     }
-    Ok(summary)
 }
 
 fn send_and_swap(
@@ -1591,6 +1599,7 @@ mod tests {
         make_dir: i64,
         unpack: i64,
         swaps: RefCell<Vec<i64>>,
+        cleanup: i64,
     }
 
     impl WindowsGuest {
@@ -1601,6 +1610,7 @@ mod tests {
                 make_dir: 0,
                 unpack: 0,
                 swaps: RefCell::new(Vec::new()),
+                cleanup: 0,
             }
         }
 
@@ -1652,6 +1662,7 @@ mod tests {
                     let code = if swaps.is_empty() { 0 } else { swaps.remove(0) };
                     (code, "", "The process cannot access the file")
                 }
+                Step::Cleanup => (self.cleanup, "", "C:\\work\\.vmm-x.d: in use"),
                 _ => (0, "", ""),
             };
             Ok(Ran {
@@ -1771,6 +1782,34 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_cleanup_is_reported_whether_the_push_succeeded_or_not() {
+        let guest = WindowsGuest {
+            cleanup: 1,
+            ..WindowsGuest::new()
+        };
+        let note = guest.push(true).unwrap().note.unwrap();
+        assert!(
+            note.contains("the new tree is in place")
+                && note.contains(".vmm-")
+                && note.contains("in use"),
+            "{note}"
+        );
+
+        let guest = WindowsGuest {
+            unpack: 1,
+            cleanup: 1,
+            ..WindowsGuest::new()
+        };
+        let err = format!("{:#}", guest.push(true).unwrap_err());
+        assert!(
+            err.contains("the push failed, and deleting")
+                && err.contains("in use")
+                && err.contains("unreadable filename"),
+            "{err}"
+        );
     }
 
     #[test]
