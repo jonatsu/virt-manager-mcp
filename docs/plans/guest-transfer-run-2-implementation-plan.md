@@ -300,3 +300,5 @@ The run's goal:
 
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
+| 1. Windows paths and step seam | `3bf9d73`, `3de37ea` | Unit tests for `GuestPath`, `Target` and the size-query failures; the `pwsh` parse test runs in CI | Opus: wildcard characters, an untested size failure and a lost error cause, fixed in `3de37ea`; approved |
+| 2. Push archive | `5463d0d` and the fix after it | Unit tests for modes, skipped names, 8.3 aliases and PAX records; the third `t-win11` probe showed GNU-header names garbled and PAX names intact | Opus: names shaped like 8.3 aliases and `CONIN$`/`CONOUT$` missing, fixed |

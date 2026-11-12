@@ -427,20 +427,48 @@ fn windows_name_problem(name: &str) -> Option<&'static str> {
     if name.ends_with('.') || name.ends_with(' ') {
         return Some("name ends in a dot or a space, which Windows drops");
     }
+    if is_short_alias(name) {
+        return Some(
+            "name has the shape of a Windows short name such as LONGFI~1.TXT, which a longer name in the push may \
+             already hold",
+        );
+    }
     // Windows reads `CON.txt`, and `CON .txt`, as the device `CON`.
     let base = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
     let upper = base.to_uppercase();
-    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ["COM", "LPT"].iter().any(|prefix| {
-            upper.strip_prefix(prefix).is_some_and(|rest| {
-                let mut chars = rest.chars();
-                matches!(
-                    (chars.next(), chars.next()),
-                    (Some('0'..='9' | '¹' | '²' | '³'), None)
-                )
-            })
-        });
+    let reserved = matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|prefix| {
+        upper.strip_prefix(prefix).is_some_and(|rest| {
+            let mut chars = rest.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('0'..='9' | '¹' | '²' | '³'), None)
+            )
+        })
+    });
     reserved.then_some("name is a device name reserved by Windows")
+}
+
+/// Whether `name` has the shape of an 8.3 short name that Windows generates for a longer name, such as `LONGFI~1.TXT`:
+/// up to six characters, `~` and digits, eight at most, then an optional extension of up to three characters.
+/// Windows may already have given that alias to another file of the push, and `tar.exe` would then replace that file.
+fn is_short_alias(name: &str) -> bool {
+    let (base, extension) = match name.split_once('.') {
+        Some((base, extension)) => (base, Some(extension)),
+        None => (name, None),
+    };
+    if extension.is_some_and(|e| e.is_empty() || e.chars().count() > 3 || e.contains('.')) {
+        return false;
+    }
+    let Some((stem, number)) = base.rsplit_once('~') else {
+        return false;
+    };
+    (1..=6).contains(&stem.chars().count())
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+        && base.chars().count() <= 8
 }
 
 /// `name` with each character in upper case where that is one character, as Windows compares names; `ß` stays.
@@ -515,13 +543,13 @@ fn add_entry(
                 inner: File::from(fd),
                 left: size,
             };
-            builder.append_data(&mut header, rel, data)?;
+            append(builder, &mut header, rel, os, data)?;
             summary.files += 1;
             summary.bytes += size;
         }
         FileType::Directory => {
             let mut header = header(tar::EntryType::Directory, &st, os);
-            builder.append_data(&mut header, rel, io::empty())?;
+            append(builder, &mut header, rel, os, io::empty())?;
             summary.directories += 1;
         }
         FileType::Symlink if os == GuestOs::Windows => skip(
@@ -547,6 +575,55 @@ fn add_entry(
         FileType::Unknown => skip("unknown file type"),
     }
     Ok(())
+}
+
+/// Adds an entry at `rel`. `tar.exe` reads a name in a plain header in the guest's code page, so a Windows entry
+/// whose path is not ASCII gets a PAX `path` record, which `tar.exe` reads as UTF-8, and an ASCII stand-in in its
+/// own header.
+fn append(
+    builder: &mut tar::Builder<&mut dyn Write>,
+    header: &mut tar::Header,
+    rel: &Path,
+    os: GuestOs,
+    data: impl Read,
+) -> Result<()> {
+    let path = rel.as_os_str().as_bytes();
+    if os == GuestOs::Linux || path.is_ascii() {
+        builder.append_data(header, rel, data)?;
+        return Ok(());
+    }
+    let record = pax_record("path", path);
+    let mut pax = tar::Header::new_ustar();
+    pax.set_entry_type(tar::EntryType::XHeader);
+    pax.set_path("PaxHeader")?;
+    pax.set_mode(0o644);
+    pax.set_size(record.len() as u64);
+    pax.set_cksum();
+    builder.append(&pax, &record[..])?;
+    let stand_in: Vec<u8> = path
+        .iter()
+        .take(99)
+        .map(|&b| if b.is_ascii() { b } else { b'_' })
+        .collect();
+    let name = &mut header.as_old_mut().name;
+    name.fill(0);
+    name[..stand_in.len()].copy_from_slice(&stand_in);
+    header.set_cksum();
+    builder.append(header, data)?;
+    Ok(())
+}
+
+/// One PAX record, `<length> <key>=<value>\n`, where the length counts the whole record, its own digits included.
+fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
+    let rest = key.len() + value.len() + 3;
+    let mut length = rest + 1;
+    while length != rest + length.to_string().len() {
+        length = rest + length.to_string().len();
+    }
+    let mut record = format!("{length} {key}=").into_bytes();
+    record.extend_from_slice(value);
+    record.push(b'\n');
+    record
 }
 
 fn header(kind: tar::EntryType, st: &rustix::fs::Stat, os: GuestOs) -> tar::Header {
@@ -1249,11 +1326,26 @@ mod tests {
     fn a_windows_archive_skips_names_windows_cannot_hold() {
         let share = Temp::new("win-names");
         let kept = [
-            "CONSOLE", "COM10", "a.b.c", "straße", "STRASSE", "README", "ok/inner",
+            "CONSOLE",
+            "COM10",
+            "a.b.c",
+            "straße",
+            "STRASSE",
+            "README",
+            "ok/inner",
+            "longfilename.txt",
+            "toolong~1.txt",
+            "ab~1x.txt",
+            "a~1.json",
+            "~1",
         ];
         let refused = [
             "CON",
             "con.txt",
+            "CONIN$",
+            "conout$.log",
+            "longfi~1.txt",
+            "AB~12",
             "Lpt1",
             "COM¹",
             "nul .txt",
@@ -1306,6 +1398,64 @@ mod tests {
         assert!(reason("CON").contains("reserved"));
         assert!(reason("a\\b").contains("control character or one of"));
         assert!(reason("tail ").contains("dot or a space"));
+    }
+
+    #[test]
+    fn a_windows_archive_names_non_ascii_paths_in_pax_records() {
+        let share = Temp::new("win-pax");
+        let long = format!("{}-日本語.txt", "x".repeat(120));
+        share.write("t/été/ü.txt", "u");
+        share.write(&format!("t/{long}"), "l");
+        share.write("t/plain.txt", "p");
+        let tree = tree(&share.0, "t");
+
+        let (entries, _) = archived_for(&tree, GuestOs::Windows);
+        let names: Vec<_> = entries.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, ["plain.txt", long.as_str(), "été", "été/ü.txt"]);
+
+        let mut out = Vec::new();
+        let selection = select(&tree, &options()).unwrap();
+        write_archive(&tree, &selection, GuestOs::Windows, &mut out).unwrap();
+        let mut archive = tar::Archive::new(&out[..]);
+        let raw: Vec<(tar::EntryType, Vec<u8>)> = archive
+            .entries()
+            .unwrap()
+            .raw(true)
+            .map(|e| {
+                let e = e.unwrap();
+                (e.header().entry_type(), e.path_bytes().into_owned())
+            })
+            .collect();
+        // Every plain header holds ASCII, and each non-ASCII path comes from the PAX record before it.
+        assert!(raw.iter().all(|(_, name)| name.is_ascii()), "{raw:?}");
+        let pax = raw
+            .iter()
+            .filter(|(kind, _)| *kind == tar::EntryType::XHeader)
+            .count();
+        assert_eq!(pax, 3);
+        // The Linux archive keeps plain UTF-8 names.
+        let mut out = Vec::new();
+        write_archive(&tree, &selection, GuestOs::Linux, &mut out).unwrap();
+        let mut archive = tar::Archive::new(&out[..]);
+        assert!(
+            archive
+                .entries()
+                .unwrap()
+                .raw(true)
+                .all(|e| e.unwrap().header().entry_type() != tar::EntryType::XHeader)
+        );
+    }
+
+    #[test]
+    fn a_pax_record_counts_its_own_length() {
+        assert_eq!(pax_record("path", b"a"), b"9 path=a\n");
+        // Eleven bytes plus one digit would be 12, which has two digits, so the record is 13 long.
+        assert_eq!(pax_record("k", b"abcdefg"), b"13 k=abcdefg\n");
+        assert_eq!(pax_record("path", &[b'x'; 90]).len(), 99);
+        // 98 bytes plus two digits would be 100, which has three, so the record is 101 long.
+        let long = pax_record("path", &[b'x'; 91]);
+        assert_eq!(long.len(), 101);
+        assert!(long.starts_with(b"101 path="));
     }
 
     #[test]

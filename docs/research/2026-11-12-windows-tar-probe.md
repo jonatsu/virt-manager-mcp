@@ -81,3 +81,21 @@ the file because it is being used by another process", until `tar.exe` exited. A
 length, `[IO.FileInfo]::new(<path>).Length` or `(Get-Item <path>).Length`, reported it growing during the same run:
 380 MB, 1.2 GB, 2.0 GB and 2.9 GB at polls about 1.5 s apart, each poll a new `powershell.exe` started through the
 agent. `C:` had 39 GiB free.
+
+## Third probe: non-ASCII names into the guest
+
+Later on 2026-11-12, on the same guest, with the server built from the run 2 work in progress. Two host archives held
+`été.txt` and `日本語.txt`: one with the UTF-8 names in plain GNU headers, one from GNU tar `--format=pax` with PAX
+`path` records. `tar.exe -x -f`, run through the agent, gave these results.
+
+- From the GNU headers, both files unpacked with exit status 0, under names read in code page 437: `été.txt` became
+  `├⌐t├⌐.txt` (U+251C U+2310 t U+251C U+2310) and `日本語.txt` became `µùÑµ£¼Φ¬₧.txt`.
+- From the PAX records, `été.txt` unpacked under its own name (U+00E9 t U+00E9). For `日本語.txt` it printed
+  `Archive entry has empty or unreadable filename ... skipping`, created nothing, and exited with status 1.
+
+The same session pulled a tree with `été.txt`, `sub dir`, an empty directory, a file symlink and a junction: the
+hashes on the host matched the guest's, the file symlink was skipped and named, and the junction arrived as a
+directory holding the file it points to. A pull with `a.txt` held open with `FileShare` none failed with
+`Couldn't open ./a.txt: Permission denied`, and a pull of the self-junction failed with `Cannot stat`. A pull of a
+4 GiB file with `max_pull_bytes` at 64 MiB stopped `tar.exe` and deleted the archive. Afterwards the temporary
+directory held no `.vmm-*` entry and no `tar` process ran.
