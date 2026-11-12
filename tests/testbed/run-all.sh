@@ -4,7 +4,8 @@
 # case except the manual root-only check. Exits 0 when every case passed or the test bed is absent, 1 when a case
 # failed, 2 on bad arguments. It touches only trial-deb13, t-owrt, and the t-* VMs and t-*/tpl-scratch volumes it
 # creates in pool agent-vms on qemu:///system. The OCR cases run only when VIRTMANAGER_OCR_MODELS names the directory
-# scripts/fetch-ocr-models.sh fills; they define t-inst and t-win from the XML files here. The Windows cases run on
+# scripts/fetch-ocr-models.sh fills, or, without it, when the directory a server with VIRTMANAGER_OCR_DOWNLOAD=1
+# fills holds both models; they define t-inst and t-win from the XML files here. The Windows cases run on
 # t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off. The transfer cases share and
 # pull host files only under the run's work directory.
 set -uo pipefail
@@ -16,7 +17,21 @@ REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd) || exit 1
 readonly REPO
 readonly TESTBED=${REPO}/tests/testbed
 readonly BIN=${REPO}/target/release/virtmanager-mcp
-readonly OCR_MODELS=${VIRTMANAGER_OCR_MODELS:-}
+
+# Prints the directory VIRTMANAGER_OCR_DOWNLOAD=1 makes the server fill, as src/ocrfetch.rs names it, when it holds
+# both models.
+downloaded_ocr_models() {
+  local data=${XDG_DATA_HOME:-}
+  [[ ${data} == /* ]] || data=${HOME:-}/.local/share
+  local dir=${data}/virtmanager-mcp/ocr-models
+  [[ ${dir} == /* && -f ${dir}/text-detection.onnx && -f ${dir}/text-recognition.onnx ]] || return 0
+  printf '%s\n' "${dir}"
+}
+
+OCR_MODELS=${VIRTMANAGER_OCR_MODELS:-$(downloaded_ocr_models)}
+readonly OCR_MODELS
+readonly NO_OCR_MODELS="the server has no OCR models: set VIRTMANAGER_OCR_MODELS, or start the server once with \
+VIRTMANAGER_OCR_DOWNLOAD=1"
 
 # Units run in this order; each lists the case files it runs, in order.
 readonly UNITS=(
@@ -488,7 +503,7 @@ unit_windows() {
 unit_win_screen() {
   local reason
   if [[ -z ${OCR_MODELS} ]]; then
-    record win-screen skipped "VIRTMANAGER_OCR_MODELS is not set, so the server has no OCR models"
+    record win-screen skipped "${NO_OCR_MODELS}"
     return
   fi
   reason=$(win_blocker)
@@ -521,7 +536,7 @@ screen_vm_ready() {
 unit_screen() { # case vm
   local need=${SCREEN_VM_MIB[$2]} avail
   if [[ -z ${OCR_MODELS} ]]; then
-    record "$1" skipped "VIRTMANAGER_OCR_MODELS is not set, so the server has no OCR models"
+    record "$1" skipped "${NO_OCR_MODELS}"
     return
   fi
   [[ -f ${WORK}/config-screen.toml ]] || {
@@ -631,7 +646,7 @@ main() {
   if [[ -n ${OCR_MODELS} ]]; then
     write_screen_config || rm -f -- "${WORK:?}/config-screen.toml"
   else
-    echo "VIRTMANAGER_OCR_MODELS is not set: the OCR cases are skipped"
+    echo "the OCR cases are skipped: ${NO_OCR_MODELS}"
   fi
 
   for unit in "${units[@]}"; do

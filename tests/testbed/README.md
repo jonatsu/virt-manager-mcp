@@ -186,12 +186,14 @@ it. Otherwise it writes `config-windows.toml` with `t-win11` allowed. It starts 
 The root check, "A failed volume deletion during expiry", stays manual. A full run takes about 11 minutes, or about 13
 with the screen cases. The Windows cases add about 3.5 minutes.
 
-The screen cases run only when `VIRTMANAGER_OCR_MODELS` holds the absolute path of the directory that
-`scripts/fetch-ocr-models.sh` fills. Otherwise the summary lists them as skipped with that reason. With the variable
-set, the script writes the screen config into its `/tmp` directory as `config-screen.toml`. It defines `t-inst` and
-`t-win` from their XML files and creates `t-inst.qcow2`, each unless it exists. It runs one of the two VMs at a time,
-after checking that the host has the VM's memory plus 1 GiB available. At the end it removes the VMs and the disk it
-created:
+The screen cases need the OCR models. `VIRTMANAGER_OCR_MODELS` names their directory, such as the one that
+`scripts/fetch-ocr-models.sh` fills, as an absolute path. Without the variable, the script uses the directory that a
+server started with `VIRTMANAGER_OCR_DOWNLOAD=1` fills, `~/.local/share/virtmanager-mcp/ocr-models`, when it holds
+both models. The script itself never downloads them. With neither, the summary lists the screen cases as skipped with
+that reason. With models, the script writes the screen config into its `/tmp` directory as `config-screen.toml`. It
+defines `t-inst` and `t-win` from their XML files and creates `t-inst.qcow2`, each unless it exists. It runs one of
+the two VMs at a time, after checking that the host has the VM's memory plus 1 GiB available. At the end it removes
+the VMs and the disk it created:
 
 ```sh
 VIRTMANAGER_OCR_MODELS=~/.local/share/virtmanager-mcp/ocr-models tests/testbed/run-all.sh screen-installer
