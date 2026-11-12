@@ -117,6 +117,9 @@ Later on 2026-11-12, `copy_dir_to_vm` from the run 2 work in progress pushed a t
   under their own names (U+00E4, U+00F6).
 - `日本語.txt` failed the push with `Archive entry has empty or unreadable filename`, and created nothing.
 - A tree with a 263-character relative path unpacked into a path of 297 characters, with exit status 0.
+- A `replace` of a tree holding a 288-character path swapped the new tree in, but the cleanup's
+  `Remove-Item -LiteralPath <path> -Recurse -Force` left the old tree's `.vmm-*.old` in place, and the push named it
+  in its note. With the `\\?\` prefix on the path, `Remove-Item` deleted such trees.
 - The first attempt failed at once with the server's own "mode is only supported on Linux guests": the push asked
   for mode 600 on the archive, which the server sets only on Linux.
 
