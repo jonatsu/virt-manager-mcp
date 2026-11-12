@@ -166,8 +166,8 @@ it is built.
      ([probe note](../research/2026-11-12-windows-tar-probe.md)). Its execution record holds the commits, test-bed
      results and reviews.
 4. **Seeing what happened.** When something fails in the guest, an agent can find out why. This covers console output
-   buffered from VM start, guest resource usage, and events such as a crash or reboot. Design, a draft awaiting
-   approval: [`seeing-what-happened-design.md`](seeing-what-happened-design.md).
+   buffered from VM start, guest resource usage, and events such as a crash or reboot. Design, accepted:
+   [`seeing-what-happened-design.md`](seeing-what-happened-design.md).
 5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
    and it needs a network policy for each VM, which outcome 6 would otherwise bring.
 6. **Operator trust and control.** An operator can let agents run with less supervision. This covers an audit log of

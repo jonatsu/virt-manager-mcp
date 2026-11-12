@@ -1,6 +1,6 @@
 # Seeing what happened: design
 
-Status: draft, revised after an architecture review; for approval.
+Status: accepted, after an architecture review.
 Once built, the code wins and this design follows it.
 Basis: roadmap outcome 4 in [`fork-roadmap.md`](fork-roadmap.md).
 
