@@ -42,9 +42,9 @@ The path is passed as data, never spliced into shell code.
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
 | `write_file` (overwrite/append, text or base64) | ❌ |
 | `copy_to_vm`: copy a host file into the guest (only with `host_share_dirs`) | ❌ |
-| `copy_dir_to_vm`: push a host directory into a Linux guest as a `tar` archive, following `.gitignore`, replacing a directory only with `replace` (only with `host_share_dirs`) | ❌ |
+| `copy_dir_to_vm`: push a host directory into a Linux or Windows guest as a `tar` archive, following `.gitignore`, replacing a directory only with `replace` (only with `host_share_dirs`) | ❌ |
 | `copy_from_vm`: copy a guest file into a pull directory on the host, mode 644, replacing a file only with `overwrite` (only with `host_pull_dirs`) | ❌ |
-| `copy_dir_from_vm`: pull a Linux guest directory into a pull directory as a `tar` archive the server unpacks itself, modes 644 and 755, without links or special files, replacing a directory only with `overwrite` (only with `host_pull_dirs`) | ❌ |
+| `copy_dir_from_vm`: pull a Linux or Windows guest directory into a pull directory as a `tar` archive the server unpacks itself, modes 644 and 755, without links or special files, replacing a directory only with `overwrite` (only with `host_pull_dirs`) | ❌ |
 | `start_vm`, `stop_vm` (graceful or `force`) (only for VMs in `power_vms`) | ❌ |
 | `console_write`, optionally paced per byte or per chunk | ❌ |
 | `guest_info`: OS, hostname, NICs, filesystems, users, timezone | ❌ |
@@ -115,15 +115,15 @@ read-only mode hides all four.
 - `copy_from_vm` copies one guest file into a pull directory. The file arrives with mode 644 and appears only once
   complete. Missing parent directories are created with mode 755, symlinks on the host side are never followed, and
   an existing file is replaced only with `overwrite: true`. A pull never replaces a directory with a file.
-- `copy_dir_to_vm` pushes a host directory into a Linux guest that has `tar`, for example a checkout. It follows the
+- `copy_dir_to_vm` pushes a host directory into a guest, for example a checkout. It follows the
   `.gitignore` rules in the tree and in its parent directories inside the share (`respect_gitignore`, on by default),
   leaves `.git` out unless `include_git` is set, and takes more `exclude` patterns. A symlink goes along only when it
   stays inside the tree; other links, FIFOs, sockets and devices are skipped and named in the reply. The guest
   unpacks the archive beside the target as `.vmm-<random>.d`. Files keep their host modes without setuid and setgid
   bits, and belong to the user the guest agent runs as. An existing target is replaced as a whole only with
   `replace: true`, never `/` or a directory directly below it, and a failed push leaves the old target in place.
-- `copy_dir_from_vm` pulls a directory from a Linux guest that has `tar`. The guest packs it in `/var/tmp`, or `/tmp`
-  when that is missing, and the server deletes the archive afterwards. The server unpacks the archive itself, because
+- `copy_dir_from_vm` pulls a directory from a guest. A Linux guest packs it in `/var/tmp`, or `/tmp` when that is
+  missing, and the server deletes the archive afterwards. The server unpacks the archive itself, because
   the guest controls it: files arrive with mode 644 and directories with 755, and links, devices and FIFOs are
   skipped and named. An archive with absolute or `..` paths, paths over 4096 bytes or 256 levels, repeated paths or
   sparse files fails the pull, which then writes nothing. `exclude` takes gitignore patterns, applied on the host. An
@@ -147,7 +147,32 @@ so a compromised guest can name another VM's address or a host address. When a V
 host-side device name, such as a passed-through device, the server skips the lease and ARP sources, and only the
 guest agent can answer.
 
-The directory tools refuse Windows guests for now. `copy_to_vm`, `copy_from_vm` and `vm_addresses` work there.
+### Directory transfers on Windows
+
+A Linux guest needs `tar`. A Windows guest uses its own `C:\Windows\System32\tar.exe`, which Windows 10 1803 and
+later ship; the server runs it directly through the guest agent and runs PowerShell only for the steps around it.
+
+- A Windows `guest_path` is a drive path such as `C:\work\app`, with `\` or `/` between components. The
+  server refuses relative and drive-relative paths (`C:work`), UNC and device paths (`\\server\share`, `\\?\C:\`),
+  `..`, the characters `< > " | ? *`, and a component that ends in a dot or a space. A push never replaces a drive
+  root, and `replace` also refuses the directories directly below one, compared without regard to case.
+- `tar.exe` unpacks some names without an error but onto a device, another file or
+  another name, so a push to Windows skips and names them: reserved device names such as `CON` or `nul.txt`, names
+  with a control character or one of `< > : " | ? * \`, names ending in a dot or a space, names that are not valid
+  UTF-8, names shaped like 8.3 short names such as `LONGFI~1.TXT`, and a name that differs from an earlier one in its
+  directory only in case. It also skips every symlink, because the archive cannot say whether a link points to a
+  file or a directory. A name outside the guest's code page, such as a Japanese name on a Western guest, fails the
+  push in `tar.exe`.
+- Every pushed file and directory arrives writable; host modes do not carry over.
+- Windows refuses to rename a directory while a file in it is open, so a `replace` of a tree in
+  use fails after one retry and leaves the old tree in place.
+- The guest packs in `C:\Windows\Temp`, where only `SYSTEM` and `Administrators` can read the archive.
+  `tar.exe` follows junctions, so a junction in the pulled tree brings its target's content along until a cap stops
+  it; a junction to the tree itself fails the pull. Any non-zero exit of `tar.exe`, including a file another program
+  holds open, fails the pull. The server polls the archive's size through PowerShell, so an archive can pass
+  `max_pull_bytes` by about a second of writing before `tar.exe` stops; the host still writes nothing past the cap.
+- `tar.exe` creates paths over 260 characters, which programs without long-path support, such as
+  Explorer, cannot open.
 
 ## Screen and mouse
 
