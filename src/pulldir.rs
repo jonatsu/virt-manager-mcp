@@ -196,7 +196,12 @@ fn is_running(staging: &Path, id: &str) -> io::Result<bool> {
         Err(e) => return Err(e),
     };
     match file.try_lock() {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            // Released explicitly: a child that another thread forks meanwhile shares the open file, and closing ours
+            // alone would leave the lock held until that child execs, so the next check would read the pull as running.
+            let _ = file.unlock();
+            Ok(false)
+        }
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(e)) => Err(e),
     }

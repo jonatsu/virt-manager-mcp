@@ -42,10 +42,21 @@ const LOCK_WAIT: Duration = Duration::from_secs(30);
 
 /// Takes the management lock, so that a limit checked here, such as `max_vms`, still holds when the operation acts.
 /// The lock is an exclusive `flock` on a lock file. Every open of the file has its own lock, so it excludes other
-/// threads of this process as well as other server processes and `sweep` commands of this account. The kernel
-/// releases it when the returned file is dropped or the process dies.
-fn lock() -> Result<File> {
+/// threads of this process as well as other server processes and `sweep` commands of this account. It is released
+/// when the returned guard is dropped or the process dies.
+fn lock() -> Result<Held> {
     lock_file(&lock_path(std::env::var_os("HOME"))?, LOCK_WAIT)
+}
+
+/// A held management lock, released on drop. The release is explicit: a child that another thread forks meanwhile
+/// shares the open file, and closing ours alone would leave the lock held until that child execs.
+#[derive(Debug)]
+struct Held(File);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 /// The lock file, `~/.cache/virtmanager-mcp/manage.lock`. It depends only on the home directory, which every process
@@ -65,7 +76,7 @@ fn lock_path(home: Option<OsString>) -> Result<PathBuf> {
 
 /// Opens `path`, creating it and its directory for this account only, and locks it exclusively, waiting up to `wait`
 /// for another holder to let go.
-fn lock_file(path: &Path, wait: Duration) -> Result<File> {
+fn lock_file(path: &Path, wait: Duration) -> Result<Held> {
     if let Some(dir) = path.parent() {
         DirBuilder::new()
             .recursive(true)
@@ -84,7 +95,7 @@ fn lock_file(path: &Path, wait: Duration) -> Result<File> {
     let deadline = Instant::now() + wait;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(Held(file)),
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(100));
             }
