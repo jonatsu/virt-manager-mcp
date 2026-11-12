@@ -114,6 +114,17 @@ Reviews of earlier work found these. None blocks the server's use.
     `scripts/fetch-ocr-models.sh`, which stays for offline hosts and a directory of the operator's choice, and a test
     keeps the two equal. `curl` avoids a TLS library in the dependency tree
     ([how-to](../how-to/ocr-models.md)).
+19. **A Windows push unpacks as `SYSTEM` into a directory that inherits its parent's access list.** Under a parent
+    that `Users` can write, such as `C:\Users\Public`, an unprivileged guest user could plant a junction in
+    `.vmm-<id>.d` between its creation and `tar.exe -x`. Check on `t-win11` whether `tar.exe` refuses to extract
+    through a junction; if it does not, create the directory with an access list that does not inherit. The boundary
+    is inside the guest, not the host's.
+20. **A Windows `guest_path` outside the guest's code page is untested.** `tar.exe` may receive it as `?` and fail.
+    Push and pull once with a path such as `C:\Windows\Temp\vmm-日本` on `t-win11`, and refuse such paths with a
+    clear message if they fail.
+21. **A Windows push cleans up at once after a timed-out unpack.** The cleanup runs straight after `taskkill`,
+    without the pull's 10 s retry, so `tar.exe` may still hold files and leave `.vmm-*` entries, which the error
+    names. Retry the cleanup as the pull retries its removal.
 
 ## Outcomes
 
@@ -186,4 +197,5 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 4, seeing what happened, comes next and needs its design first. Follow-ups 15 to 17 can land at any time.
+Outcome 4, seeing what happened, comes next and needs its design first. Follow-ups 15 to 17 and 19 to 21 can land
+at any time.
