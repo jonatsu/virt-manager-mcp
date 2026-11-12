@@ -408,6 +408,8 @@ pub trait Guest {
     fn status(&self, pid: i64) -> Result<Option<Ran>>;
     /// The size of the file at `path`, or `None` when it does not exist yet.
     fn size(&self, path: &str) -> Result<Option<u64>>;
+    /// The size of the finished archive at `path`, once nothing writes it any more.
+    fn final_size(&self, path: &str) -> Result<u64>;
     fn kill(&self, pid: i64);
     fn read(&self, path: &str, out: &mut dyn Write, max_bytes: u64) -> Result<u64>;
 }
@@ -482,8 +484,12 @@ impl Guest for OnGuest<'_> {
 
     fn size(&self, path: &str) -> Result<Option<u64>> {
         // On Linux the agent cannot tell a missing file from another failure, so any failure reads as a missing
-        // archive; the size of the finished archive is required before anything is sent.
+        // archive; `final_size` reports the failure once the archive is finished.
         Ok(self.agent.file_size(path).ok())
+    }
+
+    fn final_size(&self, path: &str) -> Result<u64> {
+        self.agent.file_size(path)
     }
 
     fn kill(&self, pid: i64) {
@@ -593,9 +599,8 @@ fn pack_and_unpack(
     };
     // A fast `tar` can finish between two polls, so the finished archive is measured too, before any of it is sent.
     let size = guest
-        .size(archive)
-        .context("measuring the archive in the guest")?
-        .ok_or_else(|| anyhow!("cannot measure the archive {archive} in the guest"))?;
+        .final_size(archive)
+        .context("measuring the archive in the guest")?;
     if size > max {
         bail!(
             "the archive of {} is {size} bytes, over the pull limit of {max} bytes (limits.max_pull_bytes); it was \
@@ -1017,11 +1022,13 @@ mod tests {
     }
 
     /// A guest that runs each script with the host's `sh` and `tar`, with `PATH` replaced when `path_env` is set. With
-    /// `cut_read`, reading the archive fails after that many bytes; with `fail_status`, every status query fails.
+    /// `cut_read`, reading the archive fails after that many bytes; with `fail_status` or `fail_size`, every status or size
+    /// query fails.
     struct LocalGuest {
         path_env: Option<String>,
         cut_read: Option<u64>,
         fail_status: bool,
+        fail_size: bool,
         children: RefCell<Vec<Child>>,
     }
 
@@ -1031,6 +1038,7 @@ mod tests {
                 path_env,
                 cut_read: None,
                 fail_status: false,
+                fail_size: false,
                 children: RefCell::new(Vec::new()),
             }
         }
@@ -1095,11 +1103,18 @@ mod tests {
         }
 
         fn size(&self, path: &str) -> Result<Option<u64>> {
+            if self.fail_size {
+                bail!("scripted size failure");
+            }
             match fs::metadata(path) {
                 Ok(meta) => Ok(Some(meta.len())),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e.into()),
             }
+        }
+
+        fn final_size(&self, path: &str) -> Result<u64> {
+            Ok(fs::metadata(path)?.len())
         }
 
         fn kill(&self, pid: i64) {
@@ -1359,6 +1374,37 @@ mod tests {
         let err = format!("{:#}", bed.pull(&guest, false, &LIMITS).unwrap_err());
         assert!(err.contains("whether tar finished"), "{err}");
         assert!(guest.all_ended(), "tar still runs");
+        assert!(bed.tmp_is_empty());
+    }
+
+    #[test]
+    fn a_failed_size_query_while_packing_stops_tar() {
+        let bed = Bed::new("size");
+        let tools = Temp::new("size-tools");
+        let guest = LocalGuest {
+            fail_size: true,
+            ..LocalGuest::new(Some(fake_tar(&tools.0, "exec sleep 60")))
+        };
+        let err = format!("{:#}", bed.pull(&guest, false, &LIMITS).unwrap_err());
+        assert!(
+            err.contains("while tar built it") && err.contains("scripted size failure"),
+            "{err}"
+        );
+        assert!(guest.all_ended(), "tar still runs");
+        assert!(bed.tmp_is_empty());
+    }
+
+    #[test]
+    fn a_finished_archive_that_cannot_be_measured_fails_the_pull_with_the_cause() {
+        let bed = Bed::new("unmeasured");
+        let tools = Temp::new("unmeasured-tools");
+        // A tar that exits 0 without writing the archive.
+        let guest = LocalGuest::new(Some(fake_tar(&tools.0, "exit 0")));
+        let err = format!("{:#}", bed.pull(&guest, false, &LIMITS).unwrap_err());
+        assert!(
+            err.contains("measuring the archive in the guest") && err.contains("No such file"),
+            "{err}"
+        );
         assert!(bed.tmp_is_empty());
     }
 }

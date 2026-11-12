@@ -68,7 +68,9 @@ These apply to every unit, which names only its additions.
   `agent::ps_quote` literals, so no path is parsed as PowerShell code. The script runs through `agent::powershell`,
   which sends it as `-EncodedCommand`. It starts with `$ErrorActionPreference = 'Stop'` and
   `$ProgressPreference = 'SilentlyContinue'`, as `agent::shell_spec` does, so stderr carries no CLIXML progress
-  records. It maps each failure to its own exit code and ends with `exit <code>`. Removing a tree uses
+  records. It maps each failure to its own exit code and ends with `exit <code>`. Every cmdlet that takes a path gets
+  it through `-LiteralPath`, because `[` and `]` are legal in Windows names and `-Path` reads them as wildcards; the
+  path parser already refuses `*` and `?`. Removing a tree uses
   `Remove-Item -Recurse -Force`, which the probe showed removes read-only entries and junctions without following
   them. Moving a tree uses `[IO.Directory]::Move`, which refuses an existing destination.
 - **The Windows directory.** Scripts use `$env:SystemRoot`, never `C:\Windows`, because Windows may live on another

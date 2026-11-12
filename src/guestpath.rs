@@ -98,6 +98,15 @@ fn parse_windows(path: &str) -> Result<GuestPath> {
         if part.contains(':') {
             bail!("{path}: a ':' is allowed only after the drive letter");
         }
+        // Windows names cannot hold these, and PowerShell would read `*` and `?` as wildcards.
+        if part
+            .chars()
+            .any(|c| c.is_control() || "<>\"|?*".contains(c))
+        {
+            bail!(
+                r#"{path}: a Windows path cannot hold a control character or one of < > " | ? *"#
+            );
+        }
         if part.ends_with('.') || part.ends_with(' ') {
             bail!(
                 "{path}: '{part}' ends in a dot or a space, which Windows drops; name the path without it"
@@ -164,6 +173,13 @@ mod tests {
             ("//server/share", "UNC"),
             (r"C:\a\..\b", ".."),
             (r"C:\a\b:stream", "':'"),
+            (r"C:\*", "cannot hold"),
+            (r"C:\Users\*", "cannot hold"),
+            (r"C:\a?b", "cannot hold"),
+            (r"C:\a<b", "cannot hold"),
+            (r#"C:\a"b"#, "cannot hold"),
+            (r"C:\a|b", "cannot hold"),
+            ("C:\\a\tb", "cannot hold"),
             (r"C:\Windows.", "dot or a space"),
             ("C:\\Windows \\x", "dot or a space"),
             (r"C:\a\...", "dot or a space"),
