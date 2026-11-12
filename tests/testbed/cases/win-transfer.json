@@ -41,6 +41,51 @@
     }
   },
   {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-deep') { if (Test-Path -LiteralPath \"$t\\$d\") { Remove-Item -LiteralPath \"\\\\?\\$t\\$d\" -Recurse -Force } }\n[void](New-Item -ItemType Directory \"$t\\vmm-sentinel\")\nSet-Content -LiteralPath \"$t\\vmm-sentinel\\keep.txt\" -Value keep\n'ready'"
+    },
+    "expect": {
+      "contains": "ready"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "C:\\Windows\\Temp\\vmm-tree"
+    },
+    "expect": {
+      "contains": [
+        "\"files\":4",
+        "\"symlinks\":0",
+        "\"ignored\":3",
+        "link-in",
+        "link-out",
+        "pipe"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp\\vmm-tree'\nGet-ChildItem -LiteralPath $t -Recurse -File -Force | Sort-Object FullName | ForEach-Object { $_.FullName.Substring($t.Length + 1) + ' ' + (Get-FileHash -LiteralPath $_.FullName).Hash + ' ro=' + $_.IsReadOnly }\n'link-in: ' + (Test-Path -LiteralPath \"$t\\link-in\")"
+    },
+    "expect": {
+      "contains": [
+        "a.txt B6A98D9CE9A2D9149288FA3DF42D377C3E42737AFDCDAF714E33C0A100B51060 ro=False",
+        "sub\\b.txt F2C82DECDD7181CF98945929A62598DB7E6B477E11F6E0EB0AE97020EFF151AD ro=False",
+        "sub\\run.sh ",
+        ".gitignore ",
+        "link-in: False"
+      ],
+      "absent": "ro=True"
+    }
+  },
+  {
     "tool": "copy_dir_to_vm",
     "args": {
       "vm": "t-win11",
@@ -49,29 +94,272 @@
     },
     "expect": {
       "error": true,
-      "contains": "copy_dir_to_vm does not support Windows guests yet"
-    }
-  },
-  {
-    "tool": "copy_dir_from_vm",
-    "args": {
-      "vm": "t-win11",
-      "guest_path": "C:\\Windows\\Temp",
-      "host_path": "${pull}/win-dir/sub/temp"
-    },
-    "expect": {
-      "error": true,
-      "contains": "copy_dir_from_vm does not support Windows guests yet"
+      "contains": "pass replace: true"
     }
   },
   {
     "tool": "exec",
     "args": {
       "vm": "t-win11",
-      "command": "Remove-Item C:\\Windows\\Temp\\vmm-win.txt; Test-Path C:\\Windows\\Temp\\vmm-win.txt"
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\ncmd /c mklink /J \"$t\\vmm-tree\\link\" \"$t\\vmm-sentinel\"\nSet-Content -LiteralPath \"$t\\vmm-tree\\old-only.txt\" -Value old"
     },
     "expect": {
-      "contains": "False"
+      "contains": "Junction created"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "C:\\Windows\\Temp\\vmm-tree",
+      "replace": true
+    },
+    "expect": {
+      "contains": "\"files\":4"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\n'keep=' + (Test-Path -LiteralPath \"$t\\vmm-sentinel\\keep.txt\")\n'old=' + (Test-Path -LiteralPath \"$t\\vmm-tree\\old-only.txt\")\n'link=' + (Test-Path -LiteralPath \"$t\\vmm-tree\\link\")\n'new=' + (Test-Path -LiteralPath \"$t\\vmm-tree\\a.txt\")"
+    },
+    "expect": {
+      "contains": [
+        "keep=True",
+        "old=False",
+        "link=False",
+        "new=True"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "C:\\"
+    },
+    "expect": {
+      "error": true,
+      "contains": "a push never replaces C:\\"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "c:\\windows\\",
+      "replace": true
+    },
+    "expect": {
+      "error": true,
+      "contains": "replace refuses C:\\ and the directories directly below it"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "C:\\Windows.",
+      "replace": true
+    },
+    "expect": {
+      "error": true,
+      "contains": "ends in a dot or a space"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "\\\\server\\share\\x"
+    },
+    "expect": {
+      "error": true,
+      "contains": "UNC and device paths"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-tree",
+      "guest_path": "C:\\Windows\\Temp\\vmm-wintree"
+    },
+    "expect": {
+      "contains": [
+        "\"files\":4",
+        "\"path\":\"CON\"",
+        "\"path\":\"nul.txt\"",
+        "\"path\":\"a?b\"",
+        "\"path\":\"tail.\"",
+        "\"path\":\"case.txt\"",
+        "\"path\":\"aux\"",
+        "\"path\":\"link-in\"",
+        "only in case",
+        "device name reserved"
+      ],
+      "absent": "aux/inner.txt"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp\\vmm-wintree'\n(Get-ChildItem -LiteralPath $t -Recurse -Force | Sort-Object FullName | ForEach-Object { $_.FullName.Substring($t.Length + 1) }) -join '|'"
+    },
+    "expect": {
+      "contains": [
+        "Case.txt",
+        "ok.txt",
+        "sub\\deep.txt",
+        "\u00e9t\u00e9.txt"
+      ],
+      "absent": [
+        "case.txt",
+        "CON",
+        "nul.txt",
+        "a?b",
+        "tail",
+        "aux",
+        "link-in"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "t-win11",
+      "guest_path": "C:\\Windows\\Temp\\vmm-tree",
+      "host_path": "${pull}/win-dir"
+    },
+    "expect": {
+      "contains": [
+        "\"files\":4",
+        "\"skipped\":[]"
+      ]
+    }
+  },
+  {
+    "tool": "job_start",
+    "args": {
+      "vm": "t-win11",
+      "command": "$fs = [IO.File]::Open((Join-Path $env:SystemRoot 'Temp\\vmm-tree\\a.txt'), 'Open', 'ReadWrite', 'None'); 'held'; Start-Sleep 120; $fs.Close()"
+    },
+    "save": {
+      "held": "job"
+    },
+    "expect": {
+      "contains": "\"job\""
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-win11",
+      "timeout_secs": 60,
+      "conditions": [
+        {
+          "kind": "job_output",
+          "job": "${held}",
+          "pattern": "held"
+        }
+      ]
+    },
+    "expect": {
+      "contains": "\"result\":\"matched\""
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "C:\\Windows\\Temp\\vmm-tree",
+      "replace": true
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "usually because a file in it is open",
+        "the old tree is unchanged"
+      ]
+    }
+  },
+  {
+    "tool": "job_stop",
+    "args": {
+      "vm": "t-win11",
+      "job": "${held}"
+    },
+    "expect": {
+      "contains": "ended job"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\n'a=' + (Get-FileHash -LiteralPath \"$t\\vmm-tree\\a.txt\").Hash\n'vmm=' + (Get-ChildItem -Force -LiteralPath $t -Filter '.vmm-*' | Measure-Object).Count\n'tar=' + (Get-Process -Name tar -ErrorAction SilentlyContinue | Measure-Object).Count"
+    },
+    "expect": {
+      "contains": [
+        "a=B6A98D9CE9A2D9149288FA3DF42D377C3E42737AFDCDAF714E33C0A100B51060",
+        "vmm=0",
+        "tar=0"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-deep",
+      "guest_path": "C:\\Windows\\Temp\\vmm-deep"
+    },
+    "expect": {
+      "contains": "\"files\":1"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-deep",
+      "guest_path": "C:\\Windows\\Temp\\vmm-deep",
+      "replace": true
+    },
+    "expect": {
+      "contains": "\"files\":1",
+      "absent": "note"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\n$f = Get-ChildItem -LiteralPath \"\\\\?\\$t\\vmm-deep\" -Recurse -File\n'deep=' + ($f.FullName.Length - 4) + ' ' + (Get-Content -LiteralPath $f.FullName)\n'vmm=' + (Get-ChildItem -Force -LiteralPath $t -Filter '.vmm-*' | Measure-Object).Count"
+    },
+    "expect": {
+      "contains": [
+        "deep=288 deep",
+        "vmm=0"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-win.txt', 'vmm-deep') { Remove-Item -LiteralPath \"\\\\?\\$t\\$d\" -Recurse -Force }\n'left=' + (@('vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-win.txt', 'vmm-deep') | Where-Object { Test-Path -LiteralPath \"$t\\$_\" }).Count"
+    },
+    "expect": {
+      "contains": "left=0"
     }
   }
 ]

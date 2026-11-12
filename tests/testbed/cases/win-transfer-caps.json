@@ -1,0 +1,56 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-big', 'vmm-loop') { if (Test-Path -LiteralPath \"$t\\$d\") { Remove-Item -LiteralPath \"$t\\$d\" -Recurse -Force } }\n[void](New-Item -ItemType Directory \"$t\\vmm-big\", \"$t\\vmm-loop\")\nfsutil file createnew \"$t\\vmm-big\\f\" 4294967296\ncmd /c mklink /J \"$t\\vmm-loop\\back\" \"$t\\vmm-loop\""
+    },
+    "expect": {
+      "contains": [
+        "is created",
+        "Junction created"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "t-win11",
+      "guest_path": "C:\\Windows\\Temp\\vmm-big",
+      "host_path": "${pull}/win-big"
+    },
+    "expect": {
+      "error": true,
+      "contains": "limits.max_pull_bytes"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "t-win11",
+      "guest_path": "C:\\Windows\\Temp\\vmm-loop",
+      "host_path": "${pull}/win-loop"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "tar failed in the guest",
+        "Cannot stat"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\nStart-Sleep 2\nforeach ($d in 'vmm-big', 'vmm-loop') { Remove-Item -LiteralPath \"$t\\$d\" -Recurse -Force }\n'left=' + (@('vmm-big', 'vmm-loop') | Where-Object { Test-Path -LiteralPath \"$t\\$_\" }).Count\n'vmm=' + (Get-ChildItem -Force -LiteralPath $t -Filter '.vmm-*' | Measure-Object).Count\n'tar=' + (Get-Process -Name tar -ErrorAction SilentlyContinue | Measure-Object).Count"
+    },
+    "expect": {
+      "contains": [
+        "left=0",
+        "vmm=0",
+        "tar=0"
+      ]
+    }
+  }
+]

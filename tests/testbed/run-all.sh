@@ -51,7 +51,7 @@ declare -A MEMBERS=(
   ["jobs"]="jobs jobs-reopen"
   ["transfer-pull"]="transfer-pull transfer-pull-caps"
   ["transfer-background"]="transfer-background transfer-background-after"
-  ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer"
+  ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer win-transfer-caps"
 )
 # The pattern of the 128 MiB file the background-transfer case moves both ways, and its SHA-256.
 readonly BIG_PATTERN='virtmanager-mcp test bed'
@@ -300,9 +300,10 @@ unit_owrt() { # case
 # Builds $WORK/share, with a fixed tree to push, and the pull directory $WORK/pull, then writes the transfer configs:
 # config-transfer.toml is config.toml with both directories, config-transfer-slow.toml lets a call wait 2 s, and
 # config-transfer-caps.toml caps a pull at 64 KiB and 10 entries. The tree holds ignore rules in itself and in the
-# share, ignored files, a script, a symlink inside and one leaving it, and a FIFO. Does nothing the second time.
+# share, ignored files, a script, a symlink inside and one leaving it, and a FIFO. Only the Windows cases push
+# share/win-tree, whose names Windows cannot hold, beside ordinary ones. Does nothing the second time.
 transfer_setup() {
-  local share=${WORK}/share pull=${WORK}/pull tree=${WORK}/share/tree dirs
+  local share=${WORK}/share pull=${WORK}/pull tree=${WORK}/share/tree dirs name
   [[ -f ${WORK}/config-transfer.toml ]] && return 0
   mkdir -p -- "${tree}/sub" "${tree}/build" "${pull}" || return 1
   printf '*.tmp\nbuild/\n' > "${tree}/.gitignore" || return 1
@@ -315,11 +316,20 @@ transfer_setup() {
   printf 'secret\n' > "${tree}/k.secret"
   printf 'outside\n' > "${share}/outside"
   printf 'windows transfer\n' > "${share}/win.txt"
+  mkdir -p -- "${share}/win-tree/sub" "${share}/win-tree/aux" || return 1
+  for name in CON nul.txt 'a?b' tail. Case.txt case.txt ok.txt sub/deep.txt été.txt aux/inner.txt; do
+    printf '%s\n' "${name}" > "${share}/win-tree/${name}" || return 1
+  done
+  # Five levels of 50 characters: past Windows' 260-character limit once pushed to C:\Windows\Temp\vmm-deep.
+  name=${share}/win-deep
+  for _ in 1 2 3 4 5; do name+=/$(printf 'd%.0s' {1..50}); done
+  mkdir -p -- "${name}" && printf 'deep\n' > "${name}/file.txt" || return 1
   printf 'x\n' > "${pull}/a-file"
   # Fixed modes, whatever the umask, so the cases can expect them.
   find "${share}" "${pull}" -type f -exec chmod 644 {} + && find "${share}" "${pull}" -type d -exec chmod 755 {} + \
     && chmod 755 "${tree}/sub/run.sh" || return 1
-  ln -s a.txt "${tree}/link-in" && ln -s ../outside "${tree}/link-out" && mkfifo "${tree}/pipe" || return 1
+  ln -s a.txt "${tree}/link-in" && ln -s ../outside "${tree}/link-out" && mkfifo "${tree}/pipe" \
+    && ln -s ok.txt "${share}/win-tree/link-in" || return 1
   dirs=$(printf 'host_share_dirs = ["%s"]\nhost_pull_dirs = ["%s"]' "${share}" "${pull}")
   # Top-level keys go before the first table.
   { printf '%s\n' "${dirs}" && cat "${TESTBED}/config.toml"; } > "${WORK}/config-transfer.toml.new" || return 1
@@ -426,7 +436,7 @@ write_screen_config() {
 }
 
 # Writes $WORK/config-windows.toml: config-templates.toml with t-win11 allowed and powered, and the transfer
-# directories that transfer_setup built.
+# directories that transfer_setup built; and config-windows-caps.toml, which also caps a pull at 64 MiB.
 write_windows_config() {
   local file=${WORK}/config-windows.toml
   {
@@ -434,7 +444,8 @@ write_windows_config() {
     sed -e 's/^allowed_vms = \[/allowed_vms = ["t-win11", /' -e 's/^power_vms = \[/power_vms = ["t-win11", /' \
       "${TESTBED}/config-templates.toml"
   } > "${file}" || return 1
-  [[ $(grep -cF -e 'allowed_vms = ["t-win11", ' -e 'power_vms = ["t-win11", ' "${file}") == 2 ]]
+  [[ $(grep -cF -e 'allowed_vms = ["t-win11", ' -e 'power_vms = ["t-win11", ' "${file}") == 2 ]] || return 1
+  { cat "${file}" && printf '\n[limits]\nmax_pull_bytes = 67108864\n'; } > "${WORK}/config-windows-caps.toml"
 }
 
 # Prints why the Windows cases cannot run, or nothing when they can. A running t-win11 already holds its memory.
@@ -464,9 +475,10 @@ win_shut_off() {
 }
 
 # win-exec starts t-win11 and shuts it down; the job and wait cases then run on a fresh start, sharing vars.json, and
-# win-transfer last, with vars.json rewritten for the transfer directories.
+# the transfer cases last, with vars.json rewritten for the transfer directories and the caps case under its own
+# config.
 unit_windows() {
-  local cases=(win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer)
+  local cases=(win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer win-transfer-caps)
   local config=${WORK}/config-windows.toml reason case
   reason=$(win_blocker)
   if [[ -n ${reason} ]]; then
@@ -489,11 +501,19 @@ unit_windows() {
   if win_ready; then
     for case in "${cases[@]:1}"; do
       [[ ${case} == win-transfer ]] && transfer_vars
-      run_case "${case}" "${config}"
+      if [[ ${case} == win-transfer-caps ]]; then
+        run_case "${case}" "${WORK}/config-windows-caps.toml"
+      else
+        run_case "${case}" "${config}"
+      fi
     done
     check_pulled win-transfer win/vmm-win.txt $'windows transfer\n'
-    [[ ! -e ${WORK}/pull/win-dir ]] || record win-transfer failed "a refused Windows pull created pull/win-dir"
+    check_pulled win-transfer win-dir/a.txt $'alpha\n'
+    check_pulled win-transfer win-dir/sub/b.txt $'beta\n'
     check_pull_dir win-transfer
+    [[ -z $(find "${WORK}/pull" -maxdepth 1 \( -name win-big -o -name win-loop \) -print) ]] \
+      || record win-transfer-caps failed "a refused Windows pull left pull/win-big or pull/win-loop behind"
+    check_pull_dir win-transfer-caps
   else
     for case in "${cases[@]:1}"; do record "${case}" failed "the t-win11 agent did not answer"; done
   fi
