@@ -96,6 +96,8 @@ Later on 2026-11-12, on the same guest, with the server built from the run 2 wor
 The same session pulled a tree with `été.txt`, `sub dir`, an empty directory, a file symlink and a junction: the
 hashes on the host matched the guest's, the file symlink was skipped and named, and the junction arrived as a
 directory holding the file it points to. A pull with `a.txt` held open with `FileShare` none failed with
-`Couldn't open ./a.txt: Permission denied`, and a pull of the self-junction failed with `Cannot stat`. A pull of a
-4 GiB file with `max_pull_bytes` at 64 MiB stopped `tar.exe` and deleted the archive. Afterwards the temporary
+`Couldn't open ./a.txt: Permission denied`, and a pull of the self-junction failed with `Cannot stat`. A second pull
+to the same host directory was refused without `overwrite`. A pull of a 4 GiB file with `max_pull_bytes` at 64 MiB
+failed with the message for an archive that passed the limit while `tar` built it: the size poll, not the final
+measurement, stopped `tar.exe`, and the archive was deleted. Afterwards the temporary
 directory held no `.vmm-*` entry and no `tar` process ran.

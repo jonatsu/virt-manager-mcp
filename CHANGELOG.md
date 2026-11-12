@@ -33,13 +33,16 @@ Each release's section lists what changed for people who run the server and for 
   extra `exclude` patterns. A symlink goes along only when it stays inside the tree; other links, FIFOs, sockets and
   devices are skipped and named. An existing directory is replaced as a whole only with `replace: true`, never `/` or
   a directory directly below it, and a failed push leaves it in place. Read-only mode hides it.
-- `copy_dir_from_vm` pulls a directory from a Linux guest that has `tar` into a pull directory. The guest packs it in
-  `/var/tmp`, and the server unpacks the archive itself: files arrive with mode 644 and directories with 755, links,
-  devices and FIFOs are skipped and named, and an archive with absolute or `..` paths, paths over 4096 bytes or 256
-  levels, repeated paths or sparse files fails the pull, which then writes nothing. `exclude` takes gitignore
-  patterns, applied on the host. An existing directory is replaced as a whole only with `overwrite: true`.
-  `limits.max_pull_bytes` caps the archive and the files written, and the new `limits.max_pull_entries` (default
-  100,000) the entries, counting the directories their paths imply. Read-only mode hides it.
+- `copy_dir_from_vm` pulls a directory from a Linux guest that has `tar`, or a Windows guest, into a pull directory.
+  A Linux guest packs it in `/var/tmp`, and the server unpacks the archive itself: files arrive with mode 644 and
+  directories with 755, links, devices and FIFOs are skipped and named, and an archive with absolute or `..` paths,
+  paths over 4096 bytes or 256 levels, repeated paths or sparse files fails the pull, which then writes nothing.
+  `exclude` takes gitignore patterns, applied on the host. An existing directory is replaced as a whole only with
+  `overwrite: true`. `limits.max_pull_bytes` caps the archive and the files written, and the new
+  `limits.max_pull_entries` (default 100,000) the entries, counting the directories their paths imply. A Windows
+  guest packs with its own `tar.exe` in `%SystemRoot%\Temp`, which follows junctions; any non-zero exit of `tar.exe`
+  fails the pull, and the archive can pass `limits.max_pull_bytes` by about a second of writing before it stops.
+  Read-only mode hides it.
 - A copy that outlasts `limits.max_wait_secs`, through any of the four copy tools, goes on in the background and
   replies with a transfer ID instead of failing at the client's call timeout. `wait_for`'s `transfer_done`
   condition reports how it ended. `limits.max_transfers` (default 4) caps how many run at once.

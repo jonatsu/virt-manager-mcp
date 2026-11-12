@@ -586,8 +586,20 @@ pub fn pull(guest: &dyn Guest, req: &Request<'_>, bytes: &AtomicU64) -> Result<U
         uuid::Uuid::new_v4().simple()
     );
     let result = pack_and_unpack(guest, req, &archive, tar, bytes);
-    remove(guest, &archive, req.remove_for);
-    result
+    let Err(failure) = remove(guest, &archive, req.remove_for) else {
+        return result;
+    };
+    let left = format!("the archive {archive} is still in the guest: {failure}");
+    match result {
+        Ok(mut unpacked) => {
+            unpacked.warning = Some(match unpacked.warning.take() {
+                Some(warning) => format!("{warning}\n{left}"),
+                None => left,
+            });
+            Ok(unpacked)
+        }
+        Err(e) => Err(e.context(left)),
+    }
 }
 
 /// The size the Windows size query printed: a number of bytes, or `none` for a missing file.
@@ -603,16 +615,17 @@ fn windows_size(ran: &Ran) -> Result<Option<u64>> {
 }
 
 /// Deletes the archive, trying again for up to `retry_for` while that fails, every second, or a tenth of `retry_for`
-/// when that is shorter.
-fn remove(guest: &dyn Guest, archive: &str, retry_for: Duration) {
+/// when that is shorter. Fails with the last attempt's cause.
+fn remove(guest: &dyn Guest, archive: &str, retry_for: Duration) -> Result<()> {
     let started = Instant::now();
     loop {
-        if guest
-            .run(Step::Remove, &[archive])
-            .is_ok_and(|ran| ran.code == Some(0))
-            || started.elapsed() >= retry_for
-        {
-            return;
+        let failure = match guest.run(Step::Remove, &[archive]) {
+            Ok(ran) if ran.code == Some(0) => return Ok(()),
+            Ok(ran) => ran.describe(),
+            Err(e) => format!("{e:#}"),
+        };
+        if started.elapsed() >= retry_for {
+            bail!("deleting it failed: {failure}");
         }
         std::thread::sleep(Duration::from_secs(1).min(retry_for / 10));
     }
@@ -665,7 +678,10 @@ fn pack_and_unpack(
     };
     let warning = match packed.code {
         Some(0) => None,
-        Some(1) if packed.stderr.contains(CHANGED) => Some(packed.stderr.clone()),
+        // `tar.exe` has no such warning, and its status 1 also covers a file it could not open.
+        Some(1) if req.os == GuestOs::Linux && packed.stderr.contains(CHANGED) => {
+            Some(packed.stderr.clone())
+        }
         _ => bail!("tar failed in the guest: {}", packed.describe()),
     };
     // A fast `tar` can finish between two polls, so the finished archive is measured too, before any of it is sent.
@@ -1684,6 +1700,53 @@ mod tests {
         };
         let err = windows_pull("win-locked", &guest, &LIMITS, Duration::ZERO).unwrap_err();
         assert!(err.to_string().contains("Couldn't open ./a.txt"), "{err}");
+        // GNU tar's changed-file text in a name does not make a Windows failure a warning.
+        let guest = WindowsGuest {
+            pack: (
+                1,
+                "tar.exe: Couldn't open ./file changed as we read it: Permission denied",
+            ),
+            ..WindowsGuest::new()
+        };
+        let err = windows_pull("win-changed", &guest, &LIMITS, Duration::ZERO).unwrap_err();
+        assert!(err.to_string().contains("tar failed"), "{err}");
+        // A failed removal after a failed pull is named in the error's context.
+        let guest = WindowsGuest {
+            pack: (1, "tar.exe: Couldn't open ./a.txt: Permission denied"),
+            failed_removes: std::cell::Cell::new(u32::MAX),
+            ..WindowsGuest::new()
+        };
+        let err = format!(
+            "{:#}",
+            windows_pull("win-left", &guest, &LIMITS, Duration::ZERO).unwrap_err()
+        );
+        assert!(
+            err.contains("is still in the guest") && err.contains("Couldn't open"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn each_windows_pull_step_runs_its_own_script() {
+        let steps = Steps(GuestOs::Windows);
+        for (step, script) in [
+            (Step::Prepare, winsteps::PULL_PREPARE),
+            (Step::Remove, winsteps::PULL_REMOVE),
+        ] {
+            let args = [r"C:\it's\x"];
+            let spec = steps.spec(step, &args).unwrap();
+            assert_eq!(spec.args, winsteps::script(script, &args).args, "{step:?}");
+        }
+        assert_ne!(
+            winsteps::script(winsteps::PULL_PREPARE, &["a"]).args,
+            winsteps::script(winsteps::PULL_REMOVE, &["a"]).args
+        );
+        assert!(steps.spec(Step::Pack, &[r"C:\x", "a.tar"]).is_err());
+        let spec = steps
+            .spec(Step::Pack, &[r"C:\x", "a.tar", WIN_TAR])
+            .unwrap();
+        assert_eq!(spec.path, WIN_TAR);
+        assert_eq!(spec.args, ["-c", "-f", "a.tar", "-C", r"C:\x", "."]);
     }
 
     #[test]
@@ -1705,7 +1768,7 @@ mod tests {
             ..WindowsGuest::new()
         };
         let started = Instant::now();
-        windows_pull(
+        let pulled = windows_pull(
             "win-remove-stuck",
             &guest,
             &LIMITS,
@@ -1713,6 +1776,12 @@ mod tests {
         )
         .unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
+        // The pull succeeds, and its reply names the archive left behind with the cause.
+        let warning = pulled.warning.unwrap();
+        assert!(
+            warning.contains(r"C:\Windows\Temp\.vmm-") && warning.contains("in use"),
+            "{warning}"
+        );
         let removes = guest
             .calls()
             .iter()

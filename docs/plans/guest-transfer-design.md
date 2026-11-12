@@ -152,7 +152,11 @@ Arguments: `vm`, `guest_path`, `host_path`, `overwrite` (default false) and `exc
 directory: `/var/tmp` on Linux, or `/tmp` where `/var/tmp` is missing. While `tar` runs, the server polls the
 archive's size and stops `tar` once it passes `max_pull_bytes`, which fails the pull and deletes the archive. A `tar`
 that finishes between two polls has its archive measured before anything is sent. A finished archive within the cap
-streams out, is deleted in the guest, and is unpacked by the server under the host rules.
+streams out, is deleted in the guest, and is unpacked by the server under the host rules. On Windows the agent cannot
+open the archive while `tar.exe` writes it, so each poll reads its length through a new PowerShell process. An archive
+can then pass the cap by about one second of writing before `tar.exe` stops; the host still writes nothing past the
+cap. A removal that `tar.exe` or a scanner blocks is retried for up to 10 s, and an archive still left after that is
+named in the reply.
 
 The server applies `exclude` itself while unpacking, in the same gitignore syntax as pushes, and never passes it to the
 guest's `tar`. Guest `tar` builds disagree on `--exclude`: GNU tar matches unanchored and lets wildcards cross `/`,
@@ -320,18 +324,23 @@ that meets a symlinked directory.
 2. A guest with little temporary space cannot take a push of a tree larger than half its free space, because the
    archive and the unpacked tree exist together. A pull's archive can fill the guest's temporary directory up to
    `max_pull_bytes` before the cap stops it. On guests whose `/tmp` lives in RAM, such as OpenWrt, that costs memory.
+   On Windows the archive can pass the cap by about one second of writing, 0.8 GB on `t-win11`, because each size
+   poll starts a PowerShell process.
 3. A push to a Windows guest skips the names Windows cannot hold, so a checkout with such a file arrives without it.
    The reply names each skipped entry. Windows also refuses to rename a directory while a file in it is open, so a
    `replace` of a tree in use fails and leaves the old tree in place.
 4. A guest's `tar -c` follows the guest's view of the tree, which the agent controls. Windows `tar.exe` follows
-   junctions, so a junction to a directory outside the tree, or to one of its own parents, brings that content into
-   the pull until a cap stops it. The host rules do not depend on it, because the server unpacks every pull itself and
-   the caps bound it.
+   junctions, so a junction to a directory outside the tree brings that content into the pull until a cap stops it. A
+   junction to the tree itself or one of its parents makes `tar.exe` recurse 64 levels and then fail with
+   `Cannot stat`, which fails the pull. The host rules do not depend on it, because the server unpacks every pull
+   itself and the caps bound it.
 5. Concurrent guest-agent commands from several server processes rely on libvirt serializing them per VM. The
    background-transfer case checks it under one process only.
 6. An overwrite deletes the swapped-out tree with `std::fs::remove_dir_all`, which does not stop at mount boundaries.
    A filesystem that an operator mounts inside a pulled tree would lose its contents, so the README asks operators to
    mount nothing inside a pull directory.
+7. Windows paths are limited to 260 characters unless the guest enables long paths. A push whose tree, placed at the
+   target, holds a longer path fails in `tar.exe`, and the old tree stays in place.
 
 ## Open questions
 
