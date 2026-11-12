@@ -150,7 +150,8 @@ it is built.
      `copy_dir_from_vm`, background copies with `transfer_done`, and `vm_addresses`, for Linux guests. On `t-win11`
      the file tools work, and `vm_addresses` returns an empty list because that guest has no network interface. Its
      execution record holds the commits, test-bed results and reviews.
-   - Next: run 2, directory transfers on Windows through the guest's `tar.exe`.
+   - Next: [run 2](guest-transfer-run-2-implementation-plan.md), directory transfers on Windows through the guest's
+     `tar.exe`.
 4. **Seeing what happened.** When something fails in the guest, an agent can find out why. This covers console output
    buffered from VM start, guest resource usage, and events such as a crash or reboot.
 5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
@@ -183,4 +184,6 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Run 2 of outcome 3, directory transfers on Windows, needs its plan. Follow-ups 15 to 17 can land at any time.
+Run 2 of outcome 3, directory transfers on Windows, is planned in
+[`guest-transfer-run-2-implementation-plan.md`](guest-transfer-run-2-implementation-plan.md). Follow-ups 15 to 17 can
+land at any time.
