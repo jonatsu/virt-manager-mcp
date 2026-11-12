@@ -566,6 +566,9 @@ pub fn pull(guest: &dyn Guest, req: &Request<'_>, bytes: &AtomicU64) -> Result<U
     let prep = guest.run(Step::Prepare, &[req.guest_path, first, second])?;
     match prep.code {
         Some(0) => {}
+        Some(10) if req.os == GuestOs::Windows => bail!(
+            "the guest has no System32\\tar.exe, which Windows 10 1803 and later ship and copy_dir_from_vm needs"
+        ),
         Some(10) => bail!("the guest has no tar, which copy_dir_from_vm needs"),
         Some(11) => bail!("{} is not a directory in the guest", req.guest_path),
         Some(12) => bail!("the guest has neither {first} nor {second} for the archive"),
@@ -1545,6 +1548,7 @@ mod tests {
         pack: (i64, &'static str),
         sizes: RefCell<Vec<Option<u64>>>,
         failed_removes: std::cell::Cell<u32>,
+        prepare: i64,
     }
 
     impl WindowsGuest {
@@ -1555,6 +1559,7 @@ mod tests {
                 pack: (0, ""),
                 sizes: RefCell::new(vec![None]),
                 failed_removes: std::cell::Cell::new(0),
+                prepare: 0,
             }
         }
 
@@ -1576,6 +1581,11 @@ mod tests {
                 stderr: String::new(),
             };
             Ok(match step {
+                Step::Prepare if self.prepare != 0 => Ran {
+                    code: Some(self.prepare),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
                 Step::Prepare => ok(&format!("{WIN_TEMP}\n{WIN_TAR}")),
                 Step::Remove if self.failed_removes.get() > 0 => {
                     self.failed_removes.set(self.failed_removes.get() - 1);
@@ -1700,6 +1710,13 @@ mod tests {
         };
         let err = windows_pull("win-locked", &guest, &LIMITS, Duration::ZERO).unwrap_err();
         assert!(err.to_string().contains("Couldn't open ./a.txt"), "{err}");
+        // A guest without tar.exe hears about tar.exe, not about Linux tar.
+        let guest = WindowsGuest {
+            prepare: 10,
+            ..WindowsGuest::new()
+        };
+        let err = windows_pull("win-no-tar", &guest, &LIMITS, Duration::ZERO).unwrap_err();
+        assert!(err.to_string().contains("System32\\tar.exe"), "{err}");
         // GNU tar's changed-file text in a name does not make a Windows failure a warning.
         let guest = WindowsGuest {
             pack: (
