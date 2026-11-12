@@ -24,7 +24,7 @@ use rustix::io::Errno;
 use serde::Serialize;
 use tar::EntryType;
 
-use crate::agent::{Agent, ExecOutcome, ExecSpec};
+use crate::agent::{Agent, ExecOutcome, ExecSpec, GuestOs};
 use crate::pull::{self, Destination, FILE_MODE};
 use crate::push::Skipped;
 use crate::transfer::CountingWriter;
@@ -393,21 +393,55 @@ impl Ran {
     }
 }
 
-/// What a directory pull needs from a guest. Every script is a constant `sh` script, and every path a separate
-/// argument, so no path is ever parsed as shell code.
+/// One step a pull runs in the guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Prepare,
+    Pack,
+    Remove,
+}
+
+/// What a directory pull needs from a guest: running and starting its steps, and reading the archive.
 pub trait Guest {
-    fn run(&self, script: &str, args: &[&str]) -> Result<Ran>;
-    fn start(&self, script: &str, args: &[&str]) -> Result<i64>;
+    fn run(&self, step: Step, args: &[&str]) -> Result<Ran>;
+    fn start(&self, step: Step, args: &[&str]) -> Result<i64>;
     fn status(&self, pid: i64) -> Result<Option<Ran>>;
-    fn size(&self, path: &str) -> Result<u64>;
+    /// The size of the file at `path`, or `None` when it does not exist yet.
+    fn size(&self, path: &str) -> Result<Option<u64>>;
     fn kill(&self, pid: i64);
     fn read(&self, path: &str, out: &mut dyn Write, max_bytes: u64) -> Result<u64>;
 }
 
-fn sh(script: &str, args: &[&str]) -> ExecSpec {
-    let mut argv = vec!["-c".to_string(), script.to_string(), "sh".to_string()];
-    argv.extend(args.iter().map(|a| (*a).to_string()));
-    ExecSpec::new("/bin/sh", argv)
+/// Builds a pull's guest steps for the guest's OS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Steps(pub GuestOs);
+
+impl Steps {
+    /// The command that runs `step` with `args`. Every script is a constant and every path a separate argument, so no
+    /// path is ever parsed as shell code.
+    pub fn spec(self, step: Step, args: &[&str]) -> Result<ExecSpec> {
+        match self.0 {
+            GuestOs::Linux => {
+                let mut argv = vec![
+                    "-c".to_string(),
+                    linux_script(step).to_string(),
+                    "sh".to_string(),
+                ];
+                argv.extend(args.iter().map(|a| (*a).to_string()));
+                Ok(ExecSpec::new("/bin/sh", argv))
+            }
+            GuestOs::Windows => bail!("copy_dir_from_vm does not support Windows guests yet"),
+        }
+    }
+}
+
+/// The `sh` script of a Linux step.
+fn linux_script(step: Step) -> &'static str {
+    match step {
+        Step::Prepare => PREPARE,
+        Step::Pack => PACK,
+        Step::Remove => REMOVE,
+    }
 }
 
 fn ran(out: ExecOutcome) -> Ran {
@@ -418,36 +452,46 @@ fn ran(out: ExecOutcome) -> Ran {
     }
 }
 
-impl Guest for Agent<'_> {
-    fn run(&self, script: &str, args: &[&str]) -> Result<Ran> {
-        let out = self.exec(&sh(script, args), STEP_TIMEOUT, OUTPUT_MAX)?;
+/// A guest reached through its agent, with its OS's steps.
+pub struct OnGuest<'a> {
+    pub agent: &'a Agent<'a>,
+    pub steps: Steps,
+}
+
+impl Guest for OnGuest<'_> {
+    fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
+        let out = self
+            .agent
+            .exec(&self.steps.spec(step, args)?, STEP_TIMEOUT, OUTPUT_MAX)?;
         if out.timed_out {
             bail!(
-                "a guest step did not finish within {} s",
+                "the guest's {step:?} step did not finish within {} s",
                 STEP_TIMEOUT.as_secs()
             );
         }
         Ok(ran(out))
     }
 
-    fn start(&self, script: &str, args: &[&str]) -> Result<i64> {
-        Agent::start(self, &sh(script, args))
+    fn start(&self, step: Step, args: &[&str]) -> Result<i64> {
+        self.agent.start(&self.steps.spec(step, args)?)
     }
 
     fn status(&self, pid: i64) -> Result<Option<Ran>> {
-        Ok(Agent::status(self, pid, OUTPUT_MAX)?.map(ran))
+        Ok(self.agent.status(pid, OUTPUT_MAX)?.map(ran))
     }
 
-    fn size(&self, path: &str) -> Result<u64> {
-        self.file_size(path)
+    fn size(&self, path: &str) -> Result<Option<u64>> {
+        // On Linux the agent cannot tell a missing file from another failure, so any failure reads as a missing
+        // archive; the size of the finished archive is required before anything is sent.
+        Ok(self.agent.file_size(path).ok())
     }
 
     fn kill(&self, pid: i64) {
-        let _ = Agent::kill(self, pid);
+        let _ = self.agent.kill(pid);
     }
 
     fn read(&self, path: &str, out: &mut dyn Write, max_bytes: u64) -> Result<u64> {
-        self.read_to(path, &mut &mut *out, max_bytes)
+        self.agent.read_to(path, &mut &mut *out, max_bytes)
     }
 }
 
@@ -480,7 +524,7 @@ pub struct Request<'a> {
 /// Pulls the guest directory `req.guest_path` to `req.dest`. The guest's archive is deleted whatever happens.
 pub fn pull(guest: &dyn Guest, req: &Request<'_>, bytes: &AtomicU64) -> Result<Unpacked> {
     let [first, second] = req.temp_dirs;
-    let prep = guest.run(PREPARE, &[req.guest_path, first, second])?;
+    let prep = guest.run(Step::Prepare, &[req.guest_path, first, second])?;
     match prep.code {
         Some(0) => {}
         Some(10) => bail!("the guest has no tar, which copy_dir_from_vm needs"),
@@ -494,7 +538,7 @@ pub fn pull(guest: &dyn Guest, req: &Request<'_>, bytes: &AtomicU64) -> Result<U
         uuid::Uuid::new_v4().simple()
     );
     let result = pack_and_unpack(guest, req, &archive, bytes);
-    let _ = guest.run(REMOVE, &[&archive]);
+    let _ = guest.run(Step::Remove, &[&archive]);
     result
 }
 
@@ -505,7 +549,7 @@ fn pack_and_unpack(
     bytes: &AtomicU64,
 ) -> Result<Unpacked> {
     let max = req.limits.max_bytes;
-    let pid = guest.start(PACK, &[req.guest_path, archive])?;
+    let pid = guest.start(Step::Pack, &[req.guest_path, archive])?;
     let started = Instant::now();
     let packed = loop {
         // Every way out of this loop but `tar` ending stops `tar`, so it never writes on, uncapped, after the pull.
@@ -518,7 +562,14 @@ fn pack_and_unpack(
             }
         }
         // The archive may not exist yet in the first moments, which reads as empty.
-        if guest.size(archive).unwrap_or(0) > max {
+        let size = match guest.size(archive) {
+            Ok(size) => size.unwrap_or(0),
+            Err(e) => {
+                guest.kill(pid);
+                return Err(e.context("measuring the archive in the guest while tar built it"));
+            }
+        };
+        if size > max {
             guest.kill(pid);
             bail!(
                 "the archive of {} passed the pull limit of {max} bytes (limits.max_pull_bytes) while tar built \
@@ -543,7 +594,8 @@ fn pack_and_unpack(
     // A fast `tar` can finish between two polls, so the finished archive is measured too, before any of it is sent.
     let size = guest
         .size(archive)
-        .context("measuring the archive in the guest")?;
+        .context("measuring the archive in the guest")?
+        .ok_or_else(|| anyhow!("cannot measure the archive {archive} in the guest"))?;
     if size > max {
         bail!(
             "the archive of {} is {size} bytes, over the pull limit of {max} bytes (limits.max_pull_bytes); it was \
@@ -1001,8 +1053,8 @@ mod tests {
     }
 
     impl Guest for LocalGuest {
-        fn run(&self, script: &str, args: &[&str]) -> Result<Ran> {
-            let out = self.command(script, args).output()?;
+        fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
+            let out = self.command(linux_script(step), args).output()?;
             Ok(Ran {
                 code: out.status.code().map(i64::from),
                 stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -1010,9 +1062,9 @@ mod tests {
             })
         }
 
-        fn start(&self, script: &str, args: &[&str]) -> Result<i64> {
+        fn start(&self, step: Step, args: &[&str]) -> Result<i64> {
             let child = self
-                .command(script, args)
+                .command(linux_script(step), args)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()?;
@@ -1042,8 +1094,12 @@ mod tests {
             }))
         }
 
-        fn size(&self, path: &str) -> Result<u64> {
-            Ok(fs::metadata(path)?.len())
+        fn size(&self, path: &str) -> Result<Option<u64>> {
+            match fs::metadata(path) {
+                Ok(meta) => Ok(Some(meta.len())),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            }
         }
 
         fn kill(&self, pid: i64) {

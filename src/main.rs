@@ -6,6 +6,7 @@ mod console;
 mod dirpull;
 mod display;
 mod fsops;
+mod guestpath;
 mod hypervisor;
 mod jobs;
 mod manage;
@@ -19,6 +20,7 @@ mod server;
 mod sweep;
 mod transfer;
 mod wait;
+mod winsteps;
 
 use std::path::PathBuf;
 use std::sync::Arc;

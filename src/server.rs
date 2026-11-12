@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
 use crate::config::Config;
 use crate::console::{Consoles, Pacing};
+use crate::guestpath::GuestPath;
 use crate::hypervisor::{self, Hypervisor};
 use crate::{
     addresses, ansi, dirpull, display, fsops, jobs, manage, mouse, ocrfetch, pull, push, transfer,
@@ -210,8 +211,8 @@ fn yes() -> bool {
 
 /// Refuses a Windows guest for a directory tool before the call touches the host or takes a transfer slot. Run 2
 /// adds directory transfers on Windows.
-fn refuse_windows(dom: &virt::domain::Domain, timeout_secs: i32, tool: &str) -> Result<()> {
-    if Agent::new(dom, timeout_secs).os()? == agent::GuestOs::Windows {
+fn refuse_windows(os: agent::GuestOs, tool: &str) -> Result<()> {
+    if os == agent::GuestOs::Windows {
         bail!("{tool} does not support Windows guests yet");
     }
     Ok(())
@@ -953,7 +954,8 @@ impl VirtServer {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
             let timeout = s.hv.config.limits.agent_timeout_secs;
-            refuse_windows(&dom, timeout, "copy_dir_to_vm")?;
+            let os = Agent::new(&dom, timeout).os()?;
+            refuse_windows(os, "copy_dir_to_vm")?;
             let tree = push::Tree::resolve(&s.hv.config.host_share_dirs, &p.host_path)?;
             let options = push::Options {
                 respect_gitignore: p.respect_gitignore,
@@ -961,12 +963,16 @@ impl VirtServer {
                 exclude: p.exclude,
             };
             tree.check(&options)?;
-            let target = push::Target::parse(&p.guest_path, p.replace)?;
+            let target = push::Target::parse(os, &p.guest_path, p.replace)?;
             let guest = dom.clone();
             let replace = p.replace;
             s.copy(&p.vm, &dom, move |bytes| {
                 let agent = Agent::new(&guest, timeout);
-                let summary = push::push(&agent, &target, replace, bytes, |out| {
+                let on = push::OnGuest {
+                    agent: &agent,
+                    steps: push::Steps(os),
+                };
+                let summary = push::push(&on, &target, replace, bytes, |out| {
                     push::write_archive(&tree, &push::select(&tree, &options)?, out)
                 })?;
                 let mut reply = serde_json::to_value(&summary)?;
@@ -1005,10 +1011,9 @@ impl VirtServer {
             // The VM first, so a call naming a hidden or missing VM creates no directories on the host.
             let dom = s.hv.domain(&p.vm)?;
             let timeout = config.limits.agent_timeout_secs;
-            refuse_windows(&dom, timeout, "copy_dir_from_vm")?;
-            if !p.guest_path.starts_with('/') {
-                bail!("{}: guest_path must be absolute", p.guest_path);
-            }
+            let os = Agent::new(&dom, timeout).os()?;
+            refuse_windows(os, "copy_dir_from_vm")?;
+            let guest_path = GuestPath::parse(os, &p.guest_path)?.normalized();
             let exclude = dirpull::excludes(&p.exclude)?;
             let dest = pull::Destination::open(&config.host_pull_dirs, &p.host_path)?;
             dest.check(pull::Kind::Directory, p.overwrite)?;
@@ -1021,8 +1026,12 @@ impl VirtServer {
             s.copy(&p.vm, &dom, move |bytes| {
                 let _claim = claim;
                 let agent = Agent::new(&guest, timeout);
+                let on = dirpull::OnGuest {
+                    agent: &agent,
+                    steps: dirpull::Steps(os),
+                };
                 let request = dirpull::Request {
-                    guest_path: &p.guest_path,
+                    guest_path: &guest_path,
                     dest: &dest,
                     overwrite: p.overwrite,
                     limits: &limits,
@@ -1030,7 +1039,7 @@ impl VirtServer {
                     temp_dirs: dirpull::TEMP_DIRS,
                     poll: dirpull::POLL,
                 };
-                let unpacked = dirpull::pull(&agent, &request, bytes)?;
+                let unpacked = dirpull::pull(&on, &request, bytes)?;
                 let mut reply = serde_json::to_value(&unpacked)?;
                 reply["host_path"] = json!(dest.path());
                 Ok(reply.to_string())

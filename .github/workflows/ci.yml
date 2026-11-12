@@ -40,7 +40,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # The runner image ships pwsh; requiring it keeps the Windows scripts' parse test from skipping.
       - run: cargo test --locked
+        env:
+          VIRTMANAGER_REQUIRE_PWSH: "1"
       - run: cargo build --locked
 
   msrv:

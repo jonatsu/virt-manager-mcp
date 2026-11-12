@@ -24,7 +24,8 @@ use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use serde::Serialize;
 
-use crate::agent::{Agent, ExecSpec};
+use crate::agent::{Agent, ExecSpec, GuestOs};
+use crate::guestpath::GuestPath;
 use crate::transfer::CountingReader;
 
 /// The setuid and setgid bits, which a pushed entry never carries.
@@ -558,47 +559,37 @@ fn open_dir_path(path: &Path) -> Result<OwnedFd> {
 pub struct Target {
     pub path: String,
     parent: String,
+    separator: char,
     id: String,
 }
 
 impl Target {
-    /// Parses `guest_path`, refusing a relative path, `..`, and with `replace`, `/` or a directory directly below it.
-    pub fn parse(guest_path: &str, replace: bool) -> Result<Self> {
-        if !guest_path.starts_with('/') {
-            bail!("{guest_path}: guest_path must be absolute");
+    /// Parses `guest_path` under the rules of `os`, refusing a relative path, `..`, the root, and with `replace`, a
+    /// directory directly below the root.
+    pub fn parse(os: GuestOs, guest_path: &str, replace: bool) -> Result<Self> {
+        let parsed = GuestPath::parse(os, guest_path)?;
+        let depth = parsed.parts().len();
+        if depth == 0 {
+            bail!("{guest_path}: a push never replaces {}", parsed.root());
         }
-        let parts: Vec<&str> = guest_path
-            .split('/')
-            .filter(|p| !p.is_empty() && *p != ".")
-            .collect();
-        if parts.contains(&"..") {
-            bail!("{guest_path}: guest_path may not contain '..'");
-        }
-        let Some((name, parents)) = parts.split_last() else {
-            bail!("{guest_path}: a push never replaces /");
-        };
-        if replace && parents.is_empty() {
+        if replace && depth == 1 {
             bail!(
-                "{guest_path}: replace refuses / and the directories directly below it, as a guard against mistakes"
+                "{guest_path}: replace refuses {} and the directories directly below it, as a guard against mistakes",
+                parsed.root()
             );
         }
-        let parent = format!("/{}", parents.join("/"));
-        let path = if parents.is_empty() {
-            format!("/{name}")
-        } else {
-            format!("{parent}/{name}")
-        };
         Ok(Self {
-            path,
-            parent,
+            path: parsed.normalized(),
+            parent: parsed.prefix(depth - 1),
+            separator: parsed.separator(),
             id: uuid::Uuid::new_v4().simple().to_string(),
         })
     }
 
     /// A temporary name beside the target, starting with `.vmm-`.
     fn temp(&self, suffix: &str) -> String {
-        let base = self.parent.trim_end_matches('/');
-        format!("{base}/.vmm-{}.{suffix}", self.id)
+        let base = self.parent.trim_end_matches(self.separator);
+        format!("{base}{}.vmm-{}.{suffix}", self.separator, self.id)
     }
 }
 
@@ -617,35 +608,78 @@ pub enum Step {
 /// How a guest step ended.
 pub struct Ran {
     pub code: Option<i64>,
+    pub stdout: String,
     pub stderr: String,
 }
 
 impl Ran {
+    /// The step's stderr, else its stdout, else its exit status.
     fn describe(&self) -> String {
-        match (self.stderr.is_empty(), self.code) {
-            (false, _) => self.stderr.clone(),
-            (true, Some(code)) => format!("exit status {code}"),
-            (true, None) => "no exit status".into(),
+        match (self.stderr.is_empty(), self.stdout.is_empty(), self.code) {
+            (false, _, _) => self.stderr.clone(),
+            (true, false, _) => self.stdout.clone(),
+            (true, true, Some(code)) => format!("exit status {code}"),
+            (true, true, None) => "no exit status".into(),
         }
     }
 }
 
-/// What a push needs from a guest: running a fixed `sh` script with arguments, and writing a file.
+/// What a push needs from a guest: running one of its steps with arguments, and writing a file.
 pub trait Guest {
-    fn run(&self, step: Step, script: &str, args: &[&str]) -> Result<Ran>;
+    fn run(&self, step: Step, args: &[&str]) -> Result<Ran>;
     fn write(&self, path: &str, data: &mut dyn Read) -> Result<u64>;
 }
 
-impl Guest for Agent<'_> {
-    fn run(&self, step: Step, script: &str, args: &[&str]) -> Result<Ran> {
-        // The script is a constant and every path is a separate argument, so no path is ever parsed as shell code.
-        let mut argv = vec!["-c".to_string(), script.to_string(), "sh".to_string()];
-        argv.extend(args.iter().map(|a| (*a).to_string()));
+/// Builds a push's guest steps for the guest's OS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Steps(pub GuestOs);
+
+impl Steps {
+    /// The command that runs `step` with `args`. Every script is a constant and every path a separate argument, so no
+    /// path is ever parsed as shell code.
+    pub fn spec(self, step: Step, args: &[&str]) -> Result<ExecSpec> {
+        match self.0 {
+            GuestOs::Linux => {
+                let mut argv = vec![
+                    "-c".to_string(),
+                    linux_script(step).to_string(),
+                    "sh".to_string(),
+                ];
+                argv.extend(args.iter().map(|a| (*a).to_string()));
+                Ok(ExecSpec::new("/bin/sh", argv))
+            }
+            GuestOs::Windows => bail!("copy_dir_to_vm does not support Windows guests yet"),
+        }
+    }
+}
+
+/// The `sh` script of a Linux step.
+fn linux_script(step: Step) -> &'static str {
+    match step {
+        Step::Probe => PROBE,
+        Step::Unpack => UNPACK,
+        Step::Swap => SWAP,
+        Step::Cleanup => CLEANUP,
+        #[cfg(test)]
+        Step::Write => panic!("writing the archive is no script step"),
+    }
+}
+
+/// A guest reached through its agent, with its OS's steps.
+pub struct OnGuest<'a> {
+    pub agent: &'a Agent<'a>,
+    pub steps: Steps,
+}
+
+impl Guest for OnGuest<'_> {
+    fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
         let timeout = match step {
             Step::Unpack | Step::Cleanup => LONG_TIMEOUT,
             _ => STEP_TIMEOUT,
         };
-        let out = self.exec(&ExecSpec::new("/bin/sh", argv), timeout, STDERR_MAX)?;
+        let out = self
+            .agent
+            .exec(&self.steps.spec(step, args)?, timeout, STDERR_MAX)?;
         if out.timed_out {
             bail!(
                 "the guest's {step:?} step did not finish within {} s",
@@ -654,12 +688,13 @@ impl Guest for Agent<'_> {
         }
         Ok(Ran {
             code: out.exit_code,
+            stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         })
     }
 
     fn write(&self, path: &str, data: &mut dyn Read) -> Result<u64> {
-        self.write_from(path, data, false, Some(0o600))
+        self.agent.write_from(path, data, false, Some(0o600))
     }
 }
 
@@ -711,7 +746,7 @@ pub fn push(
     archive: impl FnOnce(&mut dyn Write) -> Result<Summary> + Send,
 ) -> Result<Summary> {
     let flag = if replace { "1" } else { "0" };
-    let probe = guest.run(Step::Probe, PROBE, &[&target.path, &target.parent, flag])?;
+    let probe = guest.run(Step::Probe, &[&target.path, &target.parent, flag])?;
     match probe.code {
         Some(0) => {}
         Some(10) => bail!("the guest has no tar, which copy_dir_to_vm needs"),
@@ -743,7 +778,7 @@ pub fn push(
     if result.is_ok() {
         leftovers.push(&old);
     }
-    let cleanup = guest.run(Step::Cleanup, CLEANUP, &leftovers);
+    let cleanup = guest.run(Step::Cleanup, &leftovers);
     let mut summary = result?;
     let failure = match cleanup {
         Ok(ran) if ran.code == Some(0) => None,
@@ -787,14 +822,14 @@ fn send_and_swap(
         sent.context("sending the archive to the guest")?;
         built.context("building the archive")
     })?;
-    let ran = guest.run(Step::Unpack, UNPACK, &[packed, unpacked])?;
+    let ran = guest.run(Step::Unpack, &[packed, unpacked])?;
     if ran.code != Some(0) {
         bail!(
             "unpacking the archive in the guest failed: {}",
             ran.describe()
         );
     }
-    let ran = guest.run(Step::Swap, SWAP, &[&target.path, unpacked, old, flag])?;
+    let ran = guest.run(Step::Swap, &[&target.path, unpacked, old, flag])?;
     match ran.code {
         Some(0) => Ok(summary),
         Some(11) => bail!(
@@ -1051,20 +1086,69 @@ mod tests {
             ("/usr", true, "directly below it"),
             ("/usr/", true, "directly below it"),
         ] {
-            let err = match Target::parse(path, replace) {
+            let err = match Target::parse(GuestOs::Linux, path, replace) {
                 Ok(_) => panic!("{path} accepted"),
                 Err(e) => e.to_string(),
             };
             assert!(err.contains(why), "{path}: {err}");
         }
-        let t = Target::parse("/srv//app/./src/", true).unwrap();
+        let t = Target::parse(GuestOs::Linux, "/srv//app/./src/", true).unwrap();
         assert_eq!(
             (t.path.as_str(), t.parent.as_str()),
             ("/srv/app/src", "/srv/app")
         );
         assert!(t.temp("tar").starts_with("/srv/app/.vmm-"));
-        let t = Target::parse("/new", false).unwrap();
+        let t = Target::parse(GuestOs::Linux, "/new", false).unwrap();
         assert!(t.temp("d").starts_with("/.vmm-"), "{}", t.temp("d"));
+    }
+
+    #[test]
+    fn windows_targets_keep_the_drive_root_and_its_children_safe() {
+        for (path, replace, why) in [
+            (r"C:\", false, r"never replaces C:\"),
+            ("c:/", true, r"never replaces C:\"),
+            (r"C:\Windows", true, "directly below it"),
+            (r"c:\windows\", true, "directly below it"),
+            (r"C:\Windows.", true, "dot or a space"),
+            ("C:\\Windows ", true, "dot or a space"),
+            (r"\\server\share\app", false, "UNC"),
+            ("C:work", false, "relative to the drive"),
+        ] {
+            let err = match Target::parse(GuestOs::Windows, path, replace) {
+                Ok(_) => panic!("{path} accepted"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains(why), "{path}: {err}");
+        }
+        let t = Target::parse(GuestOs::Windows, "c:/work//app/", true).unwrap();
+        assert_eq!(
+            (t.path.as_str(), t.parent.as_str()),
+            (r"C:\work\app", r"C:\work")
+        );
+        assert!(
+            t.temp("tar").starts_with(r"C:\work\.vmm-"),
+            "{}",
+            t.temp("tar")
+        );
+        // Without replace, a directory directly below the root is a valid new target.
+        let t = Target::parse(GuestOs::Windows, r"C:\work", false).unwrap();
+        assert_eq!(t.parent, r"C:\");
+        assert!(t.temp("d").starts_with(r"C:\.vmm-"), "{}", t.temp("d"));
+        assert!(!t.temp("d").starts_with(r"C:\\"), "{}", t.temp("d"));
+    }
+
+    #[test]
+    fn windows_steps_are_refused_until_they_exist() {
+        let err = Steps(GuestOs::Windows).spec(Step::Probe, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("does not support Windows"),
+            "{err}"
+        );
+        let spec = Steps(GuestOs::Linux)
+            .spec(Step::Cleanup, &["/a/.vmm-x.tar"])
+            .unwrap();
+        assert_eq!(spec.path, "/bin/sh");
+        assert_eq!(spec.args.last().map(String::as_str), Some("/a/.vmm-x.tar"));
     }
 
     /// A guest that runs each step's script with the host's `sh` and `tar`, failing the step named in `fail`, with
@@ -1086,7 +1170,7 @@ mod tests {
     }
 
     impl Guest for LocalGuest {
-        fn run(&self, step: Step, script: &str, args: &[&str]) -> Result<Ran> {
+        fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
             if self.fail == Some(step) {
                 bail!("scripted failure at {step:?}");
             }
@@ -1096,13 +1180,14 @@ mod tests {
                 fs::create_dir_all(dir)?;
             }
             let mut cmd = Command::new("/bin/sh");
-            cmd.arg("-c").arg(script).arg("sh").args(args);
+            cmd.arg("-c").arg(linux_script(step)).arg("sh").args(args);
             if let Some(path) = &self.path_env {
                 cmd.env("PATH", path);
             }
             let out = cmd.output()?;
             Ok(Ran {
                 code: out.status.code().map(i64::from),
+                stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
                 stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
             })
         }
@@ -1138,7 +1223,11 @@ mod tests {
 
         fn push(&self, to: &str, replace: bool, guest: &LocalGuest) -> Result<Summary> {
             let tree = tree(&self.share.0, "src");
-            let target = Target::parse(self.guest.0.join(to).to_str().unwrap(), replace)?;
+            let target = Target::parse(
+                GuestOs::Linux,
+                self.guest.0.join(to).to_str().unwrap(),
+                replace,
+            )?;
             let bytes = AtomicU64::new(0);
             push(guest, &target, replace, &bytes, |out| {
                 write_archive(&tree, &select(&tree, &options())?, out)
@@ -1187,7 +1276,12 @@ mod tests {
             ("file", true, "not a directory"),
             ("file", false, "not a directory"),
         ] {
-            let target = Target::parse(bed.guest.0.join(to).to_str().unwrap(), replace).unwrap();
+            let target = Target::parse(
+                GuestOs::Linux,
+                bed.guest.0.join(to).to_str().unwrap(),
+                replace,
+            )
+            .unwrap();
             let bytes = AtomicU64::new(0);
             let err = push(&LocalGuest::new(), &target, replace, &bytes, |_| {
                 built.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1223,7 +1317,12 @@ mod tests {
     #[test]
     fn a_broken_archive_fails_at_unpacking_and_cleans_up() {
         let bed = Bed::new("broken");
-        let target = Target::parse(bed.guest.0.join("app").to_str().unwrap(), true).unwrap();
+        let target = Target::parse(
+            GuestOs::Linux,
+            bed.guest.0.join("app").to_str().unwrap(),
+            true,
+        )
+        .unwrap();
         let bytes = AtomicU64::new(0);
         let err = push(&LocalGuest::new(), &target, true, &bytes, |out| {
             out.write_all(&[b'x'; 1024])?;
@@ -1240,7 +1339,12 @@ mod tests {
     #[test]
     fn a_builder_failure_fails_the_push_even_though_the_send_saw_a_clean_end() {
         let bed = Bed::new("builder");
-        let target = Target::parse(bed.guest.0.join("app").to_str().unwrap(), true).unwrap();
+        let target = Target::parse(
+            GuestOs::Linux,
+            bed.guest.0.join("app").to_str().unwrap(),
+            true,
+        )
+        .unwrap();
         let bytes = AtomicU64::new(0);
         let err = format!(
             "{:#}",
