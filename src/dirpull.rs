@@ -28,6 +28,7 @@ use crate::agent::{Agent, ExecOutcome, ExecSpec, GuestOs};
 use crate::pull::{self, Destination, FILE_MODE};
 use crate::push::Skipped;
 use crate::transfer::CountingWriter;
+use crate::winsteps;
 
 /// The largest long-name or PAX header the unpacker reads, so metadata cannot fill memory.
 const META_MAX: u64 = 64 * 1024;
@@ -432,7 +433,17 @@ impl Steps {
                 argv.extend(args.iter().map(|a| (*a).to_string()));
                 Ok(ExecSpec::new("/bin/sh", argv))
             }
-            GuestOs::Windows => bail!("copy_dir_from_vm does not support Windows guests yet"),
+            GuestOs::Windows => Ok(match step {
+                Step::Prepare => winsteps::script(winsteps::PULL_PREPARE, args),
+                // `tar.exe` runs directly, without a shell, with the path that preparing printed.
+                Step::Pack => match args {
+                    [dir, archive, tar] => {
+                        ExecSpec::new(tar, ["-c", "-f", archive, "-C", dir, "."])
+                    }
+                    _ => bail!("packing needs the directory, the archive and tar.exe's path"),
+                },
+                Step::Remove => winsteps::script(winsteps::PULL_REMOVE, args),
+            }),
         }
     }
 }
@@ -483,9 +494,24 @@ impl Guest for OnGuest<'_> {
     }
 
     fn size(&self, path: &str) -> Result<Option<u64>> {
-        // On Linux the agent cannot tell a missing file from another failure, so any failure reads as a missing
-        // archive; `final_size` reports the failure once the archive is finished.
-        Ok(self.agent.file_size(path).ok())
+        if self.steps.0 == GuestOs::Linux {
+            // On Linux the agent cannot tell a missing file from another failure, so any failure reads as a missing
+            // archive; `final_size` reports the failure once the archive is finished.
+            return Ok(self.agent.file_size(path).ok());
+        }
+        // The agent cannot open an archive that `tar.exe` is writing, so PowerShell reads its length instead.
+        let out = self.agent.exec(
+            &winsteps::script(winsteps::PULL_SIZE, &[path]),
+            STEP_TIMEOUT,
+            OUTPUT_MAX,
+        )?;
+        if out.timed_out {
+            bail!(
+                "the size query did not finish within {} s",
+                STEP_TIMEOUT.as_secs()
+            );
+        }
+        windows_size(&ran(out))
     }
 
     fn final_size(&self, path: &str) -> Result<u64> {
@@ -523,9 +549,16 @@ pub struct Request<'a> {
     pub overwrite: bool,
     pub limits: &'a Limits,
     pub exclude: &'a Gitignore,
+    /// The temporary directories a Linux guest may pack in, the first that exists; Windows uses its own.
     pub temp_dirs: [&'a str; 2],
     pub poll: Duration,
+    pub os: GuestOs,
+    /// How long removing the archive is retried while it fails, as when `tar.exe` still holds it after being stopped.
+    pub remove_for: Duration,
 }
+
+/// How long a Windows pull retries removing its archive.
+pub const REMOVE_FOR: Duration = Duration::from_secs(10);
 
 /// Pulls the guest directory `req.guest_path` to `req.dest`. The guest's archive is deleted whatever happens.
 pub fn pull(guest: &dyn Guest, req: &Request<'_>, bytes: &AtomicU64) -> Result<Unpacked> {
@@ -536,26 +569,64 @@ pub fn pull(guest: &dyn Guest, req: &Request<'_>, bytes: &AtomicU64) -> Result<U
         Some(10) => bail!("the guest has no tar, which copy_dir_from_vm needs"),
         Some(11) => bail!("{} is not a directory in the guest", req.guest_path),
         Some(12) => bail!("the guest has neither {first} nor {second} for the archive"),
+        Some(13) => bail!("the guest has no %SystemRoot%\\Temp for the archive"),
         _ => bail!("cannot prepare the pull in the guest: {}", prep.describe()),
     }
+    // Linux prints the temporary directory; Windows adds the path of `tar.exe` on a second line.
+    let mut lines = prep.stdout.lines().map(str::trim);
+    let temp = lines.next().unwrap_or_default();
+    let tar = lines.next().unwrap_or("tar");
+    let separator = match req.os {
+        GuestOs::Linux => '/',
+        GuestOs::Windows => '\\',
+    };
     let archive = format!(
-        "{}/.vmm-{}.tar",
-        prep.stdout.trim_end_matches('/'),
+        "{}{separator}.vmm-{}.tar",
+        temp.trim_end_matches(separator),
         uuid::Uuid::new_v4().simple()
     );
-    let result = pack_and_unpack(guest, req, &archive, bytes);
-    let _ = guest.run(Step::Remove, &[&archive]);
+    let result = pack_and_unpack(guest, req, &archive, tar, bytes);
+    remove(guest, &archive, req.remove_for);
     result
+}
+
+/// The size the Windows size query printed: a number of bytes, or `none` for a missing file.
+fn windows_size(ran: &Ran) -> Result<Option<u64>> {
+    match (ran.code, ran.stdout.as_str()) {
+        (Some(0), "none") => Ok(None),
+        (Some(0), text) => text
+            .parse()
+            .map(Some)
+            .map_err(|_| anyhow!("the size query printed {text:?}")),
+        _ => bail!("the size query failed: {}", ran.describe()),
+    }
+}
+
+/// Deletes the archive, trying again for up to `retry_for` while that fails, every second, or a tenth of `retry_for`
+/// when that is shorter.
+fn remove(guest: &dyn Guest, archive: &str, retry_for: Duration) {
+    let started = Instant::now();
+    loop {
+        if guest
+            .run(Step::Remove, &[archive])
+            .is_ok_and(|ran| ran.code == Some(0))
+            || started.elapsed() >= retry_for
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1).min(retry_for / 10));
+    }
 }
 
 fn pack_and_unpack(
     guest: &dyn Guest,
     req: &Request<'_>,
     archive: &str,
+    tar: &str,
     bytes: &AtomicU64,
 ) -> Result<Unpacked> {
     let max = req.limits.max_bytes;
-    let pid = guest.start(Step::Pack, &[req.guest_path, archive])?;
+    let pid = guest.start(Step::Pack, &[req.guest_path, archive, tar])?;
     let started = Instant::now();
     let packed = loop {
         // Every way out of this loop but `tar` ending stops `tar`, so it never writes on, uncapped, after the pull.
@@ -1176,6 +1247,8 @@ mod tests {
                 exclude: &exclude,
                 temp_dirs: [missing.to_str().unwrap(), self.tmp.0.to_str().unwrap()],
                 poll: Duration::from_millis(20),
+                os: GuestOs::Linux,
+                remove_for: Duration::ZERO,
             };
             pull(guest, &req, &AtomicU64::new(0))
         }
@@ -1406,5 +1479,262 @@ mod tests {
             "{err}"
         );
         assert!(bed.tmp_is_empty());
+    }
+
+    /// The archive that `tar.exe` (bsdtar 3.8.8) packed on a Windows 11 guest from a tree with a non-ASCII name, a
+    /// directory named `sub dir`, two symlinks and a junction, as `docs/research/2026-11-12-windows-tar-probe.md`
+    /// describes.
+    const WINDOWS_ARCHIVE: &[u8] = include_bytes!("../tests/fixtures/bsdtar-windows.tar");
+
+    #[test]
+    fn an_archive_from_windows_tar_unpacks_without_its_links() {
+        let pull = Temp::pull_dir("bsdtar");
+        let unpacked = unpack_to(&pull, WINDOWS_ARCHIVE, &LIMITS, &[]).unwrap();
+        assert_eq!(
+            (unpacked.files, unpacked.directories, unpacked.bytes),
+            (4, 3, 20)
+        );
+        let skipped: Vec<_> = unpacked
+            .skipped
+            .iter()
+            .map(|s| format!("{} {}", s.path, s.reason))
+            .collect();
+        assert_eq!(skipped, ["dlink symlink", "flink symlink"]);
+        let out = pull.0.join("out");
+        assert_eq!(fs::read(out.join("été.txt")).unwrap(), b"unicode");
+        assert_eq!(fs::read(out.join("sub dir/b.txt")).unwrap(), b"beta");
+        // The junction arrives as the plain directory `tar.exe` made of it.
+        assert_eq!(fs::read(out.join("junction/b.txt")).unwrap(), b"beta");
+        assert!(out.join("empty").is_dir());
+        for (rel, mode) in [
+            ("", 0o755),
+            ("empty", 0o755),
+            ("a.txt", 0o644),
+            ("été.txt", 0o644),
+        ] {
+            let found = fs::symlink_metadata(out.join(rel)).unwrap().mode() & 0o7777;
+            assert_eq!(found, mode, "{rel}");
+        }
+    }
+
+    const WIN_TEMP: &str = r"C:\Windows\Temp";
+    const WIN_TAR: &str = r"C:\Windows\System32\tar.exe";
+
+    /// A Windows guest that answers each step as scripted and records the calls. Packing finishes after `polls`
+    /// status queries with `pack`'s exit code and stderr; the size queries answer from `sizes`, the last one
+    /// repeating; removing the archive fails `failed_removes` times first; reading sends the probe's archive.
+    struct WindowsGuest {
+        calls: RefCell<Vec<String>>,
+        polls: std::cell::Cell<u32>,
+        pack: (i64, &'static str),
+        sizes: RefCell<Vec<Option<u64>>>,
+        failed_removes: std::cell::Cell<u32>,
+    }
+
+    impl WindowsGuest {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                polls: std::cell::Cell::new(1),
+                pack: (0, ""),
+                sizes: RefCell::new(vec![None]),
+                failed_removes: std::cell::Cell::new(0),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+
+        fn record(&self, call: String) {
+            self.calls.borrow_mut().push(call);
+        }
+    }
+
+    impl Guest for WindowsGuest {
+        fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
+            self.record(format!("{step:?} {}", args.join(" | ")));
+            let ok = |stdout: &str| Ran {
+                code: Some(0),
+                stdout: stdout.into(),
+                stderr: String::new(),
+            };
+            Ok(match step {
+                Step::Prepare => ok(&format!("{WIN_TEMP}\n{WIN_TAR}")),
+                Step::Remove if self.failed_removes.get() > 0 => {
+                    self.failed_removes.set(self.failed_removes.get() - 1);
+                    Ran {
+                        code: Some(1),
+                        stdout: String::new(),
+                        stderr: "in use".into(),
+                    }
+                }
+                _ => ok(""),
+            })
+        }
+
+        fn start(&self, step: Step, args: &[&str]) -> Result<i64> {
+            let spec = Steps(GuestOs::Windows).spec(step, args)?;
+            self.record(format!("start {} {}", spec.path, spec.args.join(" | ")));
+            Ok(7)
+        }
+
+        fn status(&self, _pid: i64) -> Result<Option<Ran>> {
+            if self.polls.get() > 0 {
+                self.polls.set(self.polls.get() - 1);
+                return Ok(None);
+            }
+            Ok(Some(Ran {
+                code: Some(self.pack.0),
+                stdout: String::new(),
+                stderr: self.pack.1.into(),
+            }))
+        }
+
+        fn size(&self, _path: &str) -> Result<Option<u64>> {
+            let mut sizes = self.sizes.borrow_mut();
+            Ok(if sizes.len() > 1 {
+                sizes.remove(0)
+            } else {
+                sizes[0]
+            })
+        }
+
+        fn final_size(&self, _path: &str) -> Result<u64> {
+            Ok(WINDOWS_ARCHIVE.len() as u64)
+        }
+
+        fn kill(&self, pid: i64) {
+            self.record(format!("kill {pid}"));
+        }
+
+        fn read(&self, _path: &str, out: &mut dyn Write, _max_bytes: u64) -> Result<u64> {
+            out.write_all(WINDOWS_ARCHIVE)?;
+            Ok(WINDOWS_ARCHIVE.len() as u64)
+        }
+    }
+
+    fn windows_pull(
+        name: &str,
+        guest: &WindowsGuest,
+        limits: &Limits,
+        remove_for: Duration,
+    ) -> Result<Unpacked> {
+        let dir = Temp::pull_dir(name);
+        let dest = Destination::open(
+            std::slice::from_ref(&dir.0),
+            dir.0.join("out").to_str().unwrap(),
+        )?;
+        let exclude = excludes(&[])?;
+        let req = Request {
+            guest_path: r"C:\work\out",
+            dest: &dest,
+            overwrite: false,
+            limits,
+            exclude: &exclude,
+            temp_dirs: TEMP_DIRS,
+            poll: Duration::from_millis(1),
+            os: GuestOs::Windows,
+            remove_for,
+        };
+        pull(guest, &req, &AtomicU64::new(0))
+    }
+
+    #[test]
+    fn a_windows_pull_packs_with_tar_exe_in_the_windows_temp_directory() {
+        let guest = WindowsGuest::new();
+        let unpacked = windows_pull("win-steps", &guest, &LIMITS, Duration::ZERO).unwrap();
+        assert_eq!(unpacked.files, 4);
+        let calls = guest.calls();
+        assert_eq!(calls[0], r"Prepare C:\work\out | /var/tmp | /tmp");
+        let archive = calls[1]
+            .split(" | ")
+            .nth(2)
+            .expect("the archive follows -c and -f");
+        assert!(
+            archive.starts_with(r"C:\Windows\Temp\.vmm-") && archive.ends_with(".tar"),
+            "{archive}"
+        );
+        assert_eq!(
+            calls[1],
+            format!(r"start {WIN_TAR} -c | -f | {archive} | -C | C:\work\out | .")
+        );
+        assert_eq!(calls[2..], [format!("Remove {archive}")]);
+    }
+
+    #[test]
+    fn a_windows_archive_past_the_cap_stops_tar_exe() {
+        let guest = WindowsGuest {
+            polls: std::cell::Cell::new(5),
+            sizes: RefCell::new(vec![None, Some(10), Some(LIMITS.max_bytes + 1)]),
+            ..WindowsGuest::new()
+        };
+        let err = windows_pull("win-cap", &guest, &LIMITS, Duration::ZERO).unwrap_err();
+        assert!(err.to_string().contains("passed the pull limit"), "{err}");
+        let calls = guest.calls();
+        assert_eq!(calls[2], "kill 7", "{calls:?}");
+        assert!(calls[3].starts_with("Remove "), "{calls:?}");
+    }
+
+    #[test]
+    fn any_failure_of_tar_exe_fails_the_pull() {
+        let guest = WindowsGuest {
+            pack: (1, "tar.exe: Couldn't open ./a.txt: Permission denied"),
+            ..WindowsGuest::new()
+        };
+        let err = windows_pull("win-locked", &guest, &LIMITS, Duration::ZERO).unwrap_err();
+        assert!(err.to_string().contains("Couldn't open ./a.txt"), "{err}");
+    }
+
+    #[test]
+    fn removing_the_archive_is_retried_until_it_goes_or_time_runs_out() {
+        let guest = WindowsGuest {
+            failed_removes: std::cell::Cell::new(2),
+            ..WindowsGuest::new()
+        };
+        windows_pull("win-remove", &guest, &LIMITS, Duration::from_millis(500)).unwrap();
+        let removes = guest
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("Remove"))
+            .count();
+        assert_eq!(removes, 3);
+
+        let guest = WindowsGuest {
+            failed_removes: std::cell::Cell::new(u32::MAX),
+            ..WindowsGuest::new()
+        };
+        let started = Instant::now();
+        windows_pull(
+            "win-remove-stuck",
+            &guest,
+            &LIMITS,
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let removes = guest
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("Remove"))
+            .count();
+        assert!((2..=12).contains(&removes), "{removes} removals");
+    }
+
+    #[test]
+    fn the_windows_size_query_tells_missing_from_failed() {
+        let ran = |code, stdout: &str, stderr: &str| Ran {
+            code: Some(code),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        assert_eq!(windows_size(&ran(0, "none", "")).unwrap(), None);
+        assert_eq!(
+            windows_size(&ran(0, "2861230080", "")).unwrap(),
+            Some(2_861_230_080)
+        );
+        assert!(windows_size(&ran(0, "huh", "")).is_err());
+        let err = windows_size(&ran(1, "", "Access denied")).unwrap_err();
+        assert!(err.to_string().contains("Access denied"), "{err}");
     }
 }

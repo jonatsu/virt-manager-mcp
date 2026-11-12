@@ -1,12 +1,30 @@
 //! The PowerShell scripts that run in Windows guests. Each lives as a `.ps1` file beside the module that runs it, in
 //! `src/jobs/` or `src/winsteps/`, so a parse test can find every one of them.
 
+use crate::agent::{ExecSpec, powershell, ps_quote};
+
+/// Checks a directory pull's source and prints the temporary directory and the path of `tar.exe`.
+pub const PULL_PREPARE: &str = include_str!("winsteps/pull-prepare.ps1");
+/// Prints the length of a file that `tar.exe` may still be writing.
+pub const PULL_SIZE: &str = include_str!("winsteps/pull-size.ps1");
+/// Deletes a pull's archive.
+pub const PULL_REMOVE: &str = include_str!("winsteps/pull-remove.ps1");
+
+/// Runs the constant script `body` with `args` defined before it as `$argv`, an array of quoted literals, so no
+/// argument is ever parsed as PowerShell code.
+pub fn script(body: &str, args: &[&str]) -> ExecSpec {
+    let quoted: Vec<String> = args.iter().map(|a| ps_quote(a)).collect();
+    powershell(&format!("$argv = @({})\n{body}", quoted.join(", ")))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    use super::*;
 
     /// Prints each parse error of the file named by `VMM_PS_FILE` and exits with their count.
     const PARSE: &str = r#"$tokens = $null
@@ -38,6 +56,32 @@ exit $errors.Count"#;
         } else {
             text
         })
+    }
+
+    /// The script text a PowerShell `ExecSpec` carries in its `-EncodedCommand` argument.
+    fn decoded(spec: &ExecSpec) -> String {
+        use base64::Engine;
+        let encoded = spec.args.last().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let units: Vec<u16> = bytes
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&units).unwrap()
+    }
+
+    #[test]
+    fn arguments_reach_a_script_as_quoted_literals() {
+        let spec = script(PULL_SIZE, &[r"C:\it's $(evil)\a.tar", "two"]);
+        assert_eq!(spec.path, "powershell.exe");
+        let text = decoded(&spec);
+        assert!(
+            text.starts_with("$argv = @('C:\\it''s $(evil)\\a.tar', 'two')\n"),
+            "{text}"
+        );
+        assert!(text.ends_with(PULL_SIZE));
     }
 
     /// Every `.ps1` file under `src/jobs/` and `src/winsteps/`.

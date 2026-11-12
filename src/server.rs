@@ -989,9 +989,12 @@ impl VirtServer {
             destructive_hint = true,
             idempotent_hint = false
         ),
-        description = "Pull a directory from a Linux guest, such as build output or test results, into a pull \
-        directory on the host, without passing it through the conversation; the guest needs tar. The guest packs \
-        guest_path with tar in /var/tmp (or /tmp), and the server unpacks the archive itself. host_path names the \
+        description = "Pull a directory from a Linux or Windows guest, such as build output or test results, into a \
+        pull directory on the host, without passing it through the conversation; a Linux guest needs tar, and \
+        Windows uses its own tar.exe. The guest packs guest_path (on Windows a drive path such as C:\\work\\out) in \
+        /var/tmp (or /tmp), or in %SystemRoot%\\Temp on Windows, and the server unpacks the archive itself. On \
+        Windows tar.exe follows junctions, and any error it reports, such as a file another program holds open, \
+        fails the pull. host_path names the \
         directory to create inside one of the pull directories named in the server instructions; an existing one is \
         replaced as a whole only with overwrite: true, and a file there never is. Files arrive with mode 644 and \
         directories with 755; symlinks, hard links, devices and FIFOs are skipped and named. exclude takes gitignore \
@@ -1012,7 +1015,6 @@ impl VirtServer {
             let dom = s.hv.domain(&p.vm)?;
             let timeout = config.limits.agent_timeout_secs;
             let os = Agent::new(&dom, timeout).os()?;
-            refuse_windows(os, "copy_dir_from_vm")?;
             let guest_path = GuestPath::parse(os, &p.guest_path)?.normalized();
             let exclude = dirpull::excludes(&p.exclude)?;
             let dest = pull::Destination::open(&config.host_pull_dirs, &p.host_path)?;
@@ -1038,6 +1040,11 @@ impl VirtServer {
                     exclude: &exclude,
                     temp_dirs: dirpull::TEMP_DIRS,
                     poll: dirpull::POLL,
+                    os,
+                    remove_for: match os {
+                        agent::GuestOs::Linux => Duration::ZERO,
+                        agent::GuestOs::Windows => dirpull::REMOVE_FOR,
+                    },
                 };
                 let unpacked = dirpull::pull(&on, &request, bytes)?;
                 let mut reply = serde_json::to_value(&unpacked)?;
