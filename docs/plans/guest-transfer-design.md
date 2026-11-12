@@ -236,11 +236,14 @@ it, compared without regard to case.
 
 A push to a Windows guest writes every file with mode 644 and every directory with 755 into the archive, so the host's
 modes are dropped and `tar.exe` marks no directory read-only. It skips, and names in the reply, every entry that
-Windows cannot hold under its name: a reserved device name such as `CON`, `NUL`, `COM1` or `LPT1`, also with an
-extension, as in `CON.txt`; a name with a control character or one of `< > : " | ? *`; a name that ends in a dot or a
-space; and an entry whose name differs from an earlier one in the same directory only in case. A skipped directory
-takes its subtree with it. `tar.exe` would otherwise unpack such an entry onto a device, onto the earlier file, or
-under another name, without an error.
+Windows cannot hold under its name: a reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to
+`LPT9`, and `COM` or `LPT` with `¹`, `²` or `³`), also with an extension, as in `CON.txt`; a name with a control
+character or one of `< > : " | ? * \`; a name that ends in a dot or a space; a name that is not valid UTF-8, since
+Windows names are UTF-16; and an entry whose name differs from an earlier one in the same directory only in case. A
+skipped directory takes its subtree with it. `tar.exe` would otherwise unpack such an entry onto a device, onto the
+earlier file, into another directory, or under another name, without an error. The push also skips every symlink and
+names it: a tar archive does not say whether a link points to a file or a directory, and `tar.exe` turns a
+directory link into a broken file link.
 
 A pull from a Windows guest packs into `C:\Windows\Temp`, where only `SYSTEM` and `Administrators` can read the files
 that the agent creates. Any non-zero exit status of `tar.exe` fails the pull: Windows has no counterpart of GNU tar's

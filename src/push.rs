@@ -6,6 +6,7 @@
 //! archive is a tar stream, built while it is sent. The guest unpacks it beside the target and swaps the new tree in,
 //! so a failed push leaves the old tree in place.
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -318,27 +319,148 @@ pub struct Skipped {
     pub reason: &'static str,
 }
 
-/// Writes the selected entries of `tree` to `out` as a tar archive. Every entry is owned by uid and gid 0 and has
-/// its host mode without the setuid and setgid bits.
-pub fn write_archive(tree: &Tree, selection: &Selection, out: &mut dyn Write) -> Result<Summary> {
+/// Writes the selected entries of `tree` to `out` as a tar archive for a guest running `os`. Every entry is owned by
+/// uid and gid 0. On Linux it has its host mode without the setuid and setgid bits. On Windows every file has mode
+/// 644 and every directory 755, and the archive leaves out symlinks and every entry Windows cannot hold under its
+/// name, naming each in the summary; a directory left out takes its subtree with it.
+pub fn write_archive(
+    tree: &Tree,
+    selection: &Selection,
+    os: GuestOs,
+    out: &mut dyn Write,
+) -> Result<Summary> {
     let root = tree.open()?;
     let mut builder = tar::Builder::new(out);
     let mut summary = Summary {
         ignored: selection.ignored,
         ..Default::default()
     };
+    let mut windows = (os == GuestOs::Windows).then(WindowsNames::default);
     for rel in &selection.entries {
-        add_entry(&mut builder, &root, rel, &mut summary)
+        if let Some(names) = &mut windows {
+            if names.inside_skipped(rel) {
+                continue;
+            }
+            if let Some(reason) = names.problem(rel) {
+                summary.skipped.push(Skipped {
+                    path: rel.display().to_string(),
+                    reason,
+                });
+                names.skip_subtree(rel);
+                continue;
+            }
+        }
+        let added = summary.files + summary.directories + summary.symlinks;
+        add_entry(&mut builder, &root, rel, os, &mut summary)
             .with_context(|| format!("{}", rel.display()))?;
+        if let Some(names) = &mut windows
+            && summary.files + summary.directories + summary.symlinks > added
+        {
+            names.taken(rel);
+        }
     }
     builder.into_inner().context("finishing the archive")?;
     Ok(summary)
+}
+
+/// What a push to Windows has seen: the names taken in each directory, compared without regard to case, and the
+/// directories it left out.
+#[derive(Default)]
+struct WindowsNames {
+    taken: HashMap<PathBuf, HashSet<String>>,
+    skipped: Vec<PathBuf>,
+}
+
+impl WindowsNames {
+    fn inside_skipped(&self, rel: &Path) -> bool {
+        self.skipped.iter().any(|dir| rel.starts_with(dir))
+    }
+
+    /// Why Windows cannot hold `rel`'s name, if it cannot.
+    fn problem(&self, rel: &Path) -> Option<&'static str> {
+        let name = rel.file_name()?;
+        let Some(name) = name.to_str() else {
+            return Some("name is not valid UTF-8, which Windows cannot hold");
+        };
+        if let Some(reason) = windows_name_problem(name) {
+            return Some(reason);
+        }
+        let parent = rel.parent().unwrap_or(Path::new(""));
+        if self
+            .taken
+            .get(parent)
+            .is_some_and(|names| names.contains(&fold_case(name)))
+        {
+            return Some(
+                "name differs from an earlier one in its directory only in case, which Windows treats as one",
+            );
+        }
+        None
+    }
+
+    fn skip_subtree(&mut self, rel: &Path) {
+        self.skipped.push(rel.to_path_buf());
+    }
+
+    fn taken(&mut self, rel: &Path) {
+        if let (Some(name), Some(parent)) = (rel.file_name().and_then(OsStr::to_str), rel.parent())
+        {
+            self.taken
+                .entry(parent.to_path_buf())
+                .or_default()
+                .insert(fold_case(name));
+        }
+    }
+}
+
+/// Why Windows cannot hold a file named `name`, if it cannot: a reserved device name, also with an extension; a
+/// control character or one of `< > : " | ? * \`; or a dot or a space at the end.
+fn windows_name_problem(name: &str) -> Option<&'static str> {
+    if name
+        .chars()
+        .any(|c| c.is_control() || "<>:\"|?*\\".contains(c))
+    {
+        return Some(
+            r#"name holds a control character or one of < > : " | ? * \, which Windows cannot hold"#,
+        );
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("name ends in a dot or a space, which Windows drops");
+    }
+    // Windows reads `CON.txt`, and `CON .txt`, as the device `CON`.
+    let base = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let upper = base.to_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            upper.strip_prefix(prefix).is_some_and(|rest| {
+                let mut chars = rest.chars();
+                matches!(
+                    (chars.next(), chars.next()),
+                    (Some('0'..='9' | '¹' | '²' | '³'), None)
+                )
+            })
+        });
+    reserved.then_some("name is a device name reserved by Windows")
+}
+
+/// `name` with each character in upper case where that is one character, as Windows compares names; `ß` stays.
+fn fold_case(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            let mut upper = c.to_uppercase();
+            match (upper.next(), upper.next()) {
+                (Some(u), None) => u,
+                _ => c,
+            }
+        })
+        .collect()
 }
 
 fn add_entry(
     builder: &mut tar::Builder<&mut dyn Write>,
     root: &OwnedFd,
     rel: &Path,
+    os: GuestOs,
     summary: &mut Summary,
 ) -> Result<()> {
     let mut skip = |reason| {
@@ -387,7 +509,7 @@ fn add_entry(
                 bail!("stopped being a regular file during the push");
             }
             let size = u64::try_from(st.st_size)?;
-            let mut header = header(tar::EntryType::Regular, &st);
+            let mut header = header(tar::EntryType::Regular, &st, os);
             header.set_size(size);
             let data = Exact {
                 inner: File::from(fd),
@@ -398,15 +520,19 @@ fn add_entry(
             summary.bytes += size;
         }
         FileType::Directory => {
-            let mut header = header(tar::EntryType::Directory, &st);
+            let mut header = header(tar::EntryType::Directory, &st, os);
             builder.append_data(&mut header, rel, io::empty())?;
             summary.directories += 1;
         }
+        FileType::Symlink if os == GuestOs::Windows => skip(
+            "symlink, which a push to Windows leaves out: a Windows link needs a file or directory type the archive \
+             cannot carry",
+        ),
         FileType::Symlink => {
             let target = rustix::fs::readlinkat(&parent, name, Vec::new())?;
             let target = Path::new(OsStr::from_bytes(target.as_bytes()));
             if link_stays_inside(root, rel, target) {
-                let mut header = header(tar::EntryType::Symlink, &st);
+                let mut header = header(tar::EntryType::Symlink, &st, os);
                 builder.append_link(&mut header, rel, target)?;
                 summary.symlinks += 1;
             } else {
@@ -423,10 +549,16 @@ fn add_entry(
     Ok(())
 }
 
-fn header(kind: tar::EntryType, st: &rustix::fs::Stat) -> tar::Header {
+fn header(kind: tar::EntryType, st: &rustix::fs::Stat, os: GuestOs) -> tar::Header {
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(kind);
-    header.set_mode(st.st_mode & 0o7777 & !SETID_BITS);
+    // `tar.exe` marks a directory without its write bit read-only, so Windows gets fixed modes.
+    let mode = match (os, kind) {
+        (GuestOs::Linux, _) => st.st_mode & 0o7777 & !SETID_BITS,
+        (GuestOs::Windows, tar::EntryType::Directory) => 0o755,
+        (GuestOs::Windows, _) => 0o644,
+    };
+    header.set_mode(mode);
     header.set_uid(0);
     header.set_gid(0);
     header.set_mtime(u64::try_from(st.st_mtime).unwrap_or(0));
@@ -913,8 +1045,14 @@ mod tests {
 
     /// The archive of `tree`, as (path, link target, mode) per entry, with the summary.
     fn archived(tree: &Tree) -> (Vec<(String, Option<String>, u32)>, Summary) {
+        archived_for(tree, GuestOs::Linux)
+    }
+
+    /// The archive of `tree` for a guest running `os`, as `archived` gives it.
+    fn archived_for(tree: &Tree, os: GuestOs) -> (Vec<(String, Option<String>, u32)>, Summary) {
         let mut out = Vec::new();
-        let summary = write_archive(tree, &select(tree, &options()).unwrap(), &mut out).unwrap();
+        let summary =
+            write_archive(tree, &select(tree, &options()).unwrap(), os, &mut out).unwrap();
         let mut archive = tar::Archive::new(&out[..]);
         let entries = archive
             .entries()
@@ -1048,7 +1186,7 @@ mod tests {
         let mut out = Vec::new();
         let err = format!(
             "{:#}",
-            write_archive(&tree, &selection, &mut out).unwrap_err()
+            write_archive(&tree, &selection, GuestOs::Linux, &mut out).unwrap_err()
         );
         assert!(err.contains("symlink"), "{err}");
         assert!(!String::from_utf8_lossy(&out).contains("secret"));
@@ -1074,6 +1212,100 @@ mod tests {
             }]
         );
         assert_eq!((summary.files, summary.bytes), (1, 10));
+    }
+
+    #[test]
+    fn a_windows_archive_has_fixed_modes_and_no_symlinks() {
+        let share = Temp::new("win-modes");
+        share.write("t/run", "#!/bin/sh\n");
+        share.write("t/ro/x", "x");
+        let t = share.0.join("t");
+        fs::set_permissions(t.join("run"), fs::Permissions::from_mode(0o6750)).unwrap();
+        symlink("run", t.join("link")).unwrap();
+        fs::set_permissions(t.join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+        let tree = tree(&share.0, "t");
+
+        let (entries, summary) = archived_for(&tree, GuestOs::Windows);
+        assert_eq!(
+            entries,
+            [
+                ("ro".to_string(), None, 0o755),
+                ("ro/x".to_string(), None, 0o644),
+                ("run".to_string(), None, 0o644),
+            ]
+        );
+        let skipped: Vec<_> = summary.skipped.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(skipped, ["link"]);
+        assert!(summary.skipped[0].reason.contains("symlink"));
+        // The Linux archive of the same tree keeps the link and the host modes.
+        let (entries, _) = archived(&tree);
+        assert!(entries.contains(&("link".to_string(), Some("run".to_string()), 0o777)));
+        assert!(entries.contains(&("ro".to_string(), None, 0o555)));
+        // The share is deleted afterwards, which needs the write bit back.
+        fs::set_permissions(t.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_windows_archive_skips_names_windows_cannot_hold() {
+        let share = Temp::new("win-names");
+        let kept = [
+            "CONSOLE", "COM10", "a.b.c", "straße", "STRASSE", "README", "ok/inner",
+        ];
+        let refused = [
+            "CON",
+            "con.txt",
+            "Lpt1",
+            "COM¹",
+            "nul .txt",
+            "a?b",
+            "a\\b",
+            "tail.",
+            "tail ",
+            "new\nline",
+            "Readme",
+            "aux/inside",
+        ];
+        for name in kept.iter().chain(&refused) {
+            share.write(&format!("t/{name}"), "x");
+        }
+        let t = share.0.join("t");
+        fs::write(t.join(OsStr::from_bytes(b"bad\xff")), "x").unwrap();
+        let tree = tree(&share.0, "t");
+
+        let (entries, summary) = archived_for(&tree, GuestOs::Windows);
+        let mut names: Vec<_> = entries
+            .iter()
+            .map(|e| e.0.trim_end_matches('/').to_string())
+            .collect();
+        names.sort();
+        let mut want: Vec<_> = kept.iter().map(|s| (*s).to_string()).collect();
+        want.push("ok".into());
+        want.sort();
+        assert_eq!(names, want);
+        let mut skipped: Vec<_> = summary.skipped.iter().map(|s| s.path.clone()).collect();
+        skipped.sort();
+        let mut want: Vec<_> = refused
+            .iter()
+            .map(|s| s.trim_end_matches("/inside").to_string())
+            .chain([String::from_utf8_lossy(b"bad\xff").into_owned()])
+            .collect();
+        want.sort();
+        assert_eq!(
+            skipped, want,
+            "a skipped directory is named once, without its files"
+        );
+        let reason = |path: &str| {
+            summary
+                .skipped
+                .iter()
+                .find(|s| s.path == path)
+                .unwrap()
+                .reason
+        };
+        assert!(reason("Readme").contains("only in case"));
+        assert!(reason("CON").contains("reserved"));
+        assert!(reason("a\\b").contains("control character or one of"));
+        assert!(reason("tail ").contains("dot or a space"));
     }
 
     #[test]
@@ -1230,7 +1462,7 @@ mod tests {
             )?;
             let bytes = AtomicU64::new(0);
             push(guest, &target, replace, &bytes, |out| {
-                write_archive(&tree, &select(&tree, &options())?, out)
+                write_archive(&tree, &select(&tree, &options())?, GuestOs::Linux, out)
             })
         }
 

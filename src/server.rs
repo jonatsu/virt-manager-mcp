@@ -973,7 +973,7 @@ impl VirtServer {
                     steps: push::Steps(os),
                 };
                 let summary = push::push(&on, &target, replace, bytes, |out| {
-                    push::write_archive(&tree, &push::select(&tree, &options)?, out)
+                    push::write_archive(&tree, &push::select(&tree, &options)?, os, out)
                 })?;
                 let mut reply = serde_json::to_value(&summary)?;
                 reply["guest_path"] = json!(target.path);
