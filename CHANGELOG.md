@@ -33,14 +33,17 @@ Each release's section lists what changed for people who run the server and for 
   `.git` out, and takes extra `exclude` patterns. A symlink goes along only when it stays inside the tree; other
   links, FIFOs, sockets and devices are skipped and named. An existing directory is replaced as a whole only with
   `replace: true`, never `/` or a directory directly below it, and a failed push leaves it in place. A Windows guest
-  unpacks with its own `tar.exe`: nothing arrives read-only, and a name outside the guest's code page fails the push.
+  takes a drive path such as `C:\work\app`, never a UNC or drive-relative path, and never a drive root or, with
+  `replace`, a directory directly below one. It unpacks with its own `tar.exe`: nothing arrives read-only, and a name
+  outside the guest's code page fails the push.
   The push skips and names every symlink and every name Windows cannot hold, such as `CON`, `a?b` or a name that
   differs from another only in case. A `replace` fails, leaving the old tree, while a file in it is open. Read-only
   mode hides it.
 - `copy_dir_from_vm` pulls a directory from a Linux guest that has `tar`, or a Windows guest, into a pull directory.
-  A Linux guest packs it in `/var/tmp`, and the server unpacks the archive itself: files arrive with mode 644 and
-  directories with 755, links, devices and FIFOs are skipped and named, and an archive with absolute or `..` paths,
-  paths over 4096 bytes or 256 levels, repeated paths or sparse files fails the pull, which then writes nothing.
+  A Linux guest packs it in `/var/tmp`. From either guest the server unpacks the archive itself: files arrive with
+  mode 644 and directories with 755, links, devices and FIFOs are skipped and named, and an archive with absolute or
+  `..` paths, paths over 4096 bytes or 256 levels, repeated paths or sparse files fails the pull, which then writes
+  nothing.
   `exclude` takes gitignore patterns, applied on the host. An existing directory is replaced as a whole only with
   `overwrite: true`. `limits.max_pull_bytes` caps the archive and the files written, and the new
   `limits.max_pull_entries` (default 100,000) the entries, counting the directories their paths imply. A Windows

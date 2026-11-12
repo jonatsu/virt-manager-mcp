@@ -54,7 +54,8 @@ The probes found four things the design does not yet say. Each lands in the desi
    because the finished archive is measured before it is sent. Risk 2 gains this overshoot.
 4. **Junction loops and long paths (unit 4).** `tar.exe` followed a junction to its own tree for 64 levels, then
    failed at a path of 317 characters. A pull of such a tree fails with `tar.exe`'s message rather than at a cap.
-   Risk 4 says so, and a new risk notes that a push of a tree with paths too long for Windows fails in `tar.exe`.
+   Risk 4 says so. A push of a tree with paths over 260 characters succeeded in the build; a new risk notes that
+   programs without long-path support cannot open the files it creates.
 
 ## Preflight
 

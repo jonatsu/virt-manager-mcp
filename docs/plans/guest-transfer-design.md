@@ -132,8 +132,7 @@ The archive holds:
 
 Other symlinks, device files, FIFOs and sockets are skipped and named in the reply. Every entry is owned by uid and
 gid 0 in the archive and unpacked with `tar -x -o`, so files belong to the user the guest agent runs as. GNU tar and
-busybox `tar` read `-o` on extraction as "do not restore the archive's owner"; run 2 confirms the same for Windows
-`tar.exe`.
+busybox `tar` read `-o` on extraction as "do not restore the archive's owner", and so does Windows `tar.exe`.
 
 In the guest, the archive is written beside the target as `.vmm-<random>.tar`, on the same filesystem, and unpacked
 into `.vmm-<random>.d`. Without `replace`, an existing target is refused before anything is sent. With `replace`, the
@@ -226,7 +225,7 @@ and ARP sources report that they were skipped, and only the guest agent can answ
 ### Windows guests
 
 Run 1 makes `copy_from_vm`, `copy_to_vm` and `vm_addresses` work on Windows guests, and tests them on `t-win11`. Run 2
-adds the directory tools, through `C:\Windows\System32\tar.exe`, which Windows 10 1803 and later ship. On `t-win11` it
+adds the directory tools, through `%SystemRoot%\System32\tar.exe`, which Windows 10 1803 and later ship. On `t-win11` it
 is bsdtar 3.8.8, which accepts `-o` and writes forward slashes
 ([probe note](../research/2026-11-12-windows-tar-probe.md)). The server runs `tar.exe` directly through the guest agent,
 with each path a separate argument, and runs PowerShell only for the steps around it, with every path quoted as a
@@ -255,9 +254,10 @@ ASCII a PAX `path` record, which `tar.exe` reads as UTF-8. It still cannot unpac
 cannot hold, such as a Japanese name on a guest set to a Western code page: it skips the entry, exits with status 1,
 and the push fails with its message.
 
-A pull from a Windows guest packs into `C:\Windows\Temp`, where only `SYSTEM` and `Administrators` can read the files
-that the agent creates. Any non-zero exit status of `tar.exe` fails the pull: Windows has no counterpart of GNU tar's
-changed-file warning, and its status 1 also covers a file that another program holds open.
+A pull from a Windows guest packs into `%SystemRoot%\Temp` (`C:\Windows\Temp` on most guests), where only `SYSTEM`
+and `Administrators` can read the files that the agent creates. Any non-zero exit status of `tar.exe` fails the
+pull: Windows has no counterpart of GNU tar's changed-file warning, and its status 1 also covers a file that another
+program holds open.
 
 ## Invariants
 
@@ -282,7 +282,12 @@ Each needs a test that shows the refusal still happens, as `CLAUDE.md` asks for 
   `renameat2` probe.
 - `src/pull.rs`: the host writer, with its handle-based walk, staged copies and the `renameat2` commit, for files and
   directories.
-- `src/push.rs`: the push walk, the archive builder and the guest steps of `copy_dir_to_vm`.
+- `src/push.rs`: the push walk, the archive builder and the guest steps of `copy_dir_to_vm`, with the Windows name
+  checks and PAX `path` records.
+- `src/guestpath.rs`: parsing a guest path under Linux or Windows rules, shared by both directory tools.
+- `src/winsteps.rs` and `src/winsteps/*.ps1`: the PowerShell steps around `tar.exe`, each run with its arguments as
+  quoted literals, and a test that parses every script with `pwsh`.
+- `tests/fixtures/bsdtar-windows.tar`: an archive from `t-win11`'s `tar.exe` for the unpacker's tests.
 - `src/dirpull.rs`: the guest steps of `copy_dir_from_vm` and the untrusted unpacker. It reads entries with the `tar`
   crate in raw mode but writes every file itself, never through the crate's `unpack`.
 - `src/transfer.rs`: the transfer table, and the `transfer_done` condition, answered in `src/server.rs` before the VM
