@@ -3,7 +3,8 @@
 Status: accepted, after an architecture review and a plan-critic review.
 Once built, the code wins and this design follows it.
 Basis: roadmap outcome 3 in [`fork-roadmap.md`](fork-roadmap.md), with evidence in
-[`2026-11-11-transfer-probe.md`](../research/2026-11-11-transfer-probe.md).
+[`2026-11-11-transfer-probe.md`](../research/2026-11-11-transfer-probe.md) and, for Windows,
+[`2026-11-12-windows-tar-probe.md`](../research/2026-11-12-windows-tar-probe.md).
 
 ## Summary
 
@@ -34,6 +35,7 @@ directory transfers on Windows guests.
 | Excludes on a pull | Applied by the server while unpacking, in gitignore syntax as for pushes; never passed to the guest's `tar` | Guest `tar` builds disagree: GNU tar matches unanchored, and busybox may have no `--exclude`. One host-side dialect gives the same result on every guest, at the cost of excluded files crossing the channel | resolved |
 | Cancelling a transfer | No tool | A transfer ends by finishing, failing, or the server exiting | deferred: an agent cannot stop a large mistaken transfer and waits for it |
 | Windows | In this outcome; directory transfers through Windows' own `tar.exe` form the second run | Windows is a named target; `copy_from_vm` and `vm_addresses` need nothing OS-specific | resolved |
+| Names Windows cannot hold | A push to a Windows guest skips them and names them in the reply, as it does links that leave the tree | `tar.exe` unpacks such an entry without an error but loses it: a file named `CON` vanished in the probe. Refusing the whole push would block a checkout over one odd file | resolved |
 | Delivery | Two runs, each landed and pushed before the next | As in outcome 2 | resolved |
 
 ## Behaviour
@@ -220,9 +222,29 @@ and ARP sources report that they were skipped, and only the guest agent can answ
 ### Windows guests
 
 Run 1 makes `copy_from_vm`, `copy_to_vm` and `vm_addresses` work on Windows guests, and tests them on `t-win11`. Run 2
-adds the directory tools, through `C:\Windows\System32\tar.exe`, which Windows 10 1803 and later ship. Archives use
-forward slashes, pushed modes are dropped, and the pull archive goes to `C:\Windows\Temp`, since the guest agent runs
-as `SYSTEM`. Run 2 confirms that this bsdtar accepts `-o`.
+adds the directory tools, through `C:\Windows\System32\tar.exe`, which Windows 10 1803 and later ship. On `t-win11` it
+is bsdtar 3.8.8, which accepts `-o` and writes forward slashes
+([probe note](../research/2026-11-12-windows-tar-probe.md)). The server runs `tar.exe` directly through the guest agent,
+with each path a separate argument, and runs PowerShell only for the steps around it, with every path quoted as a
+literal.
+
+A Windows guest path is a drive path such as `C:\work\app`, with `\` or `/` between components. The server refuses a
+relative path, a drive-relative path such as `C:work`, a UNC or device path such as `\\server\share` or `\\?\C:\`,
+`..`, a `:` after the drive, and a component that ends in a dot or a space, because Windows drops those and a guard
+could then be passed with `C:\Windows.`. With `replace`, it refuses a drive root and the directories directly below
+it, compared without regard to case.
+
+A push to a Windows guest writes every file with mode 644 and every directory with 755 into the archive, so the host's
+modes are dropped and `tar.exe` marks no directory read-only. It skips, and names in the reply, every entry that
+Windows cannot hold under its name: a reserved device name such as `CON`, `NUL`, `COM1` or `LPT1`, also with an
+extension, as in `CON.txt`; a name with a control character or one of `< > : " | ? *`; a name that ends in a dot or a
+space; and an entry whose name differs from an earlier one in the same directory only in case. A skipped directory
+takes its subtree with it. `tar.exe` would otherwise unpack such an entry onto a device, onto the earlier file, or
+under another name, without an error.
+
+A pull from a Windows guest packs into `C:\Windows\Temp`, where only `SYSTEM` and `Administrators` can read the files
+that the agent creates. Any non-zero exit status of `tar.exe` fails the pull: Windows has no counterpart of GNU tar's
+changed-file warning, and its status 1 also covers a file that another program holds open.
 
 ## Invariants
 
@@ -289,9 +311,13 @@ that meets a symlinked directory.
 2. A guest with little temporary space cannot take a push of a tree larger than half its free space, because the
    archive and the unpacked tree exist together. A pull's archive can fill the guest's temporary directory up to
    `max_pull_bytes` before the cap stops it. On guests whose `/tmp` lives in RAM, such as OpenWrt, that costs memory.
-3. Windows `tar.exe` cannot create files with reserved names such as `CON`; such a push fails with `tar`'s message.
-4. A guest's `tar -c` follows the guest's view of the tree, which the agent controls. The host rules do not depend on
-   it, because the server unpacks every pull itself.
+3. A push to a Windows guest skips the names Windows cannot hold, so a checkout with such a file arrives without it.
+   The reply names each skipped entry. Windows also refuses to rename a directory while a file in it is open, so a
+   `replace` of a tree in use fails and leaves the old tree in place.
+4. A guest's `tar -c` follows the guest's view of the tree, which the agent controls. Windows `tar.exe` follows
+   junctions, so a junction to a directory outside the tree, or to one of its own parents, brings that content into
+   the pull until a cap stops it. The host rules do not depend on it, because the server unpacks every pull itself and
+   the caps bound it.
 5. Concurrent guest-agent commands from several server processes rely on libvirt serializing them per VM. The
    background-transfer case checks it under one process only.
 6. An overwrite deletes the swapped-out tree with `std::fs::remove_dir_all`, which does not stop at mount boundaries.
