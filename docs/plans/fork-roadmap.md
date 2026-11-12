@@ -197,5 +197,6 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 4, seeing what happened, comes next and needs its design first. Follow-ups 15 to 17 and 19 to 21 can land
-at any time.
+Outcome 4, seeing what happened, comes next and needs its design first. Before it is built, follow-ups 17 and 19 to 21
+land as one short run: 17 gives agents wrong results without a word, and 19 is a privilege boundary inside the guest.
+Follow-ups 15 and 16 can land at any time; 16 waits on a newer `virtio-win`.
