@@ -592,14 +592,8 @@ fn append(
         builder.append_data(header, rel, data)?;
         return Ok(());
     }
-    let record = pax_record("path", path);
-    let mut pax = tar::Header::new_ustar();
-    pax.set_entry_type(tar::EntryType::XHeader);
-    pax.set_path("PaxHeader")?;
-    pax.set_mode(0o644);
-    pax.set_size(record.len() as u64);
-    pax.set_cksum();
-    builder.append(&pax, &record[..])?;
+    builder.append_pax_extensions([("path", path)])?;
+    // Written into the header directly: `append_data` would add a GNU long-name entry for a long path.
     let stand_in: Vec<u8> = path
         .iter()
         .take(99)
@@ -611,19 +605,6 @@ fn append(
     header.set_cksum();
     builder.append(header, data)?;
     Ok(())
-}
-
-/// One PAX record, `<length> <key>=<value>\n`, where the length counts the whole record, its own digits included.
-fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
-    let rest = key.len() + value.len() + 3;
-    let mut length = rest + 1;
-    while length != rest + length.to_string().len() {
-        length = rest + length.to_string().len();
-    }
-    let mut record = format!("{length} {key}=").into_bytes();
-    record.extend_from_slice(value);
-    record.push(b'\n');
-    record
 }
 
 fn header(kind: tar::EntryType, st: &rustix::fs::Stat, os: GuestOs) -> tar::Header {
@@ -1426,13 +1407,17 @@ mod tests {
                 (e.header().entry_type(), e.path_bytes().into_owned())
             })
             .collect();
-        // Every plain header holds ASCII, and each non-ASCII path comes from the PAX record before it.
+        // Every plain header holds ASCII, each non-ASCII path comes from the PAX record before it, and no GNU long-name
+        // entry names a long path a second time.
         assert!(raw.iter().all(|(_, name)| name.is_ascii()), "{raw:?}");
-        let pax = raw
-            .iter()
-            .filter(|(kind, _)| *kind == tar::EntryType::XHeader)
-            .count();
-        assert_eq!(pax, 3);
+        let kinds: Vec<_> = raw.iter().map(|(kind, _)| *kind).collect();
+        use tar::EntryType::{Directory, Regular, XHeader};
+        assert_eq!(
+            kinds,
+            [
+                Regular, XHeader, Regular, XHeader, Directory, XHeader, Regular
+            ]
+        );
         // The Linux archive keeps plain UTF-8 names.
         let mut out = Vec::new();
         write_archive(&tree, &selection, GuestOs::Linux, &mut out).unwrap();
@@ -1444,18 +1429,6 @@ mod tests {
                 .raw(true)
                 .all(|e| e.unwrap().header().entry_type() != tar::EntryType::XHeader)
         );
-    }
-
-    #[test]
-    fn a_pax_record_counts_its_own_length() {
-        assert_eq!(pax_record("path", b"a"), b"9 path=a\n");
-        // Eleven bytes plus one digit would be 12, which has two digits, so the record is 13 long.
-        assert_eq!(pax_record("k", b"abcdefg"), b"13 k=abcdefg\n");
-        assert_eq!(pax_record("path", &[b'x'; 90]).len(), 99);
-        // 98 bytes plus two digits would be 100, which has three, so the record is 101 long.
-        let long = pax_record("path", &[b'x'; 91]);
-        assert_eq!(long.len(), 101);
-        assert!(long.starts_with(b"101 path="));
     }
 
     #[test]
