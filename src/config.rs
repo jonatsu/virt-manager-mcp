@@ -40,7 +40,8 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct DisplayOptions {
     /// Absolute directory holding the `ocrs` models that `scripts/fetch-ocr-models.sh` downloads. Unset turns
-    /// screen text recognition off; set, the directory and both model files must exist.
+    /// screen text recognition off, unless `VIRTMANAGER_OCR_DOWNLOAD=1` points it at the download directory after
+    /// validation; set, the directory and both model files must exist.
     pub ocr_models: Option<PathBuf>,
 }
 

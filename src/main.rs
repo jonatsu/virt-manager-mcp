@@ -10,6 +10,7 @@ mod hypervisor;
 mod jobs;
 mod manage;
 mod mouse;
+mod ocrfetch;
 mod pull;
 mod pulldir;
 mod push;
@@ -129,6 +130,7 @@ async fn run() -> Result<()> {
     config.host_share_dirs.extend(cli.share);
     config.share_project_dir |= cli.share_project_dir;
     config.validate()?;
+    let ocr_download = ocr_download(&mut config);
 
     if config.allowed_vms.is_empty() {
         tracing::warn!("allowed_vms is empty: no VM will be accessible");
@@ -149,12 +151,16 @@ async fn run() -> Result<()> {
         hv,
         consoles: Consoles::default(),
         ocr: Default::default(),
+        ocr_download: ocr_download.clone(),
         pulls: Default::default(),
         transfers: Default::default(),
     });
 
     if let Some(Command::Sweep) = cli.command {
         return sweep::run_command(&state);
+    }
+    if let Some(download) = &ocr_download {
+        download.spawn();
     }
     if !config.host_pull_dirs.is_empty() {
         let pools = state
@@ -184,6 +190,28 @@ async fn run() -> Result<()> {
         Transport::Http => serve_http(state, &config).await?,
     }
     Ok(())
+}
+
+/// Points `display.ocr_models` at the download directory when `VIRTMANAGER_OCR_DOWNLOAD=1` and the config leaves it
+/// unset, and returns the download to start. A directory the server cannot name leaves OCR off, with a warning.
+fn ocr_download(config: &mut Config) -> Option<Arc<ocrfetch::Download>> {
+    let dir = ocrfetch::download_dir(
+        std::env::var_os(ocrfetch::ENV),
+        config.display.ocr_models.is_some(),
+        std::env::var_os("XDG_DATA_HOME"),
+        std::env::var_os("HOME"),
+    );
+    match dir {
+        Ok(None) => None,
+        Ok(Some(dir)) => {
+            config.display.ocr_models = Some(dir.clone());
+            Some(ocrfetch::Download::new(dir))
+        }
+        Err(e) => {
+            tracing::warn!("screen_text stays off: {e:#}");
+            None
+        }
+    }
 }
 
 async fn serve_http(state: Arc<State>, config: &Config) -> Result<()> {

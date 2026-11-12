@@ -17,7 +17,7 @@ Host: Linux. Guests: Linux and Windows.
 | Capability | Mechanism | Guest requirement |
 | -- | -- | -- |
 | `exec`, `read_file`, `write_file`, `copy_to_vm`, `copy_dir_to_vm`, `copy_from_vm`, `copy_dir_from_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs work on Linux and Windows guests |
-| `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs `display.ocr_models` |
+| `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs the OCR models |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
 | `mouse` | QEMU monitor `input-send-event` (`virDomainQemuMonitorCommand`) | A graphics device and a USB tablet |
@@ -177,7 +177,13 @@ condition matched, or a new capture of display head 0. Some guests drop input se
 ignores keys sent within about 2 s of a new screen. Wait for the screen's text and then for `screen_settled` before
 typing.
 
-`screen_text` needs the `ocrs` OCR models. The server never downloads them. Fetch them once, and name the directory in
+`screen_text` needs the `ocrs` OCR models, about 12 MiB. Start the server with `VIRTMANAGER_OCR_DOWNLOAD=1` in its
+environment, and it downloads them in the background into `~/.local/share/virtmanager-mcp/ocr-models`, or under
+`$XDG_DATA_HOME`. It checks each file against a pinned SHA-256 sum, and it skips files already there. Until the
+download ends, `screen_text` replies that the models are still downloading. A failed download leaves the server
+running, and `screen_text` names the cause. The variable needs `curl` on the host.
+
+To keep the models somewhere else, or on a host without network access, fetch them once and name the directory in
 the config:
 
 ```sh
@@ -189,10 +195,11 @@ scripts/fetch-ocr-models.sh ~/.local/share/virtmanager-mcp/ocr   # checks pinned
 ocr_models = "/home/me/.local/share/virtmanager-mcp/ocr" # absolute path
 ```
 
-When `ocr_models` is set, the server refuses to start unless the directory holds both model files. When it is unset,
-`screen_text` is refused and `screen_settled` still works. OCR runs in a pool of 4 threads, so it leaves the host's
-other cores to its VMs. [`docs/how-to/ocr-models.md`](docs/how-to/ocr-models.md) covers where the models run and how
-to update and remove them.
+When `ocr_models` is set, the server refuses to start unless the directory holds both model files, and it ignores
+`VIRTMANAGER_OCR_DOWNLOAD`. With neither, `screen_text` is refused and `screen_settled` still works. OCR runs in a
+pool of 4 threads, so it leaves the host's other cores to its VMs.
+[`docs/how-to/ocr-models.md`](docs/how-to/ocr-models.md) covers where the models run and how to update and remove
+them.
 
 `mouse` moves, clicks, double-clicks, drags or scrolls. It needs a USB tablet (`<input type='tablet' bus='usb'/>`),
 which VMs from `create_vm` and `create_vm_from_template` have, and it supports display head 0 only. It sends QEMU

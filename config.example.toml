@@ -75,7 +75,8 @@ max_transfers = 4                   # copies running in the background at once
 
 # Screen text recognition for wait_for's screen_text condition. Unset (the default) turns it off;
 # screen_settled, screenshots and the mouse work without it. Set it to the absolute directory that
-# scripts/fetch-ocr-models.sh filled; the directory and both model files must exist.
+# scripts/fetch-ocr-models.sh filled; the directory and both model files must exist. While it is
+# unset, VIRTMANAGER_OCR_DOWNLOAD=1 in the server's environment downloads the models instead.
 # [display]
 # ocr_models = "/home/me/.local/share/virtmanager-mcp/ocr-models"
 

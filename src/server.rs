@@ -23,7 +23,8 @@ use crate::config::Config;
 use crate::console::{Consoles, Pacing};
 use crate::hypervisor::{self, Hypervisor};
 use crate::{
-    addresses, ansi, dirpull, display, fsops, jobs, manage, mouse, pull, push, transfer, wait,
+    addresses, ansi, dirpull, display, fsops, jobs, manage, mouse, ocrfetch, pull, push, transfer,
+    wait,
 };
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
@@ -80,6 +81,8 @@ pub struct State {
     pub consoles: Consoles,
     /// The OCR recogniser, loaded from `display.ocr_models` by the first `screen_text` wait and shared after.
     pub ocr: Mutex<Option<Arc<display::Recognizer>>>,
+    /// The model download that `VIRTMANAGER_OCR_DOWNLOAD=1` started, which the first load waits on.
+    pub ocr_download: Option<Arc<ocrfetch::Download>>,
     /// Host destinations of the pulls running in this process.
     pub pulls: pull::Destinations,
     /// Copies running in, or finished by, this process.
@@ -2134,10 +2137,15 @@ impl State {
         if let Some(loaded) = &*ocr {
             return Ok(loaded.clone());
         }
-        let loaded = Arc::new(display::Recognizer::load(dir).context(
-            "screen_text cannot load the OCR models in display.ocr_models; scripts/fetch-ocr-models.sh downloads \
-             and checks them",
-        )?);
+        if let Some(download) = &self.ocr_download {
+            download.ready()?;
+        }
+        let loaded = Arc::new(display::Recognizer::load(dir).with_context(|| {
+            format!(
+                "screen_text cannot load the OCR models in {}; scripts/fetch-ocr-models.sh downloads and checks them",
+                dir.display()
+            )
+        })?);
         *ocr = Some(loaded.clone());
         Ok(loaded)
     }

@@ -317,8 +317,8 @@ pub fn validate_conditions(
 }
 
 /// Why `screen_text` is refused on a server without OCR models.
-pub const NO_OCR_MODELS: &str = "screen_text needs the OCR models: set display.ocr_models to the directory that \
-     scripts/fetch-ocr-models.sh fills";
+pub const NO_OCR_MODELS: &str = "screen_text needs the OCR models: start the server with VIRTMANAGER_OCR_DOWNLOAD=1 \
+     to download them, or set display.ocr_models to the directory that scripts/fetch-ocr-models.sh fills";
 
 /// Checks `settle_secs`: at least one frame interval, and at most the call's `timeout` less one frame interval,
 /// because every frame of the wait starts before its end. A zero timeout is left to [`run`], whose refusal says that

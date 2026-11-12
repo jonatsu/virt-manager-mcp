@@ -107,9 +107,13 @@ Reviews of earlier work found these. None blocks the server's use.
 17. **`exec` ignores `args` given with `command`.** It runs the command line without the arguments and reports no
     error, so `sha256sum` with `args` hashed empty input
     ([probe note](../research/2026-11-11-transfer-probe.md)). Refuse the combination, with a test.
-18. **Change how the OCR models are obtained.** Today the operator runs `scripts/fetch-ocr-models.sh` by hand and sets
-    `display.ocr_models` ([how-to](../how-to/ocr-models.md)). The logic changes slightly; the details are still to
-    come, so settle them before this is planned. Handle it soon, ahead of the remaining outcomes.
+18. **Done: `VIRTMANAGER_OCR_DOWNLOAD=1` downloads the OCR models.** While `display.ocr_models` is unset, the server
+    downloads the models after startup, with `curl`, into `$XDG_DATA_HOME/virtmanager-mcp/ocr-models`. It runs in
+    the background so that the client's handshake never waits for it, and a failure never stops the server.
+    `screen_text` replies that the models are still downloading, or names the failure. The pinned sums are those of
+    `scripts/fetch-ocr-models.sh`, which stays for offline hosts and a directory of the operator's choice, and a test
+    keeps the two equal. `curl` avoids a TLS library in the dependency tree
+    ([how-to](../how-to/ocr-models.md)).
 
 ## Outcomes
 
@@ -179,5 +183,4 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Run 2 of outcome 3, directory transfers on Windows, needs its plan. Follow-up 18
-comes soon, once its details are settled. Follow-ups 15 to 17 can land at any time.
+Run 2 of outcome 3, directory transfers on Windows, needs its plan. Follow-ups 15 to 17 can land at any time.

@@ -43,6 +43,10 @@ Each release's section lists what changed for people who run the server and for 
 - A copy that outlasts `limits.max_wait_secs`, through any of the four copy tools, goes on in the background and
   replies with a transfer ID instead of failing at the client's call timeout. `wait_for`'s `transfer_done`
   condition reports how it ended. `limits.max_transfers` (default 4) caps how many run at once.
+- `VIRTMANAGER_OCR_DOWNLOAD=1` in the server's environment downloads the OCR models with `curl` into
+  `~/.local/share/virtmanager-mcp/ocr-models`, or under `$XDG_DATA_HOME`, while `display.ocr_models` is unset. The
+  download runs in the background after startup and checks the same pinned sums as `scripts/fetch-ocr-models.sh`.
+  Until it ends, `screen_text` replies that the models are still downloading, and after a failure it names the cause.
 
 ### Fixed
 

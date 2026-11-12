@@ -13,7 +13,7 @@
     },
     "expect": {
       "error": true,
-      "contains": "condition 0: screen_text needs the OCR models: set display.ocr_models"
+      "contains": "condition 0: screen_text needs the OCR models: start the server with VIRTMANAGER_OCR_DOWNLOAD=1"
     }
   },
   {
