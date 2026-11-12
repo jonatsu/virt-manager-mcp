@@ -56,3 +56,28 @@ and it packed the expected entries.
 Its access entries give `SYSTEM`, `Administrators` and `CREATOR OWNER` full control, and `BUILTIN\Users` the right
 to create files, append data and execute. The files that `tar.exe` unpacked there, as the agent's `SYSTEM` account,
 carried only the `Administrators` and `SYSTEM` entries, so other users cannot read them.
+
+## Second probe: deletion, links, loops and the archive's size
+
+Later on 2026-11-12, on the same guest and server build.
+
+`Remove-Item -Recurse -Force` deleted a directory that held a junction and a directory symlink to a directory outside
+it, and a subdirectory marked `ReadOnly`. The outside directory and its file were still there afterwards.
+`[IO.Directory]::Delete(<dir>, $true)` on the same tree failed with "The parameter is incorrect" and left it in place.
+
+`[IO.Directory]::Move` onto an existing directory failed with "Cannot create a file when that file already exists",
+and moved nothing into it.
+
+A tree whose junction `back` points to the tree itself made `tar.exe -c` recurse 64 levels, to a path of 317
+characters, then print `Cannot stat: Invalid argument` and `Error exit delayed from previous errors`. The archive held
+127 entries and took 2 s.
+
+An archive from the host with a file symlink `lf -> f.txt` and a directory symlink `ld -> d` unpacked with exit
+status 0. Both became symlinks, but `ld` became a file symlink: listing `ld` as a directory returned `ld` itself, not
+`g.txt`. `lf` read as the file's content.
+
+While `tar.exe` wrote a 3 GiB archive, every `guest-file-open` of the archive failed with "The process cannot access
+the file because it is being used by another process", until `tar.exe` exited. A PowerShell query of the archive's
+length, `[IO.FileInfo]::new(<path>).Length` or `(Get-Item <path>).Length`, reported it growing during the same run:
+380 MB, 1.2 GB, 2.0 GB and 2.9 GB at polls about 1.5 s apart, each poll a new `powershell.exe` started through the
+agent. `C:` had 39 GiB free.
