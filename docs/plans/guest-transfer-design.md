@@ -339,8 +339,9 @@ that meets a symlinked directory.
 6. An overwrite deletes the swapped-out tree with `std::fs::remove_dir_all`, which does not stop at mount boundaries.
    A filesystem that an operator mounts inside a pulled tree would lose its contents, so the README asks operators to
    mount nothing inside a pull directory.
-7. Windows paths are limited to 260 characters unless the guest enables long paths. A push whose tree, placed at the
-   target, holds a longer path fails in `tar.exe`, and the old tree stays in place.
+7. `tar.exe` creates paths longer than 260 characters, which a push of a deep tree can produce. Windows programs that
+   lack long-path support, Explorer and `cmd.exe` among them, cannot open such files; PowerShell reaches them with a
+   `\\?\` prefix.
 
 ## Open questions
 

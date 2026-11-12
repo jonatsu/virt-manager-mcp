@@ -99,5 +99,25 @@ directory holding the file it points to. A pull with `a.txt` held open with `Fil
 `Couldn't open ./a.txt: Permission denied`, and a pull of the self-junction failed with `Cannot stat`. A second pull
 to the same host directory was refused without `overwrite`. A pull of a 4 GiB file with `max_pull_bytes` at 64 MiB
 failed with the message for an archive that passed the limit while `tar` built it: the size poll, not the final
-measurement, stopped `tar.exe`, and the archive was deleted. Afterwards the temporary
+measurement, stopped `tar.exe`, and the archive was deleted.
+
+## Pushes through the server
+
+Later on 2026-11-12, `copy_dir_to_vm` from the run 2 work in progress pushed a tree with `a.txt`, `sub dir\b.txt`,
+`été.txt`, a 1 MiB file two levels down and an empty directory to `C:\Windows\Temp\vmm-push\app`.
+
+- The guest's SHA-256 of every file matched the host's, and the empty directory arrived.
+- A second push without `replace` was refused. With `replace`, while the old tree held a junction to a directory
+  outside it, the push swapped the new tree in, and the junction's target and its file were still there.
+- With `a.txt` held open with `FileShare` none by a job, `[IO.Directory]::Move` of the tree failed with
+  `System.IO.IOException`, HResult `0x80070005`, "Access to the path ... is denied", wrapped in a
+  `MethodInvocationException`. The push failed, and the old tree was unchanged.
+- A tree whose first entry is `ä.txt`, so the archive starts with a PAX header, unpacked as `ä.txt` and `ö\x.txt`
+  under their own names (U+00E4, U+00F6).
+- `日本語.txt` failed the push with `Archive entry has empty or unreadable filename`, and created nothing.
+- A tree with a 263-character relative path unpacked into a path of 297 characters, with exit status 0.
+- The first attempt failed at once with the server's own "mode is only supported on Linux guests": the push asked
+  for mode 600 on the archive, which the server sets only on Linux.
+
+After each push the target's directory held no `.vmm-*` entry and no `tar` process ran. Afterwards the temporary
 directory held no `.vmm-*` entry and no `tar` process ran.

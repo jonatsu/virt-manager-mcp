@@ -209,15 +209,6 @@ fn yes() -> bool {
     true
 }
 
-/// Refuses a Windows guest for a directory tool before the call touches the host or takes a transfer slot. Run 2
-/// adds directory transfers on Windows.
-fn refuse_windows(os: agent::GuestOs, tool: &str) -> Result<()> {
-    if os == agent::GuestOs::Windows {
-        bail!("{tool} does not support Windows guests yet");
-    }
-    Ok(())
-}
-
 #[derive(Deserialize, JsonSchema)]
 pub struct CopyDirFromVmParams {
     pub vm: String,
@@ -244,8 +235,8 @@ pub struct CopyDirToVmParams {
     pub host_path: String,
     /// Absolute path of the directory to create in the guest; missing parent directories are created.
     pub guest_path: String,
-    /// Replace an existing directory at guest_path with the pushed tree as a whole (default false). Refused for / and
-    /// the directories directly below it, and for anything but a directory.
+    /// Replace an existing directory at guest_path with the pushed tree as a whole (default false). Refused for / or a
+    /// Windows drive root and the directories directly below it, and for anything but a directory.
     #[serde(default)]
     pub replace: bool,
     /// Leave out what .gitignore and .git/info/exclude rules ignore, in the tree and in its parent directories inside
@@ -936,13 +927,16 @@ impl VirtServer {
             destructive_hint = true,
             idempotent_hint = false
         ),
-        description = "Push a host directory, such as a checkout, into a Linux guest as a tar archive through the QEMU \
-        guest agent; the guest needs tar. host_path must be a directory inside the shared host directories named in \
-        the server instructions. guest_path names the directory to create; an existing one is refused unless \
+        description = "Push a host directory, such as a checkout, into a Linux or Windows guest as a tar archive \
+        through the QEMU guest agent; a Linux guest needs tar, and Windows uses its own tar.exe. host_path must be a \
+        directory inside the shared host directories named in the server instructions. guest_path names the \
+        directory to create (on Windows a drive path such as C:\\work\\app); an existing one is refused unless \
         replace: true, which swaps the whole new tree in, so files deleted on the host do not linger. A failed push \
         leaves the old tree in place. By default .gitignore rules apply and .git is left out; exclude adds gitignore \
         patterns. Symlinks are sent only when they stay inside the tree; other symlinks, FIFOs, sockets and devices \
-        are skipped and named. Files arrive owned by the guest agent's user, without setuid or setgid bits. The reply \
+        are skipped and named. On Windows every symlink is skipped, as is every name Windows cannot hold, such as \
+        CON or a name differing from another only in case, and a file open in the old tree makes replace fail. \
+        Files arrive owned by the guest agent's user, without setuid or setgid bits. The reply \
         counts files, bytes and the files .gitignore kept out. A push still running after limits.max_wait_secs \
         continues in the background and replies with a `transfer` ID; wait_for's `transfer_done` condition reports \
         how it ended. Temporary entries beside the target start with .vmm-."
@@ -955,7 +949,6 @@ impl VirtServer {
             let dom = s.hv.domain(&p.vm)?;
             let timeout = s.hv.config.limits.agent_timeout_secs;
             let os = Agent::new(&dom, timeout).os()?;
-            refuse_windows(os, "copy_dir_to_vm")?;
             let tree = push::Tree::resolve(&s.hv.config.host_share_dirs, &p.host_path)?;
             let options = push::Options {
                 respect_gitignore: p.respect_gitignore,

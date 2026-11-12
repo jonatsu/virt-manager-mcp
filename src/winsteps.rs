@@ -9,6 +9,14 @@ pub const PULL_PREPARE: &str = include_str!("winsteps/pull-prepare.ps1");
 pub const PULL_SIZE: &str = include_str!("winsteps/pull-size.ps1");
 /// Deletes a pull's archive.
 pub const PULL_REMOVE: &str = include_str!("winsteps/pull-remove.ps1");
+/// Checks a directory push's target, creates its parents, and prints the path of `tar.exe`.
+pub const PUSH_PROBE: &str = include_str!("winsteps/push-probe.ps1");
+/// Creates the directory a push unpacks into.
+pub const PUSH_MKDIR: &str = include_str!("winsteps/push-mkdir.ps1");
+/// Moves a pushed tree into its target, the old tree aside first.
+pub const PUSH_SWAP: &str = include_str!("winsteps/push-swap.ps1");
+/// Deletes a push's temporary entries.
+pub const PUSH_CLEANUP: &str = include_str!("winsteps/push-cleanup.ps1");
 
 /// Runs the constant script `body` with `args` defined before it as `$argv`, an array of quoted literals, so no
 /// argument is ever parsed as PowerShell code.
@@ -124,7 +132,7 @@ exit $errors.Count"#;
         assert!(!found.is_empty(), "the parser accepted an unclosed brace");
         let scripts = scripts();
         assert!(
-            scripts.len() >= 4,
+            scripts.len() >= 8,
             "only {} scripts found: {scripts:?}",
             scripts.len()
         );

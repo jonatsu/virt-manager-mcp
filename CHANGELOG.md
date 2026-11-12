@@ -28,11 +28,15 @@ Each release's section lists what changed for people who run the server and for 
   start when one overlaps a share directory, the shared project directory, an ISO directory or any libvirt storage
   pool, or sits on a filesystem without `renameat2` support. Each gets a private `.vmm-staging/` directory. Pull
   directories may nest, but a pull never replaces one, or a directory that holds one.
-- `copy_dir_to_vm` pushes a host directory from a share into a Linux guest that has `tar`, such as a checkout. It
-  follows `.gitignore` rules in the tree and in its parent directories inside the share, leaves `.git` out, and takes
-  extra `exclude` patterns. A symlink goes along only when it stays inside the tree; other links, FIFOs, sockets and
-  devices are skipped and named. An existing directory is replaced as a whole only with `replace: true`, never `/` or
-  a directory directly below it, and a failed push leaves it in place. Read-only mode hides it.
+- `copy_dir_to_vm` pushes a host directory from a share into a Linux guest that has `tar`, or a Windows guest, such
+  as a checkout. It follows `.gitignore` rules in the tree and in its parent directories inside the share, leaves
+  `.git` out, and takes extra `exclude` patterns. A symlink goes along only when it stays inside the tree; other
+  links, FIFOs, sockets and devices are skipped and named. An existing directory is replaced as a whole only with
+  `replace: true`, never `/` or a directory directly below it, and a failed push leaves it in place. A Windows guest
+  unpacks with its own `tar.exe`: nothing arrives read-only, and a name outside the guest's code page fails the push.
+  The push skips and names every symlink and every name Windows cannot hold, such as `CON`, `a?b` or a name that
+  differs from another only in case. A `replace` fails, leaving the old tree, while a file in it is open. Read-only
+  mode hides it.
 - `copy_dir_from_vm` pulls a directory from a Linux guest that has `tar`, or a Windows guest, into a pull directory.
   A Linux guest packs it in `/var/tmp`, and the server unpacks the archive itself: files arrive with mode 644 and
   directories with 755, links, devices and FIFOs are skipped and named, and an archive with absolute or `..` paths,

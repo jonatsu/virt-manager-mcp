@@ -28,6 +28,7 @@ use serde::Serialize;
 use crate::agent::{Agent, ExecSpec, GuestOs};
 use crate::guestpath::GuestPath;
 use crate::transfer::CountingReader;
+use crate::winsteps;
 
 /// The setuid and setgid bits, which a pushed entry never carries.
 const SETID_BITS: u32 = 0o6000;
@@ -750,6 +751,7 @@ pub struct Target {
     pub path: String,
     parent: String,
     separator: char,
+    os: GuestOs,
     id: String,
 }
 
@@ -772,6 +774,7 @@ impl Target {
             path: parsed.normalized(),
             parent: parsed.prefix(depth - 1),
             separator: parsed.separator(),
+            os,
             id: uuid::Uuid::new_v4().simple().to_string(),
         })
     }
@@ -790,6 +793,8 @@ pub enum Step {
     /// Sending the archive, which `Guest::write` does; only the tests' guest names it, to fail it.
     #[cfg(test)]
     Write,
+    /// Creating the directory to unpack into, a step of its own on Windows only, where `tar.exe` runs without a shell.
+    MakeDir,
     Unpack,
     Swap,
     Cleanup,
@@ -832,27 +837,43 @@ impl Steps {
             GuestOs::Linux => {
                 let mut argv = vec![
                     "-c".to_string(),
-                    linux_script(step).to_string(),
+                    linux_script(step)?.to_string(),
                     "sh".to_string(),
                 ];
                 argv.extend(args.iter().map(|a| (*a).to_string()));
                 Ok(ExecSpec::new("/bin/sh", argv))
             }
-            GuestOs::Windows => bail!("copy_dir_to_vm does not support Windows guests yet"),
+            GuestOs::Windows => Ok(match step {
+                Step::Probe => winsteps::script(winsteps::PUSH_PROBE, args),
+                Step::MakeDir => winsteps::script(winsteps::PUSH_MKDIR, args),
+                // `tar.exe` runs directly, without a shell, with the path that the probe printed, so stopping the step
+                // after a timeout stops `tar.exe` itself.
+                Step::Unpack => match args {
+                    [archive, dir, tar] => {
+                        ExecSpec::new(tar, ["-x", "-o", "-f", archive, "-C", dir])
+                    }
+                    _ => bail!("unpacking needs the archive, the directory and tar.exe's path"),
+                },
+                Step::Swap => winsteps::script(winsteps::PUSH_SWAP, args),
+                Step::Cleanup => winsteps::script(winsteps::PUSH_CLEANUP, args),
+                #[cfg(test)]
+                Step::Write => bail!("writing the archive is no script step"),
+            }),
         }
     }
 }
 
 /// The `sh` script of a Linux step.
-fn linux_script(step: Step) -> &'static str {
-    match step {
+fn linux_script(step: Step) -> Result<&'static str> {
+    Ok(match step {
         Step::Probe => PROBE,
         Step::Unpack => UNPACK,
         Step::Swap => SWAP,
         Step::Cleanup => CLEANUP,
+        Step::MakeDir => bail!("a Linux push creates its directory in the Unpack step"),
         #[cfg(test)]
-        Step::Write => panic!("writing the archive is no script step"),
-    }
+        Step::Write => bail!("writing the archive is no script step"),
+    })
 }
 
 /// A guest reached through its agent, with its OS's steps.
@@ -884,7 +905,9 @@ impl Guest for OnGuest<'_> {
     }
 
     fn write(&self, path: &str, data: &mut dyn Read) -> Result<u64> {
-        self.agent.write_from(path, data, false, Some(0o600))
+        // Windows has no file modes; the archive's directory decides who can read it.
+        let mode = (self.steps.0 == GuestOs::Linux).then_some(0o600);
+        self.agent.write_from(path, data, false, mode)
     }
 }
 
@@ -922,6 +945,13 @@ else
 fi
 exit 0"#;
 
+/// The Windows swap's exit status for a move the guest refused because a file is in use or access was denied, after
+/// which nothing has changed.
+const SWAP_BUSY: i64 = 20;
+
+/// How long a push waits before it runs a refused Windows swap once more.
+const SWAP_RETRY: Duration = Duration::from_secs(1);
+
 /// Deletes the push's own `.vmm-` entries named in its arguments. `rm` replaces the shell, so stopping the step
 /// after a timeout stops `rm` too.
 const CLEANUP: &str = r#"exec rm -rf -- "$@""#;
@@ -939,6 +969,9 @@ pub fn push(
     let probe = guest.run(Step::Probe, &[&target.path, &target.parent, flag])?;
     match probe.code {
         Some(0) => {}
+        Some(10) if target.os == GuestOs::Windows => bail!(
+            "the guest has no System32\\tar.exe, which Windows 10 1803 and later ship and copy_dir_to_vm needs"
+        ),
         Some(10) => bail!("the guest has no tar, which copy_dir_to_vm needs"),
         Some(11) => bail!(
             "{} exists in the guest; pass replace: true to replace it",
@@ -955,13 +988,15 @@ pub fn push(
         ),
     }
     let (packed, unpacked, old) = (target.temp("tar"), target.temp("d"), target.temp("old"));
+    // The Windows probe prints the path of `tar.exe`; the Linux steps find `tar` on the guest's `PATH`.
+    let tar = probe.stdout.lines().last().unwrap_or_default();
     let result = send_and_swap(
         guest,
         target,
         flag,
         bytes,
         archive,
-        [&packed, &unpacked, &old],
+        [&packed, &unpacked, &old, tar],
     );
     // The old tree goes only once the new one is in place; after a failed swap it may be all that is left of it.
     let mut leftovers = vec![packed.as_str(), unpacked.as_str()];
@@ -990,7 +1025,7 @@ fn send_and_swap(
     flag: &str,
     bytes: &AtomicU64,
     archive: impl FnOnce(&mut dyn Write) -> Result<Summary> + Send,
-    [packed, unpacked, old]: [&str; 3],
+    [packed, unpacked, old, tar]: [&str; 4],
 ) -> Result<Summary> {
     let (reader, writer) = io::pipe()?;
     let summary = std::thread::scope(|s| -> Result<Summary> {
@@ -1012,14 +1047,32 @@ fn send_and_swap(
         sent.context("sending the archive to the guest")?;
         built.context("building the archive")
     })?;
-    let ran = guest.run(Step::Unpack, &[packed, unpacked])?;
+    let ran = match target.os {
+        GuestOs::Linux => guest.run(Step::Unpack, &[packed, unpacked])?,
+        GuestOs::Windows => {
+            let made = guest.run(Step::MakeDir, &[unpacked])?;
+            if made.code != Some(0) {
+                bail!(
+                    "creating {unpacked} in the guest failed: {}",
+                    made.describe()
+                );
+            }
+            guest.run(Step::Unpack, &[packed, unpacked, tar])?
+        }
+    };
     if ran.code != Some(0) {
         bail!(
             "unpacking the archive in the guest failed: {}",
             ran.describe()
         );
     }
-    let ran = guest.run(Step::Swap, &[&target.path, unpacked, old, flag])?;
+    let swap = [target.path.as_str(), unpacked, old, flag];
+    let mut ran = guest.run(Step::Swap, &swap)?;
+    if ran.code == Some(SWAP_BUSY) {
+        // A virus scanner may still hold a file it is checking in the freshly unpacked tree.
+        std::thread::sleep(SWAP_RETRY);
+        ran = guest.run(Step::Swap, &swap)?;
+    }
     match ran.code {
         Some(0) => Ok(summary),
         Some(11) => bail!(
@@ -1040,6 +1093,12 @@ fn send_and_swap(
              tree is at {old}",
             target.path
         ),
+        Some(SWAP_BUSY) => bail!(
+            "the guest refused to move the tree into {}, usually because a file in it is open; the old tree is \
+             unchanged: {}",
+            target.path,
+            ran.describe()
+        ),
         _ => bail!(
             "could not move the new tree into {}; the old tree is unchanged: {}",
             target.path,
@@ -1050,6 +1109,7 @@ fn send_and_swap(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
@@ -1493,17 +1553,252 @@ mod tests {
     }
 
     #[test]
-    fn windows_steps_are_refused_until_they_exist() {
-        let err = Steps(GuestOs::Windows).spec(Step::Probe, &[]).unwrap_err();
-        assert!(
-            err.to_string().contains("does not support Windows"),
-            "{err}"
-        );
+    fn each_step_runs_its_own_script_for_the_guest_os() {
         let spec = Steps(GuestOs::Linux)
             .spec(Step::Cleanup, &["/a/.vmm-x.tar"])
             .unwrap();
         assert_eq!(spec.path, "/bin/sh");
         assert_eq!(spec.args.last().map(String::as_str), Some("/a/.vmm-x.tar"));
+        assert!(Steps(GuestOs::Linux).spec(Step::MakeDir, &["/a"]).is_err());
+
+        let windows = Steps(GuestOs::Windows);
+        let args = [r"C:\it's\x", r"C:\y"];
+        for (step, script) in [
+            (Step::Probe, winsteps::PUSH_PROBE),
+            (Step::MakeDir, winsteps::PUSH_MKDIR),
+            (Step::Swap, winsteps::PUSH_SWAP),
+            (Step::Cleanup, winsteps::PUSH_CLEANUP),
+        ] {
+            let spec = windows.spec(step, &args).unwrap();
+            assert_eq!(spec.path, "powershell.exe", "{step:?}");
+            assert_eq!(spec.args, winsteps::script(script, &args).args, "{step:?}");
+        }
+        assert!(windows.spec(Step::Unpack, &[r"C:\a.tar", r"C:\d"]).is_err());
+        let spec = windows
+            .spec(Step::Unpack, &[r"C:\a.tar", r"C:\d", WIN_TAR])
+            .unwrap();
+        assert_eq!(spec.path, WIN_TAR);
+        assert_eq!(spec.args, ["-x", "-o", "-f", r"C:\a.tar", "-C", r"C:\d"]);
+    }
+
+    const WIN_TAR: &str = r"C:\Windows\System32\tar.exe";
+
+    /// A Windows guest that records each step with its arguments and answers with the exit codes it is given: `probe`,
+    /// `make_dir` and `unpack` once each, and `swaps` one per swap run, 0 once they run out.
+    struct WindowsGuest {
+        calls: RefCell<Vec<String>>,
+        probe: i64,
+        make_dir: i64,
+        unpack: i64,
+        swaps: RefCell<Vec<i64>>,
+    }
+
+    impl WindowsGuest {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                probe: 0,
+                make_dir: 0,
+                unpack: 0,
+                swaps: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// The recorded calls, with the random part of each temporary name replaced by `ID`.
+        fn calls(&self) -> Vec<String> {
+            self.calls
+                .borrow()
+                .iter()
+                .map(|c| {
+                    let mut out = String::new();
+                    let mut rest = c.as_str();
+                    while let Some(at) = rest.find(".vmm-") {
+                        out.push_str(&rest[..at + 5]);
+                        rest = &rest[at + 5 + 32..];
+                        out.push_str("ID");
+                    }
+                    out.push_str(rest);
+                    out
+                })
+                .collect()
+        }
+
+        fn push(&self, replace: bool) -> Result<Summary> {
+            let target = Target::parse(GuestOs::Windows, r"C:\work\app", replace)?;
+            push(self, &target, replace, &AtomicU64::new(0), |out| {
+                out.write_all(b"archive")?;
+                Ok(Summary::default())
+            })
+        }
+    }
+
+    impl Guest for WindowsGuest {
+        fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
+            // The step must exist for Windows with these arguments.
+            Steps(GuestOs::Windows).spec(step, args)?;
+            self.calls
+                .borrow_mut()
+                .push(format!("{step:?} {}", args.join(" | ")));
+            let (code, stdout, stderr) = match step {
+                Step::Probe => (self.probe, WIN_TAR, ""),
+                Step::MakeDir => (self.make_dir, "", "cannot create"),
+                Step::Unpack => (
+                    self.unpack,
+                    "",
+                    "tar.exe: Archive entry has empty or unreadable filename",
+                ),
+                Step::Swap => {
+                    let mut swaps = self.swaps.borrow_mut();
+                    let code = if swaps.is_empty() { 0 } else { swaps.remove(0) };
+                    (code, "", "The process cannot access the file")
+                }
+                _ => (0, "", ""),
+            };
+            Ok(Ran {
+                code: Some(code),
+                stdout: stdout.into(),
+                stderr: if code == 0 {
+                    String::new()
+                } else {
+                    stderr.into()
+                },
+            })
+        }
+
+        fn write(&self, path: &str, data: &mut dyn Read) -> Result<u64> {
+            self.calls.borrow_mut().push(format!("write {path}"));
+            Ok(io::copy(data, &mut io::sink())?)
+        }
+    }
+
+    #[test]
+    fn a_windows_push_unpacks_with_tar_exe_and_swaps_the_tree_in() {
+        let guest = WindowsGuest::new();
+        guest.push(true).unwrap();
+        assert_eq!(
+            guest.calls(),
+            [
+                r"Probe C:\work\app | C:\work | 1",
+                r"write C:\work\.vmm-ID.tar",
+                r"MakeDir C:\work\.vmm-ID.d",
+                r"Unpack C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d | C:\Windows\System32\tar.exe",
+                r"Swap C:\work\app | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old | 1",
+                r"Cleanup C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_windows_failure_has_its_message_and_keeps_the_old_tree() {
+        let cases = [
+            (
+                WindowsGuest {
+                    probe: 10,
+                    ..WindowsGuest::new()
+                },
+                "no System32\\tar.exe",
+            ),
+            (
+                WindowsGuest {
+                    probe: 11,
+                    ..WindowsGuest::new()
+                },
+                "pass replace: true",
+            ),
+            (
+                WindowsGuest {
+                    probe: 12,
+                    ..WindowsGuest::new()
+                },
+                "not a directory",
+            ),
+            (
+                WindowsGuest {
+                    probe: 13,
+                    ..WindowsGuest::new()
+                },
+                "parent directories",
+            ),
+            (
+                WindowsGuest {
+                    make_dir: 1,
+                    ..WindowsGuest::new()
+                },
+                "cannot create",
+            ),
+            (
+                WindowsGuest {
+                    unpack: 1,
+                    ..WindowsGuest::new()
+                },
+                "unreadable filename",
+            ),
+            (
+                WindowsGuest {
+                    swaps: RefCell::new(vec![11]),
+                    ..WindowsGuest::new()
+                },
+                "appeared",
+            ),
+            (
+                WindowsGuest {
+                    swaps: RefCell::new(vec![14]),
+                    ..WindowsGuest::new()
+                },
+                "old tree is unchanged",
+            ),
+            (
+                WindowsGuest {
+                    swaps: RefCell::new(vec![18]),
+                    ..WindowsGuest::new()
+                },
+                "the old tree is at",
+            ),
+        ];
+        for (guest, why) in cases {
+            let err = guest.push(true).unwrap_err().to_string();
+            assert!(err.contains(why), "{why}: {err}");
+            let calls = guest.calls();
+            if guest.probe != 0 {
+                // A refused probe sends nothing and leaves nothing to clean up.
+                assert_eq!(calls.len(), 1, "{calls:?}");
+                continue;
+            }
+            // Every later failure deletes the archive and the unpacked tree, never the old tree.
+            assert_eq!(
+                calls.last().unwrap(),
+                r"Cleanup C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d",
+                "{why}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_swap_refused_for_an_open_file_runs_once_more_then_fails() {
+        let guest = WindowsGuest {
+            swaps: RefCell::new(vec![SWAP_BUSY]),
+            ..WindowsGuest::new()
+        };
+        guest.push(true).unwrap();
+        let swaps = |g: &WindowsGuest| g.calls().iter().filter(|c| c.starts_with("Swap")).count();
+        assert_eq!(swaps(&guest), 2);
+
+        let guest = WindowsGuest {
+            swaps: RefCell::new(vec![SWAP_BUSY, SWAP_BUSY]),
+            ..WindowsGuest::new()
+        };
+        let err = guest.push(true).unwrap_err().to_string();
+        assert!(
+            err.contains("usually because a file in it is open")
+                && err.contains("old tree is unchanged")
+                && err.contains("cannot access the file"),
+            "{err}"
+        );
+        assert_eq!(swaps(&guest), 2);
+        assert_eq!(
+            guest.calls().last().unwrap(),
+            r"Cleanup C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d"
+        );
     }
 
     /// A guest that runs each step's script with the host's `sh` and `tar`, failing the step named in `fail`, with
@@ -1535,7 +1830,7 @@ mod tests {
                 fs::create_dir_all(dir)?;
             }
             let mut cmd = Command::new("/bin/sh");
-            cmd.arg("-c").arg(linux_script(step)).arg("sh").args(args);
+            cmd.arg("-c").arg(linux_script(step)?).arg("sh").args(args);
             if let Some(path) = &self.path_env {
                 cmd.env("PATH", path);
             }
