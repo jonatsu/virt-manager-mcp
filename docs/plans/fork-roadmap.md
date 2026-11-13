@@ -128,8 +128,8 @@ Reviews of earlier work found these. None blocks the server's use.
     ([probe note](../research/2026-11-13-windows-followups-probe.md),
     [plan](transfer-followups-implementation-plan.md)).
 21. **Done: a Windows push retries its cleanup after a timed-out unpack.** A timeout is now an error type of its own,
-    and after a timed-out unpack the cleanup tries again every second for up to 10 s, as the pull retries removing
-    its archive ([plan](transfer-followups-implementation-plan.md)).
+    and after a timed-out unpack or inherit step the cleanup tries again every second for up to 10 s, as the pull
+    retries removing its archive ([plan](transfer-followups-implementation-plan.md)).
 22. **`exec` with `program` fails on Windows when an argument is not ASCII.** The guest agent fails such a
     `guest-exec`, and libvirt reports only `failed to parse JSON: invalid utf-8 string`
     ([probe note](../research/2026-11-13-windows-followups-probe.md)). `exec` with `command` is unaffected. Refuse
@@ -223,6 +223,5 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 4, seeing what happened, comes next and needs its design first. Before it is built, follow-ups 17 and 19 to 21
-land as one short run: 17 gives agents wrong results without a word, and 19 is a privilege boundary inside the guest.
-Follow-ups 15 and 16 can land at any time; 16 waits on a newer `virtio-win`.
+Outcome 4, seeing what happened, comes next; its design is accepted, and its plan comes first. Follow-ups 15, 16 and
+22 to 25 can land at any time; 16 waits on a newer `virtio-win`, and 23 and 25 need a design decision.

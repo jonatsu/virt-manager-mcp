@@ -265,7 +265,8 @@ owner matters because the archive, written first, shows the staging directory's 
 directory first could change its list later. So no other guest user can add entries while `tar.exe` unpacks. After the
 unpack, in a step of its own with the unpack's long timeout, the directory gets back the access list its parent passes
 on, and Windows propagates it to every entry, so the pushed tree ends with the permissions that a directory created
-there would have. A failure in that step fails the push and deletes the staging tree.
+there would have. The step applies the same list each time, so a failed run is repeated once; a second failure fails
+the push and deletes the staging tree.
 
 A pull from a Windows guest packs into `%SystemRoot%\Temp` (`C:\Windows\Temp` on most guests), where only `SYSTEM`
 and `Administrators` can read the files that the agent creates. Any non-zero exit status of `tar.exe` fails the

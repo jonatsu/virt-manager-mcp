@@ -67,16 +67,18 @@ Each release's section lists what changed for people who run the server and for 
 - `copy_dir_from_vm` pulls a Windows directory whose path is not ASCII, such as `C:\Windows\Temp\vmm-été`. It failed
   with `failed to parse JSON: invalid utf-8 string`. A pull of a tree holding a name outside the guest's ANSI code page
   still fails, now with a message naming that cause.
-- A Windows push whose unpack ran out of time retries deleting its `.vmm-*` entries for up to 10 s, while `tar.exe`
-  may still hold files, before it names the entries it could not delete.
+- A Windows push whose unpack or permission step ran out of time retries deleting its `.vmm-*` entries for up to
+  10 s, while the stopped process may still hold files, before it names the entries it could not delete.
 
 ### Security
 
 - A guest user who can add entries to a Windows push's target parent, as any user can in `C:\Users\Public` and
-  `C:\Windows\Temp`, can no longer make the push write outside its target. `tar.exe` unpacks through a junction, so
-  such a user could plant one in the push's staging directory. The staging directory now grants access only to
+  `C:\Windows\Temp`, can no longer plant a junction in the push's staging directory, through which `tar.exe` would
+  have written outside the target. The staging directory now grants access only to
   `SYSTEM` and `Administrators` while `tar.exe` unpacks, and the pushed tree then gets the access list its parent
   passes on. A user who may delete or rename entries in the parent, such as its owner, can still redirect the push.
+  The archive written beside the target before the unpack still inherits the parent's access list, so under
+  `C:\Users\Public` such a user can rewrite it; whether that reaches outside the target is untested.
 
 ## 0.2.0
 
