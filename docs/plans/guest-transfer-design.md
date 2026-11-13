@@ -365,7 +365,9 @@ that meets a symlinked directory.
 8. A guest user who may delete or rename entries in a Windows push's target parent can replace the staging directory
    with a junction between its creation and the unpack, and so make the push write elsewhere as `SYSTEM`. That user
    might own the parent, as in `C:\Users\alice\app`. The parent might also be a directory that a push's probe created
-   below `C:\Users\Public`, which passes delete rights on to interactive users. Roadmap follow-up 23 records it.
+   below `C:\Users\Public`, which passes delete rights on to interactive users. Roadmap follow-up 23 records it. The
+   archive, written beside the target before the staging directory exists, inherits the parent's list too, so under
+   `C:\Users\Public` an interactive user could rewrite it before the unpack; follow-up 25 records that.
 9. The Windows guest agent from `virtio-win` 0.1.302 fails any `guest-exec` whose arguments are not ASCII, and libvirt
    reports only `failed to parse JSON: invalid utf-8 string`. The pull works around it; `exec` with `program` meets it
    too, which roadmap follow-up 22 records.

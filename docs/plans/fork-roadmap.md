@@ -140,6 +140,16 @@ Reviews of earlier work found these. None blocks the server's use.
     push write elsewhere as `SYSTEM`. Closing it means unpacking in a directory where no other user may delete or
     rename entries, such as `%SystemRoot%\Temp`, and moving the tree into place, which fails across drives. Decide
     whether to do that, to refuse such parents, or to accept the risk for guests whose users are trusted.
+24. **Most Windows transfer scripts write their error text in the console code page.** The server reads stderr as
+    UTF-8, so a non-ASCII path in a message from `push-*.ps1`, `pull-prepare.ps1`, `pull-size.ps1` or
+    `pull-remove.ps1` shows replacement characters. `pull-pack.ps1` writes through a UTF-8 writer; give the others
+    the same, and check one message on `t-win11`.
+25. **A Windows push's archive inherits its parent's access list.** The guest agent writes `.vmm-<id>.tar` beside the
+    target before the staging directory exists. Under `C:\Users\Public`, files that `SYSTEM` creates inherit
+    `INTERACTIVE:(M,DC)`, so an interactive user could rewrite the archive before `tar.exe` unpacks it as `SYSTEM`.
+    `tar.exe` refuses absolute paths and `..` by default, but whether a crafted hard-link or symbolic-link entry
+    reaches outside the staging directory is untested. Check the archive's `icacls` list on `t-win11`, then probe
+    such entries, or write the archive into a directory only `SYSTEM` and `Administrators` can write.
 
 ## Outcomes
 
