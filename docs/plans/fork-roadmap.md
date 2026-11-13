@@ -104,9 +104,10 @@ Reviews of earlier work found these. None blocks the server's use.
     restarts left libvirt reporting the channel disconnected until a power cycle
     ([probe note](../research/2026-11-11-windows-jobs-probe.md)). Retry with a newer `virtio-win`, and report it
     upstream if it persists. `win-jobs-restart.json` reproduces it.
-17. **`exec` ignores `args` given with `command`.** It runs the command line without the arguments and reports no
-    error, so `sha256sum` with `args` hashed empty input
-    ([probe note](../research/2026-11-11-transfer-probe.md)). Refuse the combination, with a test.
+17. **Done: `exec` refuses `args` given with `command`.** It ran the command line without the arguments and reported
+    no error, so `sha256sum` with `args` hashed empty input
+    ([probe note](../research/2026-11-11-transfer-probe.md)). It now refuses the combination before any guest call
+    ([plan](transfer-followups-implementation-plan.md)).
 18. **Done: `VIRTMANAGER_OCR_DOWNLOAD=1` downloads the OCR models.** While `display.ocr_models` is unset, the server
     downloads the models after startup, with `curl`, into `$XDG_DATA_HOME/virtmanager-mcp/ocr-models`. It runs in
     the background so that the client's handshake never waits for it, and a failure never stops the server.
