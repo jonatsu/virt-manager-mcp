@@ -114,7 +114,7 @@ pub struct ExecParams {
     pub shell: Shell,
     /// Program to run directly, without a shell (argv style). Use either `command` or `program`.
     pub program: Option<String>,
-    /// Arguments for `program`.
+    /// Arguments for `program` only; `exec` refuses them with `command`.
     #[serde(default)]
     pub args: Vec<String>,
     /// Data written to the process's stdin.
@@ -126,6 +126,21 @@ pub struct ExecParams {
     pub timeout_secs: Option<u64>,
     /// Max bytes returned for stdout and for stderr each (default from config).
     pub max_output_bytes: Option<usize>,
+}
+
+/// The program and arguments `exec` runs. `os` asks the guest for its OS, and is called only for `command`, after
+/// every refusal, so a refused call reaches no guest.
+fn exec_spec(p: &ExecParams, os: impl FnOnce() -> Result<agent::GuestOs>) -> Result<ExecSpec> {
+    match (&p.command, &p.program) {
+        (Some(_), None) if !p.args.is_empty() => {
+            bail!(
+                "`args` goes with `program`; with `command`, put the arguments in the command line"
+            )
+        }
+        (Some(cmd), None) => shell_spec(os()?, p.shell, cmd),
+        (None, Some(prog)) => Ok(ExecSpec::new(prog, p.args.clone())),
+        _ => bail!("provide exactly one of `command` or `program`"),
+    }
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, Default, PartialEq)]
@@ -732,11 +747,7 @@ impl VirtServer {
             let dom = s.hv.domain(&p.vm)?;
             let agent = s.agent(&dom);
             let limits = &s.hv.config.limits;
-            let mut spec = match (&p.command, &p.program) {
-                (Some(cmd), None) => shell_spec(agent.os()?, p.shell, cmd)?,
-                (None, Some(prog)) => ExecSpec::new(prog, p.args.clone()),
-                _ => bail!("provide exactly one of `command` or `program`"),
-            };
+            let mut spec = exec_spec(&p, || agent.os())?;
             spec.env = p.env;
             spec.stdin = p.stdin.map(String::into_bytes);
             let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(limits.exec_timeout_secs));
@@ -2236,6 +2247,54 @@ fn json_block<T: serde::Serialize>(v: &T) -> Result<ContentBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exec_params(json: Value) -> ExecParams {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn no_guest() -> Result<agent::GuestOs> {
+        panic!("a refused call must not ask the guest")
+    }
+
+    #[test]
+    fn exec_refuses_args_with_command() {
+        let p = exec_params(json!({"vm": "v", "command": "ls", "args": ["-l"]}));
+        let err = exec_spec(&p, no_guest).unwrap_err().to_string();
+        assert!(err.contains("`args` goes with `program`"), "{err}");
+    }
+
+    #[test]
+    fn exec_refuses_neither_or_both_without_asking_the_guest() {
+        for p in [
+            json!({"vm": "v"}),
+            json!({"vm": "v", "command": "ls", "program": "ls"}),
+        ] {
+            let err = exec_spec(&exec_params(p), no_guest)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("exactly one"), "{err}");
+        }
+    }
+
+    #[test]
+    fn exec_builds_command_and_program_specs_as_before() {
+        let p = exec_params(json!({"vm": "v", "command": "ls -l"}));
+        let spec = exec_spec(&p, || Ok(agent::GuestOs::Linux)).unwrap();
+        assert_eq!(
+            (spec.path.as_str(), spec.args),
+            ("/bin/sh", vec!["-c".into(), "ls -l".into()])
+        );
+
+        let p = exec_params(json!({"vm": "v", "command": "ls", "args": []}));
+        assert!(exec_spec(&p, || Ok(agent::GuestOs::Linux)).is_ok());
+
+        let p = exec_params(json!({"vm": "v", "program": "ls", "args": ["-l", "/"]}));
+        let spec = exec_spec(&p, no_guest).unwrap();
+        assert_eq!(
+            (spec.path.as_str(), spec.args),
+            ("ls", vec!["-l".into(), "/".into()])
+        );
+    }
 
     #[test]
     fn every_tool_states_its_hints() {

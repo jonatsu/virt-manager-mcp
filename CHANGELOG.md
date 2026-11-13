@@ -62,6 +62,8 @@ Each release's section lists what changed for people who run the server and for 
 
 - `exec` with PowerShell on Windows no longer fills stderr with CLIXML progress records such as "Preparing modules
   for first use".
+- `exec` refuses `args` together with `command`, and runs nothing. It used to run the command line and drop the
+  arguments silently. `args` goes with `program`.
 
 ## 0.2.0
 
