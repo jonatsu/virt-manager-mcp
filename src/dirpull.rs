@@ -1667,6 +1667,16 @@ mod tests {
         limits: &Limits,
         remove_for: Duration,
     ) -> Result<Unpacked> {
+        windows_pull_from(name, guest, limits, remove_for, r"C:\work\out")
+    }
+
+    fn windows_pull_from(
+        name: &str,
+        guest: &WindowsGuest,
+        limits: &Limits,
+        remove_for: Duration,
+        guest_path: &str,
+    ) -> Result<Unpacked> {
         let dir = Temp::pull_dir(name);
         let dest = Destination::open(
             std::slice::from_ref(&dir.0),
@@ -1674,7 +1684,7 @@ mod tests {
         )?;
         let exclude = excludes(&[])?;
         let req = Request {
-            guest_path: r"C:\work\out",
+            guest_path,
             dest: &dest,
             overwrite: false,
             limits,
@@ -1707,6 +1717,36 @@ mod tests {
             format!(r"start {WIN_TAR} -c | -f | {archive} | -C | C:\work\out | .")
         );
         assert_eq!(calls[2..], [format!("Remove {archive}")]);
+    }
+
+    #[test]
+    fn a_non_ascii_windows_pull_packs_from_powershell_and_stops_it_at_the_cap() {
+        let guest = WindowsGuest::new();
+        windows_pull_from("win-ete", &guest, &LIMITS, Duration::ZERO, r"C:\work\été").unwrap();
+        assert!(
+            guest.calls()[1].starts_with("start powershell.exe "),
+            "{:?}",
+            guest.calls()
+        );
+
+        let guest = WindowsGuest {
+            polls: std::cell::Cell::new(5),
+            sizes: RefCell::new(vec![None, Some(LIMITS.max_bytes + 1)]),
+            ..WindowsGuest::new()
+        };
+        let err = windows_pull_from(
+            "win-ete-cap",
+            &guest,
+            &LIMITS,
+            Duration::ZERO,
+            r"C:\work\été",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("passed the pull limit"), "{err}");
+        let calls = guest.calls();
+        assert!(calls[1].starts_with("start powershell.exe "), "{calls:?}");
+        assert_eq!(calls[2], "kill 7", "{calls:?}");
+        assert!(calls[3].starts_with("Remove "), "{calls:?}");
     }
 
     #[test]
