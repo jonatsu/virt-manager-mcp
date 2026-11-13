@@ -229,7 +229,9 @@ adds the directory tools, through `%SystemRoot%\System32\tar.exe`, which Windows
 is bsdtar 3.8.8, which accepts `-o` and writes forward slashes
 ([probe note](../research/2026-11-12-windows-tar-probe.md)). The server runs `tar.exe` directly through the guest agent,
 with each path a separate argument, and runs PowerShell only for the steps around it, with every path quoted as a
-literal.
+literal. The one exception is a pull from a path that is not ASCII. The guest agent fails a `guest-exec` whose
+arguments are not ASCII, so that pull runs `tar.exe` from PowerShell, in the directory being pulled, and relays its
+stderr as plain text.
 
 A Windows guest path is a drive path such as `C:\work\app`, with `\` or `/` between components. The server refuses a
 relative path, a drive-relative path such as `C:work`, a UNC or device path such as `\\server\share` or `\\?\C:\`,
@@ -268,7 +270,9 @@ there would have. A failure in that step fails the push and deletes the staging 
 A pull from a Windows guest packs into `%SystemRoot%\Temp` (`C:\Windows\Temp` on most guests), where only `SYSTEM`
 and `Administrators` can read the files that the agent creates. Any non-zero exit status of `tar.exe` fails the
 pull: Windows has no counterpart of GNU tar's changed-file warning, and its status 1 also covers a file that another
-program holds open.
+program holds open. A pull also fails when a name in the tree does not fit the guest's ANSI code page: `tar.exe`
+exits 255 without a message, and the pull's error names that cause. A directory whose own name does not fit packs
+when every name inside it does.
 
 ## Invariants
 
@@ -362,6 +366,9 @@ that meets a symlinked directory.
    with a junction between its creation and the unpack, and so make the push write elsewhere as `SYSTEM`. That user
    might own the parent, as in `C:\Users\alice\app`. The parent might also be a directory that a push's probe created
    below `C:\Users\Public`, which passes delete rights on to interactive users. Roadmap follow-up 23 records it.
+9. The Windows guest agent from `virtio-win` 0.1.302 fails any `guest-exec` whose arguments are not ASCII, and libvirt
+   reports only `failed to parse JSON: invalid utf-8 string`. The pull works around it; `exec` with `program` meets it
+   too, which roadmap follow-up 22 records.
 
 ## Open questions
 

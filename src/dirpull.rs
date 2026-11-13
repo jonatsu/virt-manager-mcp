@@ -43,6 +43,10 @@ const SKIPPED_SHOWN: usize = 100;
 pub const POLL: Duration = Duration::from_millis(500);
 /// How long the guest's `tar` may run.
 const PACK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// `pull-pack.ps1` exits with this when it cannot enter the directory to pack.
+const PACK_NO_DIR: i64 = 30;
+/// `pull-pack.ps1` exits with this when `tar.exe` did not run.
+const PACK_NO_TAR: i64 = 31;
 /// How long a short guest step may take.
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How much of a guest step's output an error quotes.
@@ -435,11 +439,14 @@ impl Steps {
             }
             GuestOs::Windows => Ok(match step {
                 Step::Prepare => winsteps::script(winsteps::PULL_PREPARE, args),
-                // `tar.exe` runs directly, without a shell, with the path that preparing printed.
+                // `tar.exe` runs directly, without a shell, with the path that preparing printed. The guest agent fails
+                // a `guest-exec` whose arguments are not ASCII, so such a path goes to PowerShell instead, which
+                // receives it inside `-EncodedCommand` and starts `tar.exe` in that directory.
                 Step::Pack => match args {
-                    [dir, archive, tar] => {
+                    [dir, archive, tar] if args.iter().all(|a| a.is_ascii()) => {
                         ExecSpec::new(tar, ["-c", "-f", archive, "-C", dir, "."])
                     }
+                    [_, _, _] => winsteps::script(winsteps::PULL_PACK, args),
                     _ => bail!("packing needs the directory, the archive and tar.exe's path"),
                 },
                 Step::Remove => winsteps::script(winsteps::PULL_REMOVE, args),
@@ -685,6 +692,20 @@ fn pack_and_unpack(
         Some(1) if req.os == GuestOs::Linux && packed.stderr.contains(CHANGED) => {
             Some(packed.stderr.clone())
         }
+        // `pull-pack.ps1`'s own statuses, outside `tar.exe`'s 0, 1 and 255.
+        Some(PACK_NO_DIR) if req.os == GuestOs::Windows => bail!(
+            "cannot enter {} in the guest to pack it: {}",
+            req.guest_path,
+            packed.describe()
+        ),
+        Some(PACK_NO_TAR) if req.os == GuestOs::Windows => {
+            bail!("tar.exe did not run in the guest: {}", packed.describe())
+        }
+        Some(255) if req.os == GuestOs::Windows && packed.stderr.is_empty() => bail!(
+            "tar.exe could not pack {} and printed no reason (exit status 255); a name in the tree that the guest's \
+             ANSI code page cannot hold, such as a Japanese name on a Western guest, causes this",
+            req.guest_path
+        ),
         _ => bail!("tar failed in the guest: {}", packed.describe()),
     };
     // A fast `tar` can finish between two polls, so the finished archive is measured too, before any of it is sent.
@@ -1764,6 +1785,35 @@ mod tests {
             .unwrap();
         assert_eq!(spec.path, WIN_TAR);
         assert_eq!(spec.args, ["-c", "-f", "a.tar", "-C", r"C:\x", "."]);
+        // A path the guest agent cannot pass to `tar.exe` goes to PowerShell, with all three arguments.
+        let args = [r"C:\Windows\Temp\vmm-été", "a.tar", WIN_TAR];
+        let spec = steps.spec(Step::Pack, &args).unwrap();
+        assert_eq!(spec.path, "powershell.exe");
+        assert_eq!(spec.args, winsteps::script(winsteps::PULL_PACK, &args).args);
+    }
+
+    #[test]
+    fn each_windows_pack_failure_has_its_message() {
+        for (pack, why) in [
+            ((30, "Cannot find path"), "cannot enter C:\\work\\out"),
+            ((31, "tar.exe does not exist"), "tar.exe did not run"),
+            ((255, ""), "ANSI code page"),
+            (
+                (255, "tar.exe: Write error"),
+                "tar failed in the guest: tar.exe: Write error",
+            ),
+        ] {
+            let guest = WindowsGuest {
+                pack,
+                ..WindowsGuest::new()
+            };
+            let err = windows_pull("win-pack-fail", &guest, &LIMITS, Duration::ZERO)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(why), "{why}: {err}");
+            assert!(pack.1.is_empty() || err.contains(pack.1), "{err}");
+            assert!(guest.calls().last().unwrap().starts_with("Remove "));
+        }
     }
 
     #[test]

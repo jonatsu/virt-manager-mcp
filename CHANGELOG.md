@@ -64,6 +64,9 @@ Each release's section lists what changed for people who run the server and for 
   for first use".
 - `exec` refuses `args` together with `command`, and runs nothing. It used to run the command line and drop the
   arguments silently. `args` goes with `program`.
+- `copy_dir_from_vm` pulls a Windows directory whose path is not ASCII, such as `C:\Windows\Temp\vmm-été`. It failed
+  with `failed to parse JSON: invalid utf-8 string`. A pull of a tree holding a name outside the guest's ANSI code page
+  still fails, now with a message naming that cause.
 
 ### Security
 

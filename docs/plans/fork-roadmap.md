@@ -120,9 +120,12 @@ Reviews of earlier work found these. None blocks the server's use.
     its inherited list back after the unpack
     ([probe note](../research/2026-11-13-windows-followups-probe.md),
     [plan](transfer-followups-implementation-plan.md)). Follow-up 23 holds what stays open.
-20. **A Windows `guest_path` outside the guest's code page is untested.** `tar.exe` may receive it as `?` and fail.
-    Push and pull once with a path such as `C:\Windows\Temp\vmm-日本` on `t-win11`, and refuse such paths with a
-    clear message if they fail.
+20. **Done: Windows directory transfers work with paths that are not ASCII.** Pushes to `C:\Windows\Temp\vmm-日本`
+    and `vmm-été` already worked. Pulls from them failed, because the guest agent fails a `guest-exec` whose arguments
+    are not ASCII, so such a pull now runs `tar.exe` from PowerShell. A pull of a tree holding a name outside the
+    guest's ANSI code page fails with a message naming that cause
+    ([probe note](../research/2026-11-13-windows-followups-probe.md),
+    [plan](transfer-followups-implementation-plan.md)).
 21. **A Windows push cleans up at once after a timed-out unpack.** The cleanup runs straight after `taskkill`,
     without the pull's 10 s retry, so `tar.exe` may still hold files and leave `.vmm-*` entries, which the error
     names. Retry the cleanup as the pull retries its removal.

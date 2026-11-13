@@ -9,6 +9,8 @@ pub const PULL_PREPARE: &str = include_str!("winsteps/pull-prepare.ps1");
 pub const PULL_SIZE: &str = include_str!("winsteps/pull-size.ps1");
 /// Deletes a pull's archive.
 pub const PULL_REMOVE: &str = include_str!("winsteps/pull-remove.ps1");
+/// Packs a pull whose path is not ASCII, which `guest-exec` cannot pass to `tar.exe`.
+pub const PULL_PACK: &str = include_str!("winsteps/pull-pack.ps1");
 /// Checks a directory push's target, creates its parents, and prints the path of `tar.exe`.
 pub const PUSH_PROBE: &str = include_str!("winsteps/push-probe.ps1");
 /// Creates the directory a push unpacks into.
@@ -134,7 +136,7 @@ exit $errors.Count"#;
         assert!(!found.is_empty(), "the parser accepted an unclosed brace");
         let scripts = scripts();
         assert!(
-            scripts.len() >= 9,
+            scripts.len() >= 10,
             "only {} scripts found: {scripts:?}",
             scripts.len()
         );

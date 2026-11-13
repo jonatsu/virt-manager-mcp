@@ -125,3 +125,29 @@ Running `push-inherit.ps1` a second time on that tree changed none of the four l
 `C:\Users\Public\vmm-deep` gave its file, whose full path is 292 characters long, the inherited `INTERACTIVE`,
 `SERVICE` and `BATCH` rules as well. On a pushed tree of 5,000 small files in 50 directories, protecting the root again
 with `SetAccessControl` took 0.26 s, and `push-inherit.ps1` then took 0.27 s.
+
+## Packing from PowerShell
+
+A third run on `t-win11` tried `pull-pack.ps1` from the fix for follow-up 20 through `exec`, before the server used
+it. The script enters the directory with `Set-Location -LiteralPath`, runs `tar.exe -c -f <archive> .` with
+`$ErrorActionPreference = 'Continue'`, and writes each stderr line of `tar.exe` to `[Console]::Error`. In that
+PowerShell, `[Console]::OutputEncoding` was code page 65001 and `[Console]::InputEncoding` code page 437; the system's
+ANSI code page was 1252.
+
+| Directory | Contents | Exit | Stderr |
+| -- | -- | -- | -- |
+| `C:\Windows\Temp\vmm-été` | `été.txt`, `a.txt` | 0 | none |
+| `C:\Windows\Temp\vmm-jp` | `日本.txt`, `a.txt` | 255 | none |
+| `C:\Windows\Temp\vmm-日本` | `a.txt` | 0 | none |
+| `C:\Windows\Temp\vmm-loop` | `sub\x.txt`, and the junction `back` to the directory itself | 1 | `tar.exe: ./back/back/…/back: Cannot stat: Invalid argument` and `tar.exe: Error exit delayed from previous errors`, as plain text |
+| `C:\Windows\Temp\vmm-missing` | does not exist | 30 | `Cannot find path 'C:\Windows\Temp\vmm-missing' because it does not exist.` |
+
+So a directory whose own name lies outside the code page packs when every name inside it fits, and `tar.exe` gives no
+message for a name that does not fit, even with its stderr relayed. With `C:\Windows\System32\no-tar.exe` as the
+program, the script exited 31, as planned, but the error reached stderr as CLIXML, because PowerShell's own error for a
+missing command does not pass through the relay. The script now checks that the program exists first.
+
+With the server then using the script, `copy_dir_from_vm` pulled `vmm-été` and `vmm-日本`, and the pulled files'
+SHA-256 sums matched those that `Get-FileHash` printed in the guest. The pull of `vmm-jp` failed with the code-page
+message, the pull of `vmm-loop` still failed with `Cannot stat`, and no `.vmm-*` entry was left in
+`C:\Windows\Temp`.
