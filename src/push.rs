@@ -1003,7 +1003,8 @@ pub fn push(
     push_retrying(guest, target, replace, bytes, archive, CLEANUP_RETRY)
 }
 
-/// How long a Windows push retries its cleanup after a timed-out unpack, while `tar.exe` may still hold files.
+/// How long a Windows push retries its cleanup after a timed-out unpack or inherit step, while the stopped process may
+/// still hold files.
 const CLEANUP_RETRY: Duration = Duration::from_secs(10);
 
 /// `push`, retrying the cleanup after a timed-out Windows unpack for up to `cleanup_retry`.
@@ -1056,12 +1057,12 @@ fn push_retrying(
     let timed_out = match &result {
         Err(e) if target.os == GuestOs::Windows => e
             .downcast_ref::<StepTimedOut>()
-            .filter(|t| t.step == Step::Unpack),
+            .filter(|t| matches!(t.step, Step::Unpack | Step::Inherit)),
         _ => None,
     };
     let retry_for = timed_out.map_or(Duration::ZERO, |_| cleanup_retry);
     let failure = clean_up(guest, &leftovers, retry_for).map(|failure| match timed_out {
-        Some(t) if !t.stopped => format!("{failure}; tar.exe may still be running"),
+        Some(t) if !t.stopped => format!("{failure}; the {:?} step may still be running", t.step),
         _ => failure,
     });
     let left = |failure| {
@@ -1155,11 +1156,17 @@ fn send_and_swap(
         );
     }
     if target.os == GuestOs::Windows {
-        let inherited = guest.run(Step::Inherit, &[unpacked])?;
+        let mut inherited = guest.run(Step::Inherit, &[unpacked])?;
+        if inherited.code != Some(0) {
+            // One run in the test bed ended with exit status 1 and no output, for no reason found; a second run
+            // repeats an idempotent change.
+            std::thread::sleep(SWAP_RETRY);
+            inherited = guest.run(Step::Inherit, &[unpacked])?;
+        }
         if inherited.code != Some(0) {
             bail!(
-                "restoring the inherited access list of the unpacked tree in the guest failed, so the tree is \
-                 deleted and nothing was replaced: {}",
+                "restoring the inherited access list of the unpacked tree in the guest failed twice, so nothing was \
+                 replaced: {}",
                 inherited.describe()
             );
         }
@@ -1697,6 +1704,10 @@ mod tests {
         unpack_times_out: Option<bool>,
         /// Fails the cleanup this many times first, while `cleanup` is 0.
         failed_cleanups: Cell<u32>,
+        /// Fails the inherit step this many times first, while `inherit` is 0.
+        failed_inherits: Cell<u32>,
+        /// Makes the inherit step time out; the value says whether the agent stopped it.
+        inherit_times_out: Option<bool>,
     }
 
     impl WindowsGuest {
@@ -1711,6 +1722,8 @@ mod tests {
                 cleanup: 0,
                 unpack_times_out: None,
                 failed_cleanups: Cell::new(0),
+                failed_inherits: Cell::new(0),
+                inherit_times_out: None,
             }
         }
 
@@ -1756,6 +1769,22 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("{step:?} {}", args.join(" | ")));
+            if let (Step::Inherit, Some(stopped)) = (step, self.inherit_times_out) {
+                return Err(StepTimedOut {
+                    step,
+                    after: LONG_TIMEOUT,
+                    stopped,
+                }
+                .into());
+            }
+            if step == Step::Inherit && self.inherit == 0 && self.failed_inherits.get() > 0 {
+                self.failed_inherits.set(self.failed_inherits.get() - 1);
+                return Ok(Ran {
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
             if let (Step::Unpack, Some(stopped)) = (step, self.unpack_times_out) {
                 return Err(StepTimedOut {
                     step,
@@ -1994,8 +2023,53 @@ mod tests {
         assert!(
             err.contains("the push failed, and deleting")
                 && err.contains("in use")
-                && err.contains("tar.exe may still be running")
+                && err.contains("the Unpack step may still be running")
                 && err.contains("stopping it failed"),
+            "{err}"
+        );
+        assert!(cleanups(&guest) > 1);
+    }
+
+    #[test]
+    fn a_failed_inherit_step_runs_once_more() {
+        let guest = WindowsGuest {
+            failed_inherits: Cell::new(1),
+            ..WindowsGuest::new()
+        };
+        guest.push(true).unwrap();
+        let inherits = guest
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("Inherit"))
+            .count();
+        assert_eq!(inherits, 2);
+
+        let guest = WindowsGuest {
+            failed_inherits: Cell::new(2),
+            ..WindowsGuest::new()
+        };
+        let err = guest.push(true).unwrap_err().to_string();
+        assert!(
+            err.contains("failed twice") && err.contains("exit status 1"),
+            "{err}"
+        );
+        assert!(
+            !guest.calls().iter().any(|c| c.starts_with("Swap")),
+            "{:?}",
+            guest.calls()
+        );
+    }
+
+    #[test]
+    fn after_a_timed_out_inherit_step_the_cleanup_is_retried() {
+        let guest = WindowsGuest {
+            inherit_times_out: Some(false),
+            failed_cleanups: Cell::new(u32::MAX),
+            ..WindowsGuest::new()
+        };
+        let err = format!("{:#}", guest.push(true).unwrap_err());
+        assert!(
+            err.contains("the Inherit step may still be running"),
             "{err}"
         );
         assert!(cleanups(&guest) > 1);

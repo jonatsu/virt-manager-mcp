@@ -4,7 +4,7 @@
 # names, because group names are localized. CreateDirectory accepts a path that already exists, so the script reads
 # the directory back: a directory that another user created first, after seeing the archive's name, has that user as
 # its owner, who could change its access list later.
-# Exit status: 0 created and checked, 1 failed, 2 the directory is not one this script made.
+# Exit status: 0 created and checked, 1 failed to create or read back, 2 the directory is not one this script made.
 
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
@@ -37,7 +37,8 @@ try {
   $item = Get-Item -LiteralPath $path -Force
   $read = [IO.Directory]::GetAccessControl($path, 'Access, Owner')
 } catch {
-  Refuse "cannot read it back: $($_.Exception.Message)"
+  [Console]::Error.Write("${path}: cannot read it back: $($_.Exception.Message)")
+  exit 1
 }
 if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Refuse 'it is a junction or link' }
 if ($trusted -notcontains $read.GetOwner($sid).Value) { Refuse "its owner is $($read.GetOwner($sid).Value)" }

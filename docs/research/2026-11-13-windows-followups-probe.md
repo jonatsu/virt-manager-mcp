@@ -151,3 +151,18 @@ With the server then using the script, `copy_dir_from_vm` pulled `vmm-été` and
 SHA-256 sums matched those that `Get-FileHash` printed in the guest. The pull of `vmm-jp` failed with the code-page
 message, the pull of `vmm-loop` still failed with `Cannot stat`, and no `.vmm-*` entry was left in
 `C:\Windows\Temp`.
+
+## The first full test-bed run
+
+The first full run of `tests/testbed/run-all.sh` with the run's changes failed one push. In `win-transfer.json`, a
+`copy_dir_to_vm` with `replace` of `share/win-deep` to `C:\Windows\Temp\vmm-deep` failed in its `Inherit` step: the
+step exited 1 with nothing on stdout or stderr. The plain push just before it had succeeded. `push-inherit.ps1`
+writes the exception's message to stderr on every failure it catches, so the script most likely never reached its
+`catch`. Exit 1 with no output is also what `taskkill /F` gives a process it ends. Six pushes of the same tree in a
+row on `t-win11` afterwards, one plain and five with `replace`, all succeeded. The guest's Defender log listed no
+detection, and the Windows PowerShell log no error, so the cause is unknown. The push now runs a failed `Inherit` step
+once more, which is safe because the step applies the same list each time.
+
+The Application log of `t-win11` held an Application Error 1000 for `tar.exe` 3.8.8.0 at each time a pull of a tree
+holding `日本.txt` ran. So the exit status 255 with no message for a name outside the code page is a crash of
+`tar.exe`, not an error it reports.
