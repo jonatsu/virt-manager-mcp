@@ -126,9 +126,9 @@ Reviews of earlier work found these. None blocks the server's use.
     guest's ANSI code page fails with a message naming that cause
     ([probe note](../research/2026-11-13-windows-followups-probe.md),
     [plan](transfer-followups-implementation-plan.md)).
-21. **A Windows push cleans up at once after a timed-out unpack.** The cleanup runs straight after `taskkill`,
-    without the pull's 10 s retry, so `tar.exe` may still hold files and leave `.vmm-*` entries, which the error
-    names. Retry the cleanup as the pull retries its removal.
+21. **Done: a Windows push retries its cleanup after a timed-out unpack.** A timeout is now an error type of its own,
+    and after a timed-out unpack the cleanup tries again every second for up to 10 s, as the pull retries removing
+    its archive ([plan](transfer-followups-implementation-plan.md)).
 22. **`exec` with `program` fails on Windows when an argument is not ASCII.** The guest agent fails such a
     `guest-exec`, and libvirt reports only `failed to parse JSON: invalid utf-8 string`
     ([probe note](../research/2026-11-13-windows-followups-probe.md)). `exec` with `command` is unaffected. Refuse

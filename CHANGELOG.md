@@ -67,6 +67,8 @@ Each release's section lists what changed for people who run the server and for 
 - `copy_dir_from_vm` pulls a Windows directory whose path is not ASCII, such as `C:\Windows\Temp\vmm-été`. It failed
   with `failed to parse JSON: invalid utf-8 string`. A pull of a tree holding a name outside the guest's ANSI code page
   still fails, now with a message naming that cause.
+- A Windows push whose unpack ran out of time retries deleting its `.vmm-*` entries for up to 10 s, while `tar.exe`
+  may still hold files, before it names the entries it could not delete.
 
 ### Security
 

@@ -15,7 +15,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -881,6 +881,33 @@ fn linux_script(step: Step) -> Result<&'static str> {
     })
 }
 
+/// A guest step that ran out of time. The push tells it from other failures, because after a timed-out unpack
+/// `tar.exe` may still hold files for a moment.
+#[derive(Debug)]
+pub struct StepTimedOut {
+    pub step: Step,
+    pub after: Duration,
+    /// Whether the guest agent accepted the request to stop the step's process.
+    pub stopped: bool,
+}
+
+impl std::fmt::Display for StepTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the guest's {:?} step did not finish within {} s",
+            self.step,
+            self.after.as_secs()
+        )?;
+        if !self.stopped {
+            write!(f, ", and stopping it failed")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for StepTimedOut {}
+
 /// A guest reached through its agent, with its OS's steps.
 pub struct OnGuest<'a> {
     pub agent: &'a Agent<'a>,
@@ -898,10 +925,12 @@ impl Guest for OnGuest<'_> {
             .agent
             .exec(&self.steps.spec(step, args)?, timeout, STDERR_MAX)?;
         if out.timed_out {
-            bail!(
-                "the guest's {step:?} step did not finish within {} s",
-                timeout.as_secs()
-            );
+            return Err(StepTimedOut {
+                step,
+                after: timeout,
+                stopped: out.kill_attempted,
+            }
+            .into());
         }
         Ok(Ran {
             code: out.exit_code,
@@ -971,6 +1000,21 @@ pub fn push(
     bytes: &AtomicU64,
     archive: impl FnOnce(&mut dyn Write) -> Result<Summary> + Send,
 ) -> Result<Summary> {
+    push_retrying(guest, target, replace, bytes, archive, CLEANUP_RETRY)
+}
+
+/// How long a Windows push retries its cleanup after a timed-out unpack, while `tar.exe` may still hold files.
+const CLEANUP_RETRY: Duration = Duration::from_secs(10);
+
+/// `push`, retrying the cleanup after a timed-out Windows unpack for up to `cleanup_retry`.
+fn push_retrying(
+    guest: &dyn Guest,
+    target: &Target,
+    replace: bool,
+    bytes: &AtomicU64,
+    archive: impl FnOnce(&mut dyn Write) -> Result<Summary> + Send,
+    cleanup_retry: Duration,
+) -> Result<Summary> {
     let flag = if replace { "1" } else { "0" };
     let probe = guest.run(Step::Probe, &[&target.path, &target.parent, flag])?;
     match probe.code {
@@ -1009,11 +1053,17 @@ pub fn push(
     if result.is_ok() {
         leftovers.push(&old);
     }
-    let failure = match guest.run(Step::Cleanup, &leftovers) {
-        Ok(ran) if ran.code == Some(0) => None,
-        Ok(ran) => Some(ran.describe()),
-        Err(e) => Some(format!("{e:#}")),
+    let timed_out = match &result {
+        Err(e) if target.os == GuestOs::Windows => e
+            .downcast_ref::<StepTimedOut>()
+            .filter(|t| t.step == Step::Unpack),
+        _ => None,
     };
+    let retry_for = timed_out.map_or(Duration::ZERO, |_| cleanup_retry);
+    let failure = clean_up(guest, &leftovers, retry_for).map(|failure| match timed_out {
+        Some(t) if !t.stopped => format!("{failure}; tar.exe may still be running"),
+        _ => failure,
+    });
     let left = |failure| {
         format!(
             "deleting {} in the guest failed: {failure}",
@@ -1030,6 +1080,24 @@ pub fn push(
         (Err(e), Some(failure)) => {
             Err(e.context(format!("the push failed, and {}", left(failure))))
         }
+    }
+}
+
+/// Deletes the push's temporary entries, trying again for up to `retry_for` while that fails, every second, or a tenth
+/// of `retry_for` when that is shorter. Returns the last attempt's failure. It mirrors `dirpull::remove`, whose guest
+/// and steps differ.
+fn clean_up(guest: &dyn Guest, leftovers: &[&str], retry_for: Duration) -> Option<String> {
+    let started = Instant::now();
+    loop {
+        let failure = match guest.run(Step::Cleanup, leftovers) {
+            Ok(ran) if ran.code == Some(0) => return None,
+            Ok(ran) => ran.describe(),
+            Err(e) => format!("{e:#}"),
+        };
+        if started.elapsed() >= retry_for {
+            return Some(failure);
+        }
+        std::thread::sleep(Duration::from_secs(1).min(retry_for / 10));
     }
 }
 
@@ -1139,7 +1207,7 @@ fn send_and_swap(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
@@ -1625,6 +1693,10 @@ mod tests {
         inherit: i64,
         swaps: RefCell<Vec<i64>>,
         cleanup: i64,
+        /// Makes the unpack time out; the value says whether the agent stopped `tar.exe`.
+        unpack_times_out: Option<bool>,
+        /// Fails the cleanup this many times first, while `cleanup` is 0.
+        failed_cleanups: Cell<u32>,
     }
 
     impl WindowsGuest {
@@ -1637,6 +1709,8 @@ mod tests {
                 inherit: 0,
                 swaps: RefCell::new(Vec::new()),
                 cleanup: 0,
+                unpack_times_out: None,
+                failed_cleanups: Cell::new(0),
             }
         }
 
@@ -1661,10 +1735,17 @@ mod tests {
 
         fn push(&self, replace: bool) -> Result<Summary> {
             let target = Target::parse(GuestOs::Windows, r"C:\work\app", replace)?;
-            push(self, &target, replace, &AtomicU64::new(0), |out| {
-                out.write_all(b"archive")?;
-                Ok(Summary::default())
-            })
+            push_retrying(
+                self,
+                &target,
+                replace,
+                &AtomicU64::new(0),
+                |out| {
+                    out.write_all(b"archive")?;
+                    Ok(Summary::default())
+                },
+                CLEANUP_RETRY_TEST,
+            )
         }
     }
 
@@ -1675,6 +1756,22 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("{step:?} {}", args.join(" | ")));
+            if let (Step::Unpack, Some(stopped)) = (step, self.unpack_times_out) {
+                return Err(StepTimedOut {
+                    step,
+                    after: LONG_TIMEOUT,
+                    stopped,
+                }
+                .into());
+            }
+            if step == Step::Cleanup && self.cleanup == 0 && self.failed_cleanups.get() > 0 {
+                self.failed_cleanups.set(self.failed_cleanups.get() - 1);
+                return Ok(Ran {
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: "C:\\work\\.vmm-x.d: in use".into(),
+                });
+            }
             let (code, stdout, stderr) = match step {
                 Step::Probe => (self.probe, WIN_TAR, ""),
                 Step::MakeDir => (self.make_dir, "", "cannot create"),
@@ -1856,6 +1953,67 @@ mod tests {
                 && err.contains("unreadable filename"),
             "{err}"
         );
+    }
+
+    /// The cleanup retry window in the scripted guest's tests.
+    const CLEANUP_RETRY_TEST: Duration = Duration::from_millis(200);
+
+    fn cleanups(guest: &WindowsGuest) -> usize {
+        guest
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("Cleanup"))
+            .count()
+    }
+
+    #[test]
+    fn after_a_timed_out_unpack_the_cleanup_is_retried_until_it_succeeds() {
+        let guest = WindowsGuest {
+            unpack_times_out: Some(true),
+            failed_cleanups: Cell::new(2),
+            ..WindowsGuest::new()
+        };
+        let err = format!("{:#}", guest.push(true).unwrap_err());
+        assert!(err.contains("did not finish within"), "{err}");
+        // The cleanup succeeded on its third try, so the error names no leftovers.
+        assert!(!err.contains("deleting"), "{err}");
+        assert_eq!(cleanups(&guest), 3);
+    }
+
+    #[test]
+    fn after_a_timed_out_unpack_a_failing_cleanup_is_reported_once_the_window_ends() {
+        let started = Instant::now();
+        let guest = WindowsGuest {
+            unpack_times_out: Some(false),
+            failed_cleanups: Cell::new(u32::MAX),
+            ..WindowsGuest::new()
+        };
+        let err = format!("{:#}", guest.push(true).unwrap_err());
+        assert!(started.elapsed() >= CLEANUP_RETRY_TEST);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            err.contains("the push failed, and deleting")
+                && err.contains("in use")
+                && err.contains("tar.exe may still be running")
+                && err.contains("stopping it failed"),
+            "{err}"
+        );
+        assert!(cleanups(&guest) > 1);
+    }
+
+    #[test]
+    fn any_other_failure_runs_the_cleanup_once() {
+        let guest = WindowsGuest {
+            unpack: 1,
+            failed_cleanups: Cell::new(u32::MAX),
+            ..WindowsGuest::new()
+        };
+        let err = format!("{:#}", guest.push(true).unwrap_err());
+        assert!(
+            err.contains("deleting") && !err.contains("may still be running"),
+            "{err}"
+        );
+        assert_eq!(cleanups(&guest), 1);
     }
 
     #[test]
