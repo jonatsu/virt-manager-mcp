@@ -254,6 +254,17 @@ ASCII a PAX `path` record, which `tar.exe` reads as UTF-8. It still cannot unpac
 cannot hold, such as a Japanese name on a guest set to a Western code page: it skips the entry, exits with status 1,
 and the push fails with its message.
 
+`tar.exe` unpacks through a junction, and both `C:\Users\Public` and `C:\Windows\Temp` let ordinary users add entries
+to a directory that `SYSTEM` creates there ([probe note](../research/2026-11-13-windows-followups-probe.md)). A push
+therefore creates its staging directory with an access list that is protected from inheritance and grants full
+control only to `SYSTEM` and `Administrators`, given as SIDs because group names are localized. It reads the
+directory back before unpacking, and refuses one that is a junction, has another owner, or holds any other list. The
+owner matters because the archive, written first, shows the staging directory's name, and a user who created that
+directory first could change its list later. So no other guest user can add entries while `tar.exe` unpacks. After the
+unpack, in a step of its own with the unpack's long timeout, the directory gets back the access list its parent passes
+on, and Windows propagates it to every entry, so the pushed tree ends with the permissions that a directory created
+there would have. A failure in that step fails the push and deletes the staging tree.
+
 A pull from a Windows guest packs into `%SystemRoot%\Temp` (`C:\Windows\Temp` on most guests), where only `SYSTEM`
 and `Administrators` can read the files that the agent creates. Any non-zero exit status of `tar.exe` fails the
 pull: Windows has no counterpart of GNU tar's changed-file warning, and its status 1 also covers a file that another
@@ -347,6 +358,10 @@ that meets a symlinked directory.
 7. `tar.exe` creates paths longer than 260 characters, which a push of a deep tree can produce. Windows programs that
    lack long-path support, Explorer and `cmd.exe` among them, cannot open such files; PowerShell reaches them with a
    `\\?\` prefix.
+8. A guest user who may delete or rename entries in a Windows push's target parent can replace the staging directory
+   with a junction between its creation and the unpack, and so make the push write elsewhere as `SYSTEM`. That user
+   might own the parent, as in `C:\Users\alice\app`. The parent might also be a directory that a push's probe created
+   below `C:\Users\Public`, which passes delete rights on to interactive users. Roadmap follow-up 23 records it.
 
 ## Open questions
 

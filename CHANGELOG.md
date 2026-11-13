@@ -65,6 +65,14 @@ Each release's section lists what changed for people who run the server and for 
 - `exec` refuses `args` together with `command`, and runs nothing. It used to run the command line and drop the
   arguments silently. `args` goes with `program`.
 
+### Security
+
+- A guest user who can add entries to a Windows push's target parent, as any user can in `C:\Users\Public` and
+  `C:\Windows\Temp`, can no longer make the push write outside its target. `tar.exe` unpacks through a junction, so
+  such a user could plant one in the push's staging directory. The staging directory now grants access only to
+  `SYSTEM` and `Administrators` while `tar.exe` unpacks, and the pushed tree then gets the access list its parent
+  passes on. A user who may delete or rename entries in the parent, such as its owner, can still redirect the push.
+
 ## 0.2.0
 
 The first release of this fork. It covers every change since upstream's `v1.0`, including upstream's VM management.

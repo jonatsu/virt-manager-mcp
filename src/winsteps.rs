@@ -17,6 +17,8 @@ pub const PUSH_MKDIR: &str = include_str!("winsteps/push-mkdir.ps1");
 pub const PUSH_SWAP: &str = include_str!("winsteps/push-swap.ps1");
 /// Deletes a push's temporary entries.
 pub const PUSH_CLEANUP: &str = include_str!("winsteps/push-cleanup.ps1");
+/// Gives a pushed tree back the access list its parent passes on.
+pub const PUSH_INHERIT: &str = include_str!("winsteps/push-inherit.ps1");
 
 /// Runs the constant script `body` with `args` defined before it as `$argv`, an array of quoted literals, so no
 /// argument is ever parsed as PowerShell code.
@@ -132,7 +134,7 @@ exit $errors.Count"#;
         assert!(!found.is_empty(), "the parser accepted an unclosed brace");
         let scripts = scripts();
         assert!(
-            scripts.len() >= 8,
+            scripts.len() >= 9,
             "only {} scripts found: {scripts:?}",
             scripts.len()
         );

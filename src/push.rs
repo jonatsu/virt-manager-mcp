@@ -796,6 +796,9 @@ pub enum Step {
     /// Creating the directory to unpack into, a step of its own on Windows only, where `tar.exe` runs without a shell.
     MakeDir,
     Unpack,
+    /// Giving the unpacked tree back the access list its parent passes on, Windows only: `MakeDir` protects the
+    /// staging directory so that no other guest user can plant a junction in it while `tar.exe` unpacks.
+    Inherit,
     Swap,
     Cleanup,
 }
@@ -854,6 +857,7 @@ impl Steps {
                     }
                     _ => bail!("unpacking needs the archive, the directory and tar.exe's path"),
                 },
+                Step::Inherit => winsteps::script(winsteps::PUSH_INHERIT, args),
                 Step::Swap => winsteps::script(winsteps::PUSH_SWAP, args),
                 Step::Cleanup => winsteps::script(winsteps::PUSH_CLEANUP, args),
                 #[cfg(test)]
@@ -871,6 +875,7 @@ fn linux_script(step: Step) -> Result<&'static str> {
         Step::Swap => SWAP,
         Step::Cleanup => CLEANUP,
         Step::MakeDir => bail!("a Linux push creates its directory in the Unpack step"),
+        Step::Inherit => bail!("a Linux push creates its directory with its final mode"),
         #[cfg(test)]
         Step::Write => bail!("writing the archive is no script step"),
     })
@@ -885,7 +890,8 @@ pub struct OnGuest<'a> {
 impl Guest for OnGuest<'_> {
     fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
         let timeout = match step {
-            Step::Unpack | Step::Cleanup => LONG_TIMEOUT,
+            // Restoring inheritance makes Windows rewrite the access list of every entry in the tree.
+            Step::Unpack | Step::Inherit | Step::Cleanup => LONG_TIMEOUT,
             _ => STEP_TIMEOUT,
         };
         let out = self
@@ -1059,11 +1065,17 @@ fn send_and_swap(
         GuestOs::Linux => guest.run(Step::Unpack, &[packed, unpacked])?,
         GuestOs::Windows => {
             let made = guest.run(Step::MakeDir, &[unpacked])?;
-            if made.code != Some(0) {
-                bail!(
+            match made.code {
+                Some(0) => {}
+                Some(2) => bail!(
+                    "the staging directory {unpacked} in the guest is not one the push created with its own access \
+                     list, so nothing was unpacked; another guest user may have created it first: {}",
+                    made.describe()
+                ),
+                _ => bail!(
                     "creating {unpacked} in the guest failed: {}",
                     made.describe()
-                );
+                ),
             }
             guest.run(Step::Unpack, &[packed, unpacked, tar])?
         }
@@ -1073,6 +1085,16 @@ fn send_and_swap(
             "unpacking the archive in the guest failed: {}",
             ran.describe()
         );
+    }
+    if target.os == GuestOs::Windows {
+        let inherited = guest.run(Step::Inherit, &[unpacked])?;
+        if inherited.code != Some(0) {
+            bail!(
+                "restoring the inherited access list of the unpacked tree in the guest failed, so the tree is \
+                 deleted and nothing was replaced: {}",
+                inherited.describe()
+            );
+        }
     }
     let swap = [target.path.as_str(), unpacked, old, flag];
     let mut ran = guest.run(Step::Swap, &swap)?;
@@ -1568,12 +1590,14 @@ mod tests {
         assert_eq!(spec.path, "/bin/sh");
         assert_eq!(spec.args.last().map(String::as_str), Some("/a/.vmm-x.tar"));
         assert!(Steps(GuestOs::Linux).spec(Step::MakeDir, &["/a"]).is_err());
+        assert!(Steps(GuestOs::Linux).spec(Step::Inherit, &["/a"]).is_err());
 
         let windows = Steps(GuestOs::Windows);
         let args = [r"C:\it's\x", r"C:\y"];
         for (step, script) in [
             (Step::Probe, winsteps::PUSH_PROBE),
             (Step::MakeDir, winsteps::PUSH_MKDIR),
+            (Step::Inherit, winsteps::PUSH_INHERIT),
             (Step::Swap, winsteps::PUSH_SWAP),
             (Step::Cleanup, winsteps::PUSH_CLEANUP),
         ] {
@@ -1598,6 +1622,7 @@ mod tests {
         probe: i64,
         make_dir: i64,
         unpack: i64,
+        inherit: i64,
         swaps: RefCell<Vec<i64>>,
         cleanup: i64,
     }
@@ -1609,6 +1634,7 @@ mod tests {
                 probe: 0,
                 make_dir: 0,
                 unpack: 0,
+                inherit: 0,
                 swaps: RefCell::new(Vec::new()),
                 cleanup: 0,
             }
@@ -1652,6 +1678,11 @@ mod tests {
             let (code, stdout, stderr) = match step {
                 Step::Probe => (self.probe, WIN_TAR, ""),
                 Step::MakeDir => (self.make_dir, "", "cannot create"),
+                Step::Inherit => (
+                    self.inherit,
+                    "",
+                    "Attempted to perform an unauthorized operation",
+                ),
                 Step::Unpack => (
                     self.unpack,
                     "",
@@ -1693,6 +1724,7 @@ mod tests {
                 r"write C:\work\.vmm-ID.tar",
                 r"MakeDir C:\work\.vmm-ID.d",
                 r"Unpack C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d | C:\Windows\System32\tar.exe",
+                r"Inherit C:\work\.vmm-ID.d",
                 r"Swap C:\work\app | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old | 1",
                 r"Cleanup C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old",
             ]
@@ -1736,6 +1768,20 @@ mod tests {
                     ..WindowsGuest::new()
                 },
                 "cannot create",
+            ),
+            (
+                WindowsGuest {
+                    make_dir: 2,
+                    ..WindowsGuest::new()
+                },
+                "another guest user may have created it first",
+            ),
+            (
+                WindowsGuest {
+                    inherit: 1,
+                    ..WindowsGuest::new()
+                },
+                "restoring the inherited access list",
             ),
             (
                 WindowsGuest {

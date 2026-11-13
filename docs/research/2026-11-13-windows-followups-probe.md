@@ -89,3 +89,39 @@ new subdirectory, `Users:(I)(CI)(S,WD,AD,X)` included. The target file's securit
 propagation did not pass through the junction. The file inside the directory listed `SYSTEM` and `Administrators`
 before and after, which is also what `C:\Windows\Temp` passes to files, so this run cannot tell whether inheritance
 reached it.
+
+## The protected staging directory as built
+
+A later run on `t-win11` exercised `push-mkdir.ps1` and `push-inherit.ps1` from the fix for follow-up 19, through
+`exec` and `copy_dir_to_vm`, from a release build with the two scripts in place.
+
+`push-mkdir.ps1` created `C:\Windows\Temp\vmm-m1` with this list, owned by `BUILTIN\Administrators`, and accepted the
+directory again when run a second time:
+
+```text
+C:\Windows\Temp\vmm-m1 NT AUTHORITY\SYSTEM:(OI)(CI)(F)
+                       BUILTIN\Administrators:(OI)(CI)(F)
+```
+
+It exited 2 for a directory made beforehand with `New-Item` ("its access list inherits from its parent"), for a
+directory given the same two rules with `icacls /inheritance:r /grant:r` and then the owner `BUILTIN\Users` ("its
+owner is S-1-5-32-545"), and for a junction at the path ("it is a junction or link").
+
+A junction to `C:\vmm-jt` placed inside a directory that `push-mkdir.ps1` made, then `push-inherit.ps1` on that
+directory, left the SDDL of `C:\vmm-jt` and of the file in it unchanged.
+
+A push of a two-file tree to `C:\Users\Public\vmm-acl` gave its root, its subdirectory and both files the same
+`icacls` lists as a reference tree made there with `New-Item` and `Set-Content`. Each file listed:
+
+```text
+BUILTIN\Administrators:(I)(F)
+NT AUTHORITY\SYSTEM:(I)(F)
+NT AUTHORITY\INTERACTIVE:(I)(M,DC)
+NT AUTHORITY\SERVICE:(I)(M,DC)
+NT AUTHORITY\BATCH:(I)(M,DC)
+```
+
+Running `push-inherit.ps1` a second time on that tree changed none of the four lists. A push of `share/win-deep` to
+`C:\Users\Public\vmm-deep` gave its file, whose full path is 292 characters long, the inherited `INTERACTIVE`,
+`SERVICE` and `BATCH` rules as well. On a pushed tree of 5,000 small files in 50 directories, protecting the root again
+with `SetAccessControl` took 0.26 s, and `push-inherit.ps1` then took 0.27 s.

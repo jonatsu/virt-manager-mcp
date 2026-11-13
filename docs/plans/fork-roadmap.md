@@ -114,17 +114,28 @@ Reviews of earlier work found these. None blocks the server's use.
     `scripts/fetch-ocr-models.sh`, which stays for offline hosts and a directory of the operator's choice, and a test
     keeps the two equal. `curl` avoids a TLS library in the dependency tree
     ([how-to](../how-to/ocr-models.md)).
-19. **A Windows push unpacks as `SYSTEM` into a directory that inherits its parent's access list.** Under a parent
-    that `Users` can write, such as `C:\Users\Public`, an unprivileged guest user could plant a junction in
-    `.vmm-<id>.d` between its creation and `tar.exe -x`. Check on `t-win11` whether `tar.exe` refuses to extract
-    through a junction; if it does not, create the directory with an access list that does not inherit. The boundary
-    is inside the guest, not the host's.
+19. **Done: a Windows push unpacks into a staging directory that only `SYSTEM` and `Administrators` can write.**
+    `tar.exe` unpacks through a junction, so a guest user who could add entries to `.vmm-<id>.d` could have made the
+    push write anywhere. The push creates the directory with a protected access list, checks it, and gives the tree
+    its inherited list back after the unpack
+    ([probe note](../research/2026-11-13-windows-followups-probe.md),
+    [plan](transfer-followups-implementation-plan.md)). Follow-up 23 holds what stays open.
 20. **A Windows `guest_path` outside the guest's code page is untested.** `tar.exe` may receive it as `?` and fail.
     Push and pull once with a path such as `C:\Windows\Temp\vmm-日本` on `t-win11`, and refuse such paths with a
     clear message if they fail.
 21. **A Windows push cleans up at once after a timed-out unpack.** The cleanup runs straight after `taskkill`,
     without the pull's 10 s retry, so `tar.exe` may still hold files and leave `.vmm-*` entries, which the error
     names. Retry the cleanup as the pull retries its removal.
+22. **`exec` with `program` fails on Windows when an argument is not ASCII.** The guest agent fails such a
+    `guest-exec`, and libvirt reports only `failed to parse JSON: invalid utf-8 string`
+    ([probe note](../research/2026-11-13-windows-followups-probe.md)). `exec` with `command` is unaffected. Refuse
+    such arguments on Windows with a message that suggests `command`, or report it upstream to `virtio-win`.
+23. **A Windows push into a parent where a guest user may delete or rename entries is not protected.** Such a user,
+    the owner of `C:\Users\alice` for example, or any interactive user in a directory that a push created below
+    `C:\Users\Public`, can replace the staging directory with a junction between two guest calls, and so make the
+    push write elsewhere as `SYSTEM`. Closing it means unpacking in a directory where no other user may delete or
+    rename entries, such as `%SystemRoot%\Temp`, and moving the tree into place, which fails across drives. Decide
+    whether to do that, to refuse such parents, or to accept the risk for guests whose users are trusted.
 
 ## Outcomes
 
