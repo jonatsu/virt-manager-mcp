@@ -1,6 +1,6 @@
 # Follow-ups 17 and 19 to 21: implementation plan
 
-Status: draft, revised after a plan-critic review; for approval. Built from roadmap follow-ups 17 and 19 to 21 in
+Status: approved; in progress. Built from roadmap follow-ups 17 and 19 to 21 in
 [`fork-roadmap.md`](fork-roadmap.md) at `d41fa1c`, and from [`guest-transfer-design.md`](guest-transfer-design.md),
 which owns the behaviour of the transfer tools. Evidence is in
 [`2026-11-13-windows-followups-probe.md`](../research/2026-11-13-windows-followups-probe.md). This plan owns order and
@@ -253,7 +253,7 @@ The run's goal:
 
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
-| 1. `exec` refuses `args` with `command` |  |  |  |
+| 1. `exec` refuses `args` with `command` | `5e7427a` | Unit tests `exec_refuses_args_with_command`, `exec_refuses_neither_or_both_without_asking_the_guest` and `exec_builds_command_and_program_specs_as_before` pass; gate passed. The `trial-deb13` case lands in unit 5 | Self-review; the final review covers it |
 | 2. Protected push staging on Windows |  |  |  |
 | 3. Windows pulls from non-ASCII paths |  |  |  |
 | 4. Push cleanup retry after a timeout |  |  |  |
