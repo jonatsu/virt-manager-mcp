@@ -35,8 +35,8 @@ VIRTMANAGER_OCR_DOWNLOAD=1"
 
 # Units run in this order; each lists the case files it runs, in order.
 readonly UNITS=(
-  smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode transfer-file transfer-push transfer-pull
-  transfer-background addresses console-reopen console-stall
+  smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
+  transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
   screen-no-models templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
   templates-outside-disk manage-lock console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
@@ -324,6 +324,8 @@ transfer_setup() {
   name=${share}/win-deep
   for _ in 1 2 3 4 5; do name+=/$(printf 'd%.0s' {1..50}); done
   mkdir -p -- "${name}" && printf 'deep\n' > "${name}/file.txt" || return 1
+  mkdir -p -- "${share}/win-ete" && printf 'été\n' > "${share}/win-ete/été.txt" && printf 'a\n' > "${share}/win-ete/a.txt" \
+    || return 1
   printf 'x\n' > "${pull}/a-file"
   # Fixed modes, whatever the umask, so the cases can expect them.
   find "${share}" "${pull}" -type f -exec chmod 644 {} + && find "${share}" "${pull}" -type d -exec chmod 755 {} + \
@@ -510,6 +512,9 @@ unit_windows() {
     check_pulled win-transfer win/vmm-win.txt $'windows transfer\n'
     check_pulled win-transfer win-dir/a.txt $'alpha\n'
     check_pulled win-transfer win-dir/sub/b.txt $'beta\n'
+    check_pulled win-transfer win-ete/a.txt $'a\n'
+    check_pulled win-transfer win-ete/été.txt $'été\n'
+    [[ ! -e ${WORK}/pull/win-jp ]] || record win-transfer failed "the refused pull of vmm-jp left pull/win-jp behind"
     check_pull_dir win-transfer
     [[ -z $(find "${WORK}/pull" -maxdepth 1 \( -name win-big -o -name win-loop \) -print) ]] \
       || record win-transfer-caps failed "a refused Windows pull left pull/win-big or pull/win-loop behind"
@@ -593,7 +598,7 @@ run_unit() {
     screen-windows) unit_screen "$1" t-win ;;
     win-exec) unit_windows ;;
     win-screen) unit_win_screen ;;
-    smoke | guest-agent-and-snapshots | lifecycle-guardrails | write-file-mode | console-reopen | \
+    smoke | guest-agent-and-snapshots | lifecycle-guardrails | write-file-mode | exec-args | console-reopen | \
       start-vm-waits-for-agent | console-closed-on-power-off | screenshot-region | screen-settled | \
       screen-no-models) unit_trial "$1" ;;
     *) run_case "$1" config-templates.toml ;;

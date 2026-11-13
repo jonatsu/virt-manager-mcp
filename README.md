@@ -151,6 +151,8 @@ guest agent can answer.
 
 A Linux guest needs `tar`. A Windows guest uses its own `%SystemRoot%\System32\tar.exe`, which Windows 10 1803 and
 later ship; the server runs it directly through the guest agent and runs PowerShell only for the steps around it.
+The guest agent fails a command whose arguments are not ASCII, so a pull from such a path, such as
+`C:\Windows\Temp\vmm-été`, runs `tar.exe` from PowerShell instead.
 
 - A Windows `guest_path` is a drive path such as `C:\work\app`, with `\` or `/` between components. The
   server refuses relative and drive-relative paths (`C:work`), UNC and device paths (`\\server\share`, `\\?\C:\`),
@@ -163,15 +165,19 @@ later ship; the server runs it directly through the guest agent and runs PowerSh
   directory only in case. It also skips every symlink, because the archive cannot say whether a link points to a
   file or a directory. A name outside the guest's code page, such as a Japanese name on a Western guest, fails the
   push in `tar.exe`.
-- Every pushed file and directory arrives writable; host modes do not carry over.
+- Every pushed file and directory arrives writable; host modes do not carry over. While `tar.exe` unpacks, only
+  `SYSTEM` and `Administrators` can write the push's staging directory, so no other guest user can plant a junction
+  in it. The pushed tree then gets the access list its parent passes on. A guest user who may delete or rename
+  entries in the target's parent, such as its owner, can still redirect a push.
 - Windows refuses to rename a directory while a file in it is open, so a `replace` of a tree in
   use fails after one retry and leaves the old tree in place.
 - The guest packs in `%SystemRoot%\Temp`, usually `C:\Windows\Temp`, where only `SYSTEM` and `Administrators` can
   read the archive. `tar.exe` follows junctions, so a junction in the pulled tree brings its target's content along
   until a cap stops it; a junction to the tree itself fails the pull. Any non-zero exit of `tar.exe`, including a
-  file another program holds open, fails the pull. The server polls the archive's size through PowerShell, so an
-  archive can pass `max_pull_bytes` by about a second of writing before `tar.exe` stops; the host still writes nothing
-  past the cap.
+  file another program holds open, fails the pull, as does a name in the tree outside the guest's code page, for
+  which `tar.exe` prints no reason and the pull's error names that cause. The server polls the archive's size
+  through PowerShell, so an archive can pass `max_pull_bytes` by about a second of writing before `tar.exe` stops;
+  the host still writes nothing past the cap.
 - `tar.exe` creates paths over 260 characters, which programs without long-path support, such as
   Explorer, cannot open.
 

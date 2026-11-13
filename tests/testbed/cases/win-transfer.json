@@ -44,7 +44,7 @@
     "tool": "exec",
     "args": {
       "vm": "t-win11",
-      "command": "$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-deep') { if (Test-Path -LiteralPath \"$t\\$d\") { Remove-Item -LiteralPath \"\\\\?\\$t\\$d\" -Recurse -Force } }\n[void](New-Item -ItemType Directory \"$t\\vmm-sentinel\")\nSet-Content -LiteralPath \"$t\\vmm-sentinel\\keep.txt\" -Value keep\n'ready'"
+      "command": "foreach ($d in (@('vmm-\u00e9t\u00e9', 'vmm-jp') | ForEach-Object { Join-Path (Join-Path $env:SystemRoot 'Temp') $_ }) + (@('vmm-acl', 'vmm-ref') | ForEach-Object { Join-Path $env:PUBLIC $_ })) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath \"\\\\?\\$d\" -Recurse -Force } }\n$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-deep') { if (Test-Path -LiteralPath \"$t\\$d\") { Remove-Item -LiteralPath \"\\\\?\\$t\\$d\" -Recurse -Force } }\n[void](New-Item -ItemType Directory \"$t\\vmm-sentinel\")\nSet-Content -LiteralPath \"$t\\vmm-sentinel\\keep.txt\" -Value keep\n'ready'"
     },
     "expect": {
       "contains": "ready"
@@ -353,13 +353,100 @@
     }
   },
   {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-ete",
+      "guest_path": "C:\\Users\\Public\\vmm-acl"
+    },
+    "expect": {
+      "contains": "\"files\":2"
+    }
+  },
+  {
     "tool": "exec",
     "args": {
       "vm": "t-win11",
-      "command": "$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-win.txt', 'vmm-deep') { Remove-Item -LiteralPath \"\\\\?\\$t\\$d\" -Recurse -Force }\n'left=' + (@('vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-win.txt', 'vmm-deep') | Where-Object { Test-Path -LiteralPath \"$t\\$_\" }).Count"
+      "command": "$p = Join-Path $env:PUBLIC 'vmm-ref'\n[void](New-Item -ItemType Directory $p)\nSet-Content -LiteralPath \"$p\\a.txt\" -Value a\nSet-Content -LiteralPath \"$p\\\u00e9t\u00e9.txt\" -Value e\n# The rules of a pushed tree and of one made in place, compared by value: icacls prints names in another code page.\nfunction Rules($d) { foreach ($r in '', '\\a.txt', '\\\u00e9t\u00e9.txt') { $a = Get-Acl -LiteralPath \"$d$r\"; \"$r protected=$($a.AreAccessRulesProtected)\"; $a.Access | ForEach-Object { \"$r $($_.IdentityReference) $($_.FileSystemRights) $($_.InheritanceFlags) $($_.PropagationFlags) inherited=$($_.IsInherited)\" } } }\n$pushed = Rules (Join-Path $env:PUBLIC 'vmm-acl')\n$made = Rules $p\nif (Compare-Object $pushed $made) { 'acl=differs'; $pushed; '--'; $made } else { 'acl=same' }\n$pushed -match 'INTERACTIVE'"
     },
     "expect": {
-      "contains": "left=0"
+      "contains": [
+        "acl=same",
+        "\\a.txt NT AUTHORITY\\INTERACTIVE DeleteSubdirectoriesAndFiles, Modify, Synchronize None None inherited=True"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-ete",
+      "guest_path": "C:\\Windows\\Temp\\vmm-\u00e9t\u00e9"
+    },
+    "expect": {
+      "contains": "\"files\":2"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$d = Join-Path $env:SystemRoot 'Temp\\vmm-\u00e9t\u00e9'\nforeach ($f in 'a.txt', '\u00e9t\u00e9.txt') { $f + '=' + (Get-FileHash -LiteralPath \"$d\\$f\").Hash }"
+    },
+    "expect": {
+      "contains": [
+        "a.txt=87428FC522803D31065E7BCE3CF03FE475096631E5E07BBD7A0FDE60C4CF25C7",
+        "\u00e9t\u00e9.txt=AC68EA8C75B70BBDAB368D1D15DEFD92DBAC45088A633FE8BAB3355CB895DD77"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "t-win11",
+      "guest_path": "C:\\Windows\\Temp\\vmm-\u00e9t\u00e9",
+      "host_path": "${pull}/win-ete"
+    },
+    "expect": {
+      "contains": [
+        "\"files\":2",
+        "\"skipped\":[]"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$d = Join-Path $env:SystemRoot 'Temp\\vmm-jp'\n[void](New-Item -ItemType Directory $d)\nSet-Content -LiteralPath \"$d\\\u65e5\u672c.txt\" -Value j\n'made'"
+    },
+    "expect": {
+      "contains": "made"
+    }
+  },
+  {
+    "tool": "copy_dir_from_vm",
+    "args": {
+      "vm": "t-win11",
+      "guest_path": "C:\\Windows\\Temp\\vmm-jp",
+      "host_path": "${pull}/win-jp"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "exit status 255",
+        "ANSI code page"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\n$dirs = @('vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-win.txt', 'vmm-deep', 'vmm-\u00e9t\u00e9', 'vmm-jp' | ForEach-Object { Join-Path $t $_ }) + @('vmm-acl', 'vmm-ref' | ForEach-Object { Join-Path $env:PUBLIC $_ })\nforeach ($d in $dirs) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath \"\\\\?\\$d\" -Recurse -Force } }\n'left=' + ($dirs | Where-Object { Test-Path -LiteralPath $_ }).Count + ' vmm=' + (Get-ChildItem -Force -LiteralPath $t, $env:PUBLIC -Filter '.vmm-*' | Measure-Object).Count"
+    },
+    "expect": {
+      "contains": "left=0 vmm=0"
     }
   }
 ]
