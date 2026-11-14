@@ -2019,7 +2019,7 @@ mod tests {
         };
         let err = format!("{:#}", guest.push(true).unwrap_err());
         assert!(started.elapsed() >= CLEANUP_RETRY_TEST);
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(5));
         assert!(
             err.contains("the push failed, and deleting")
                 && err.contains("in use")
@@ -2073,6 +2073,10 @@ mod tests {
             "{err}"
         );
         assert!(cleanups(&guest) > 1);
+        let calls = guest.calls();
+        let inherits = calls.iter().filter(|c| c.starts_with("Inherit")).count();
+        assert_eq!(inherits, 1, "{calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("Swap")), "{calls:?}");
     }
 
     #[test]

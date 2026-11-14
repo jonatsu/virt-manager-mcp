@@ -3,6 +3,20 @@
     "tool": "exec",
     "args": {
       "vm": "trial-deb13",
+      "program": "rm",
+      "args": [
+        "-f",
+        "/tmp/exec-args-ran"
+      ]
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
       "command": "echo ran > /tmp/exec-args-ran",
       "args": [
         "-n"
@@ -41,6 +55,20 @@
     },
     "expect": {
       "contains": "a b-c"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "trial-deb13",
+      "program": "rm",
+      "args": [
+        "-f",
+        "/tmp/exec-args-ran"
+      ]
+    },
+    "expect": {
+      "contains": "\"exit_code\":0"
     }
   }
 ]
