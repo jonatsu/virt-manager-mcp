@@ -463,6 +463,12 @@ The run's goal:
 - **Stop.** Stop and report when a step needs root, a design change beyond the amendments above (including unit 3's
   probe outcomes), another VM or pool, or when the host runs short of memory.
 
+The command that arms the run:
+
+```text
+/goal Outcome 4 per docs/plans/seeing-what-happened-implementation-plan.md is built: units 1-16 on main, each with its record row. After the last change, AGENTS.md gate and `cargo +1.94 test --locked` exit 0, `tests/testbed/run-all.sh` exits 0 with t-win11 present, and an Opus code review (Sonnet if safeguards stop Opus) plus a separate conformance review against the design, roadmap and plan find no material mismatch. Nothing pushed; only trial-deb13 and t-*/tpl-* in agent-vms touched. Else stop: root, design change, other VM or pool, low memory
+```
+
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
 | 1. `exec`: non-ASCII program arguments on Windows |  |  |  |

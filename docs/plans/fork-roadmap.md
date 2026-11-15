@@ -223,5 +223,7 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 4, seeing what happened, comes next; its design is accepted, and its plan comes first. Follow-ups 15, 16 and
-22 to 25 can land at any time; 16 waits on a newer `virtio-win`, and 23 and 25 need a design decision.
+Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
+approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and 24 are
+its units 1 and 2. Follow-ups 15, 16, 23 and 25 can land at any time; 16 waits on a newer `virtio-win`, and 23 and 25
+need a design decision.
