@@ -226,9 +226,14 @@ it is built.
      Windows guests through the guest's own `tar.exe`, tested on `t-win11`
      ([probe note](../research/2026-11-12-windows-tar-probe.md)). Its execution record holds the commits, test-bed
      results and reviews.
-4. **Seeing what happened.** When something fails in the guest, an agent can find out why. This covers console output
-   buffered from VM start, guest resource usage, and events such as a crash or reboot. Design, accepted:
-   [`seeing-what-happened-design.md`](seeing-what-happened-design.md).
+4. **Done: seeing what happened.** When something fails in the guest, an agent can find out why. A VM this server
+   boots has its console captured from the first byte, and each VM keeps one earlier run's output. `vm_events` lists
+   starts, stops, crashes, reboots and similar events with what caused each, a reply that names the VM announces one
+   that happened outside any tool call, and `wait_for` can wait on them. `vm_stats` reports CPU, memory, disk, network
+   and filesystem use. Created VMs get a panic device, balloon statistics and the crash action `manage.on_crash`.
+   Design: [`seeing-what-happened-design.md`](seeing-what-happened-design.md). Its
+   [plan](seeing-what-happened-implementation-plan.md)'s execution record holds each unit's commits, test-bed results
+   and reviews, with the [crash and events probe](../research/2026-11-23-crash-and-events-probe.md).
 5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
    and it needs a network policy for each VM, which outcome 6 would otherwise bring.
 6. **Operator trust and control.** An operator can let agents run with less supervision. This covers an audit log of
@@ -259,8 +264,7 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) is approved;
-its run is armed with the `/goal` command in the plan's execution record. Follow-ups 22 and 24,
-its units 1 and 2, are done, and its run also builds follow-ups 28 and 31, as units 17 and 18. Follow-ups 25, 29 and
-30 are done. Of the rest, 23 has its approach decided and needs a short design, 16 waits on a newer `virtio-win`, and
-27 waits on `rmcp` and `schemars`.
+Outcome 5, several VMs together, comes next. It needs a design first, and that design settles the open question
+above: whether outcome 5 brings its own network policy for each VM or waits for outcome 6. Of the open follow-ups, 23
+has its approach decided and needs a short design, 16 waits on a newer `virtio-win`, and 27 waits on `rmcp` and
+`schemars`.
