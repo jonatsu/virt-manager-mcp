@@ -86,8 +86,10 @@ Opening the console returns a typed result: opened with a generation, failed wit
 device. On a failure the server still resumes the VM, and the reply says that the capture failed and why. If the
 resume fails, the reply says so, and the VM stays paused for the agent to stop.
 
-`snapshot_revert` to a running snapshot also starts a stopped VM. It uses `VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED`, opens
-the console in the same way, and then resumes, so a revert gets a capture too.
+`snapshot_revert` to a snapshot of a running VM uses `VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED`, opens the console in the
+same way, and then resumes, whether the VM was running or shut off before, so a revert gets a capture too. It holds
+the same "starting" claim. A revert to a snapshot of a shut-off VM opens nothing. Either way the session from before
+the revert moves to the previous run.
 
 `start_vm` refuses a VM that is crashed, or paused with reason `VIR_DOMAIN_PAUSED_CRASHED`, and tells the agent to stop
 it with `force: true` first. A VM that the `destroy` crash action left shut off boots normally.

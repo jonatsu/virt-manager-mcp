@@ -16,6 +16,9 @@ Each release's section lists what changed for people who run the server and for 
   `console_read` from offset 0 holds the boot from its first byte, and a later `console_open` attaches to that
   capture. The reply says when the console could not be captured, for example because virt-manager holds it; the VM
   starts anyway. A second `start_vm` of a VM while its boot runs is refused.
+- `snapshot_revert` to a snapshot of a running VM reverts paused, opens the console, then resumes, so `console_read`
+  from offset 0 holds the guest's output from the snapshot on. The session before the revert moves to the previous
+  run, and a revert while the VM is starting is refused.
 
 ### Added
 

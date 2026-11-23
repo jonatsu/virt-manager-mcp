@@ -10,7 +10,8 @@ use virt::sys;
 
 use crate::console::{ConsoleOpener, Consoles, LibvirtOpener, OpenRequest, OpenResult, VmId};
 use crate::events::{Cause, Events, Kind};
-use crate::manage::now_epoch;
+use crate::hypervisor::{self, Hypervisor};
+use crate::manage::{self, RevertTarget, now_epoch};
 use crate::server::State;
 
 /// What a start does to a VM in a given state.
@@ -88,16 +89,25 @@ pub trait Boot {
 /// What a boot needs besides the libvirt calls.
 pub struct BootRequest<'a> {
     pub vm: VmId<'a>,
-    /// libvirt start flags, such as resetting a UEFI VM's firmware variables.
+    /// libvirt flags for the paused start, such as resetting a UEFI VM's firmware variables.
     pub flags: u32,
     /// The tool whose start this is, which the event records name as their cause.
     pub tool: &'static str,
+    /// The kinds of event the start produces, which the records then attribute to `tool`.
+    pub kinds: &'static [Kind],
     pub buffer_bytes: usize,
 }
 
+/// The kinds of event a paused boot and its resume produce.
+const BOOT_KINDS: &[Kind] = &[Kind::Started, Kind::Paused, Kind::Resumed];
+
+/// The kinds of event a revert to a running snapshot produces: the old run's stop when the VM was running, and the
+/// paused start and the resume.
+const REVERT_KINDS: &[Kind] = &[Kind::Stopped, Kind::Started, Kind::Paused, Kind::Resumed];
+
 /// Boots a VM: starts it paused, opens its console in libvirt's safe mode, replacing this server's own session, and
-/// resumes it. A console that cannot be opened is reported in the reply, and the VM still runs. Returns the reply's
-/// text, starting "started".
+/// resumes it. A console that cannot be opened is reported in the reply, and the VM still runs. Returns what the reply
+/// says about the console, such as "; console captured from boot (generation 7)".
 ///
 /// # Errors
 ///
@@ -110,20 +120,16 @@ pub fn boot(
     req: BootRequest,
 ) -> Result<String> {
     let name = req.vm.name;
-    let expectation = events.expect(
-        req.vm.uuid,
-        Cause::Tool(req.tool),
-        &[Kind::Started, Kind::Paused, Kind::Resumed],
-    );
+    let expectation = events.expect(req.vm.uuid, Cause::Tool(req.tool), req.kinds);
     // The window closes after the resume, whose events are the boot's too.
     let result = boot_inner(consoles, target, opener, &req).and_then(|console| {
         target.resume().map_err(|e| {
             anyhow!(
-                "VM '{name}' started paused{console}, but it could not be resumed and stays paused ({e:#}); use \
-                 start_vm to resume it"
+                "VM '{name}' is paused{console}, because it could not be resumed ({e:#}); use start_vm to resume \
+                 it"
             )
         })?;
-        Ok(format!("started{console}"))
+        Ok(console)
     });
     events.finish(expectation, now_epoch());
     result
@@ -136,9 +142,7 @@ fn boot_inner(
     opener: &dyn ConsoleOpener,
     req: &BootRequest,
 ) -> Result<String> {
-    target
-        .start_paused(req.flags)
-        .map_err(|e| anyhow!("cannot start '{}': {e:#}", req.vm.name))?;
+    target.start_paused(req.flags)?;
     let opened = consoles.open(
         opener,
         OpenRequest {
@@ -165,22 +169,55 @@ fn boot_inner(
 }
 
 /// The libvirt calls of a boot on a real domain.
-struct LibvirtBoot<'a>(&'a Domain);
+struct LibvirtBoot<'a> {
+    dom: &'a Domain,
+    name: &'a str,
+}
 
 impl Boot for LibvirtBoot<'_> {
     fn start_paused(&self, flags: u32) -> Result<()> {
-        self.0
+        self.dom
             .create_with_flags(flags | sys::VIR_DOMAIN_START_PAUSED)
-            .map_err(|e| anyhow!("{}", e.message()))?;
+            .map_err(|e| anyhow!("cannot start '{}': {}", self.name, e.message()))?;
         Ok(())
     }
 
     fn domain_id(&self) -> Option<u32> {
-        self.0.get_id()
+        self.dom.get_id()
     }
 
     fn resume(&self) -> Result<()> {
-        self.0.resume().map_err(|e| anyhow!("{}", e.message()))?;
+        self.dom.resume().map_err(|e| anyhow!("{}", e.message()))?;
+        Ok(())
+    }
+}
+
+/// The libvirt calls of a revert to a running snapshot, which starts the VM as a boot does.
+struct LibvirtRevert<'a> {
+    hv: &'a Hypervisor,
+    target: &'a RevertTarget,
+    uuid: &'a str,
+    snapshot: &'a str,
+}
+
+impl Boot for LibvirtRevert<'_> {
+    fn start_paused(&self, _flags: u32) -> Result<()> {
+        manage::snapshot_revert(self.target, self.snapshot)
+    }
+
+    fn domain_id(&self) -> Option<u32> {
+        // A revert gives the VM a new domain ID that the handle from before it does not show, so look it up again.
+        self.hv
+            .with_conn(|conn| Ok(Domain::lookup_by_uuid_string(conn, self.uuid)?.get_id()))
+            .ok()
+            .flatten()
+    }
+
+    fn resume(&self) -> Result<()> {
+        self.target
+            .dom
+            .resume()
+            .map_err(|e| anyhow!("{}", e.message()))?;
         Ok(())
     }
 }
@@ -199,7 +236,7 @@ impl State {
     }
 
     /// Boots a VM whose `Starting` claim the caller holds, such as `reset_vm`, which holds it from before it stops
-    /// the VM.
+    /// the VM. Returns the reply's text, starting "started".
     pub fn boot_claimed(
         &self,
         dom: &Domain,
@@ -208,18 +245,77 @@ impl State {
         flags: u32,
         tool: &'static str,
     ) -> Result<String> {
-        boot(
+        let console = boot(
             &self.consoles,
             &self.events,
-            &LibvirtBoot(dom),
+            &LibvirtBoot { dom, name },
             &LibvirtOpener { hv: &self.hv, dom },
             BootRequest {
                 vm: VmId { uuid, name },
                 flags,
                 tool,
+                kinds: BOOT_KINDS,
                 buffer_bytes: self.hv.config.limits.console_buffer_bytes,
             },
-        )
+        )?;
+        Ok(format!("started{console}"))
+    }
+
+    /// `snapshot_revert`: reverts the managed VM `name` to `snapshot`. The session before the revert moves to the
+    /// previous run. A revert to a running snapshot runs paused, opens the console as a boot does, and resumes, so the
+    /// capture holds the guest from the snapshot on; a revert to a shut-off snapshot opens nothing. Refused while a
+    /// start of the VM runs.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a VM the management tools may not touch, a missing snapshot, a VM that is starting, or a libvirt
+    /// refusal.
+    pub fn revert(&self, name: &str, snapshot: &str) -> Result<String> {
+        let target = manage::snapshot_target(&self.hv, name, snapshot)?;
+        let uuid = target.dom.get_uuid_string()?;
+        let _guard = self.starting.claim(&uuid, name)?;
+        // A revert replaces the guest's state under the console, so the session ends here, running or not.
+        let closed = if self.consoles.close(&uuid, "closed by snapshot_revert") {
+            "; the console session before it moved to the previous run (console_read run: \"previous\")"
+        } else {
+            ""
+        };
+        let done = format!("reverted '{name}' to snapshot '{snapshot}'");
+        if !target.running {
+            let id = self
+                .events
+                .expect(&uuid, Cause::Tool("snapshot_revert"), &[Kind::Stopped]);
+            let reverted = manage::snapshot_revert(&target, snapshot);
+            self.events.finish(id, now_epoch());
+            reverted?;
+            return Ok(format!(
+                "{done}; the VM is now {}{closed}",
+                hypervisor::state_name(&target.dom)
+            ));
+        }
+        let console = boot(
+            &self.consoles,
+            &self.events,
+            &LibvirtRevert {
+                hv: &self.hv,
+                target: &target,
+                uuid: &uuid,
+                snapshot,
+            },
+            &LibvirtOpener {
+                hv: &self.hv,
+                dom: &target.dom,
+            },
+            BootRequest {
+                vm: VmId { uuid: &uuid, name },
+                flags: 0,
+                tool: "snapshot_revert",
+                kinds: REVERT_KINDS,
+                buffer_bytes: self.hv.config.limits.console_buffer_bytes,
+            },
+        )?;
+        let console = console.replace("captured from boot", "captured from the snapshot on");
+        Ok(format!("{done}; the VM is now running{console}{closed}"))
     }
 
     /// `start_vm`: boots a shut-off VM, resumes a paused one, or wakes a suspended one. Returns what happened.
@@ -379,6 +475,7 @@ mod tests {
             },
             flags,
             tool: "start_vm",
+            kinds: BOOT_KINDS,
             buffer_bytes: 1 << 16,
         }
     }
@@ -388,10 +485,7 @@ mod tests {
         let (consoles, events) = (Consoles::default(), Events::new(16));
         let (target, opener) = (FakeBoot::default(), FakeOpener::new(None));
         let reply = boot(&consoles, &events, &target, &opener, request(4)).unwrap();
-        assert!(
-            reply.starts_with("started; console captured from boot"),
-            "{reply}"
-        );
+        assert!(reply.starts_with("; console captured from boot"), "{reply}");
         assert_eq!(*target.calls.borrow(), ["start 4", "resume"]);
         assert_eq!(*opener.forces.borrow(), [false]);
         // A second boot replaces the first capture without forcing.
@@ -450,7 +544,7 @@ mod tests {
             ..FakeBoot::default()
         };
         let e = boot(&consoles, &events, &target, &opener, request(0)).unwrap_err();
-        assert!(e.to_string().contains("cannot start 't-a'"), "{e}");
+        assert!(e.to_string().contains("no space left"), "{e}");
         assert!(opener.forces.borrow().is_empty());
 
         let target = FakeBoot {
@@ -461,7 +555,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            e.contains("stays paused") && e.contains("console captured"),
+            e.contains("is paused") && e.contains("console captured"),
             "{e}"
         );
     }

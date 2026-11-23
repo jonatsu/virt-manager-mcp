@@ -2158,26 +2158,16 @@ impl VirtServer {
             destructive_hint = true,
             idempotent_hint = false
         ),
-        description = "Revert a managed VM to a snapshot. Changes made since the snapshot are lost."
+        description = "Revert a managed VM to a snapshot. Changes made since the snapshot are lost. The console \
+        session before the revert moves to the previous run. A revert to a snapshot of a running VM opens the console \
+        before the guest runs on, so console_read from offset 0 holds its output from the snapshot on."
     )]
     async fn snapshot_revert(
         &self,
         Parameters(p): Parameters<SnapshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.blocking(move |s| {
-            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
-            let msg = manage::snapshot_revert(&s.hv, &p.vm, &p.snapshot)?;
-            // A revert replaces the guest's state under the console, running or not, so the session ends here and
-            // its output moves to the previous run.
-            let closed = if s.consoles.close(&uuid, "closed by snapshot_revert") {
-                "; its console session was closed (read its output with console_read run: \"previous\"), so open a \
-                 new one"
-            } else {
-                ""
-            };
-            Ok(vec![ContentBlock::text(format!("{msg}{closed}"))])
-        })
-        .await
+        self.blocking(move |s| Ok(vec![ContentBlock::text(s.revert(&p.vm, &p.snapshot)?)]))
+            .await
     }
 
     #[tool(

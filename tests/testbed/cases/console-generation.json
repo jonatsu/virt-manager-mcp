@@ -110,8 +110,8 @@
     },
     "expect": {
       "contains": [
-        "reverted 't-g' to snapshot 's1'",
-        "its console session was closed"
+        "reverted 't-g' to snapshot 's1'; the VM is now running; console captured from the snapshot on",
+        "the console session before it moved to the previous run"
       ]
     }
   },
@@ -119,11 +119,11 @@
     "tool": "console_read",
     "args": {
       "vm": "t-g",
-      "since": 0
+      "since": 0,
+      "run": "current"
     },
     "expect": {
-      "error": true,
-      "contains": "no console open for 't-g'"
+      "contains": "\"closed\":null"
     }
   },
   {

@@ -1324,16 +1324,46 @@ pub fn snapshot_list(hv: &Hypervisor, name: &str) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-pub fn snapshot_revert(hv: &Hypervisor, name: &str, snapshot: &str) -> Result<String> {
+/// A snapshot to revert to, and whether the VM was running when it was taken, so the revert starts the VM.
+pub struct RevertTarget {
+    pub dom: Domain,
+    pub snap: DomainSnapshot,
+    pub running: bool,
+}
+
+/// Looks up the managed VM `name` and its snapshot `snapshot` for a revert.
+pub fn snapshot_target(hv: &Hypervisor, name: &str, snapshot: &str) -> Result<RevertTarget> {
     let dom = hv.manage_domain(name)?;
     let snap = DomainSnapshot::lookup_by_name(&dom, snapshot, 0)
         .map_err(|e| anyhow!("snapshot '{snapshot}' not found: {}", e.message()))?;
-    snap.revert(0)
+    let running = snapshot_was_running(&snap.get_xml_desc(0)?)?;
+    Ok(RevertTarget { dom, snap, running })
+}
+
+/// Whether a snapshot's XML says the VM was running when it was taken.
+fn snapshot_was_running(xml: &str) -> Result<bool> {
+    let doc = roxmltree::Document::parse(xml)?;
+    Ok(doc
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("state"))
+        .and_then(|n| n.text())
+        == Some("running"))
+}
+
+/// Reverts to `target`'s snapshot: paused when it was running, so the caller can open the console before the guest
+/// runs on, and as recorded otherwise.
+pub fn snapshot_revert(target: &RevertTarget, snapshot: &str) -> Result<()> {
+    let flags = if target.running {
+        sys::VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED
+    } else {
+        0
+    };
+    target
+        .snap
+        .revert(flags)
         .map_err(|e| anyhow!("cannot revert to '{snapshot}': {}", e.message()))?;
-    Ok(format!(
-        "reverted '{name}' to snapshot '{snapshot}'; the VM is now {}",
-        hypervisor::state_name(&dom)
-    ))
+    Ok(())
 }
 
 pub fn snapshot_delete(hv: &Hypervisor, name: &str, snapshot: &str) -> Result<String> {
@@ -1913,6 +1943,20 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_revert_runs_only_a_snapshot_of_a_running_vm() {
+        let snap = |state: &str| {
+            format!(
+                "<domainsnapshot><name>s</name><state>{state}</state><domain/></domainsnapshot>"
+            )
+        };
+        assert!(snapshot_was_running(&snap("running")).unwrap());
+        for state in ["shutoff", "paused", "disk-snapshot"] {
+            assert!(!snapshot_was_running(&snap(state)).unwrap(), "{state}");
+        }
+        assert!(!snapshot_was_running("<domainsnapshot><name>s</name></domainsnapshot>").unwrap());
+    }
 
     /// A fresh directory for one lock test, removed by the test.
     fn lock_test_dir(name: &str) -> PathBuf {
