@@ -146,7 +146,10 @@ Reviews of earlier work found these. None blocks the server's use.
     the push writes its archive and unpacks it in `%SystemRoot%\Temp`, where no other user may delete or rename
     entries, then moves the tree into place, and copies it instead when the target is on another drive, which is
     slower and not atomic. Refusing such parents would block pushes into a user's own folders, and accepting the risk
-    does not fit opted-in VMs with real users. It needs a short design before it is built.
+    does not fit opted-in VMs with real users. The final steps in the user's parent (the move into place, the access
+    list inheritance, the move-aside of a replaced entry and the cleanup) open each directory without following
+    reparse points and act on the open handles, through a C# helper that PowerShell compiles with `Add-Type`. It lands
+    before 0.3.0, after a `t-win11` probe and a short design.
 24. **Done: the Windows transfer scripts write their error text as UTF-8.** Every script in `src/winsteps/` that
     writes to stderr does so through a UTF-8 writer with `AutoFlush`, as `pull-pack.ps1` did, so a non-ASCII path in
     a message arrives intact. `pull-prepare.ps1` writes no error text. `win-transfer.json` checks one such message
