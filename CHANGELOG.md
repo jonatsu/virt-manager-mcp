@@ -10,6 +10,11 @@ Each release's section lists what changed for people who run the server and for 
 - A how-to guide, `docs/how-to/agent-test-vms.md`, sets up a server whose agents create, install and delete VMs of
   their own from installer ISOs, while every existing VM stays hidden from them.
 
+### Fixed
+
+- With `allowed_vms` empty and VM management on, the server no longer warns at startup that no VM will be
+  accessible. It logs instead that only the VMs it creates will be.
+
 ## 0.3.0
 
 ### Changed

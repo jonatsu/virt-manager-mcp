@@ -137,8 +137,14 @@ async fn run() -> Result<()> {
     config.validate()?;
     let ocr_download = ocr_download(&mut config);
 
-    if config.allowed_vms.is_empty() {
-        tracing::warn!("allowed_vms is empty: no VM will be accessible");
+    match empty_allowed_note(&config) {
+        Some(EmptyAllowed::NoVm) => {
+            tracing::warn!("allowed_vms is empty: no VM will be accessible")
+        }
+        Some(EmptyAllowed::OwnVmsOnly) => tracing::info!(
+            "allowed_vms is empty: only VMs this server creates will be accessible, because VM management is on"
+        ),
+        None => {}
     }
 
     hypervisor::start_event_loop()?;
@@ -200,6 +206,26 @@ async fn run() -> Result<()> {
         Transport::Http => serve_http(state, &config).await?,
     }
     Ok(())
+}
+
+/// What an empty `allowed_vms` means for access.
+#[derive(Debug, PartialEq, Eq)]
+enum EmptyAllowed {
+    /// No VM is accessible.
+    NoVm,
+    /// VM management is on, so the VMs this server created stay accessible.
+    OwnVmsOnly,
+}
+
+/// What the server tells the operator at startup when `allowed_vms` lists no VM, or `None` when it lists one.
+fn empty_allowed_note(config: &Config) -> Option<EmptyAllowed> {
+    if !config.allowed_vms.is_empty() {
+        None
+    } else if config.manage.enabled() {
+        Some(EmptyAllowed::OwnVmsOnly)
+    } else {
+        Some(EmptyAllowed::NoVm)
+    }
 }
 
 /// Points `display.ocr_models` at the download directory when `VIRTMANAGER_OCR_DOWNLOAD=1` and the config leaves it
@@ -274,4 +300,19 @@ async fn require_bearer(
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_allowed_vms_names_the_server_s_own_vms_only_while_management_is_on() {
+        let mut config = Config::default();
+        assert_eq!(empty_allowed_note(&config), Some(EmptyAllowed::NoVm));
+        config.manage.snapshots = true;
+        assert_eq!(empty_allowed_note(&config), Some(EmptyAllowed::OwnVmsOnly));
+        config.allowed_vms = vec!["vm1".into()];
+        assert_eq!(empty_allowed_note(&config), None);
+    }
 }

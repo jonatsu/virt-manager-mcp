@@ -56,7 +56,7 @@ not create.
    ```
 
    Choose `max_vms` and `max_memory_mib` so that their product fits in the memory your host can spare. When the
-   server starts, it logs that `allowed_vms` is empty; that refers only to your existing VMs.
+   server starts, it logs that only VMs it creates will be accessible.
 
 2. If you want agents to wait for text on a VM's screen, such as an installer's prompt, add
    `VIRTMANAGER_OCR_DOWNLOAD=1` to the server's environment.
