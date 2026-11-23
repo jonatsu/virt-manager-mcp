@@ -8,6 +8,10 @@
 
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
+# The server reads stderr as UTF-8, while [Console]::Error writes in the console's code page. AutoFlush keeps a
+# message written just before exit.
+$stderr = New-Object IO.StreamWriter ([Console]::OpenStandardError()), (New-Object Text.UTF8Encoding $false)
+$stderr.AutoFlush = $true
 $path = $argv[0]
 $trusted = @('S-1-5-18', 'S-1-5-32-544')
 $sid = [Security.Principal.SecurityIdentifier]
@@ -24,12 +28,12 @@ try {
   }
   [void][IO.Directory]::CreateDirectory($path, $security)
 } catch {
-  [Console]::Error.Write($_.Exception.Message)
+  $stderr.Write($_.Exception.Message)
   exit 1
 }
 
 function Refuse($why) {
-  [Console]::Error.Write("${path}: $why")
+  $stderr.Write("${path}: $why")
   exit 2
 }
 
@@ -37,7 +41,7 @@ try {
   $item = Get-Item -LiteralPath $path -Force
   $read = [IO.Directory]::GetAccessControl($path, 'Access, Owner')
 } catch {
-  [Console]::Error.Write("${path}: cannot read it back: $($_.Exception.Message)")
+  $stderr.Write("${path}: cannot read it back: $($_.Exception.Message)")
   exit 1
 }
 if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Refuse 'it is a junction or link' }

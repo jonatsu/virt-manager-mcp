@@ -6,6 +6,10 @@
 
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
+# The server reads stderr as UTF-8, while [Console]::Error writes in the console's code page. AutoFlush keeps a
+# message written just before exit.
+$stderr = New-Object IO.StreamWriter ([Console]::OpenStandardError()), (New-Object Text.UTF8Encoding $false)
+$stderr.AutoFlush = $true
 $target, $parent, $replace = $argv
 $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) { exit 10 }
@@ -17,7 +21,7 @@ if (Test-Path -LiteralPath $target) {
   try {
     [void][IO.Directory]::CreateDirectory($parent)
   } catch {
-    [Console]::Error.Write($_.Exception.Message)
+    $stderr.Write($_.Exception.Message)
     exit 13
   }
 }

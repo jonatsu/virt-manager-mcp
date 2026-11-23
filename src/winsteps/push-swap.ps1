@@ -9,6 +9,10 @@
 
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
+# The server reads stderr as UTF-8, while [Console]::Error writes in the console's code page. AutoFlush keeps a
+# message written just before exit.
+$stderr = New-Object IO.StreamWriter ([Console]::OpenStandardError()), (New-Object Text.UTF8Encoding $false)
+$stderr.AutoFlush = $true
 $target, $new, $old, $replace = $argv
 
 # Writes the cause of a failed move to stderr and tells whether the guest refused it because a file is in use or
@@ -16,7 +20,7 @@ $target, $new, $old, $replace = $argv
 function Test-Busy($record) {
   $e = $record.Exception
   while ($e.InnerException) { $e = $e.InnerException }
-  [Console]::Error.WriteLine($e.Message)
+  $stderr.WriteLine($e.Message)
   # Renaming a directory that holds an open file fails with an IOException of ERROR_ACCESS_DENIED (5); 32 is
   # ERROR_SHARING_VIOLATION.
   ($e -is [UnauthorizedAccessException]) -or (($e -is [IO.IOException]) -and (($e.HResult -band 0xFFFF) -in 5, 32))

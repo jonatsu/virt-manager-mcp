@@ -44,10 +44,46 @@
     "tool": "exec",
     "args": {
       "vm": "t-win11",
-      "command": "foreach ($d in (@('vmm-\u00e9t\u00e9', 'vmm-jp') | ForEach-Object { Join-Path (Join-Path $env:SystemRoot 'Temp') $_ }) + (@('vmm-acl', 'vmm-ref') | ForEach-Object { Join-Path $env:PUBLIC $_ })) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath \"\\\\?\\$d\" -Recurse -Force } }\n$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-deep') { if (Test-Path -LiteralPath \"$t\\$d\") { Remove-Item -LiteralPath \"\\\\?\\$t\\$d\" -Recurse -Force } }\n[void](New-Item -ItemType Directory \"$t\\vmm-sentinel\")\nSet-Content -LiteralPath \"$t\\vmm-sentinel\\keep.txt\" -Value keep\n'ready'"
+      "command": "foreach ($d in (@('vmm-\u00e9t\u00e9', 'vmm-\u00e9t\u00e9-file', 'vmm-jp') | ForEach-Object { Join-Path (Join-Path $env:SystemRoot 'Temp') $_ }) + (@('vmm-acl', 'vmm-ref') | ForEach-Object { Join-Path $env:PUBLIC $_ })) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath \"\\\\?\\$d\" -Recurse -Force } }\n$t = Join-Path $env:SystemRoot 'Temp'\nforeach ($d in 'vmm-tree', 'vmm-wintree', 'vmm-sentinel', 'vmm-deep') { if (Test-Path -LiteralPath \"$t\\$d\") { Remove-Item -LiteralPath \"\\\\?\\$t\\$d\" -Recurse -Force } }\n[void](New-Item -ItemType Directory \"$t\\vmm-sentinel\")\nSet-Content -LiteralPath \"$t\\vmm-sentinel\\keep.txt\" -Value keep\n'ready'"
     },
     "expect": {
       "contains": "ready"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "chcp\nNew-Item -ItemType File -Force (Join-Path $env:SystemRoot \"Temp\\vmm-\u00e9t\u00e9-file\") | Out-Null\n\"made\""
+    },
+    "expect": {
+      "contains": [
+        "Active code page: 437",
+        "made"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
+      "guest_path": "C:\\Windows\\Temp\\vmm-\u00e9t\u00e9-file\\sub"
+    },
+    "expect": {
+      "error": true,
+      "contains": "C:\\Windows\\Temp\\vmm-\u00e9t\u00e9-file\" because",
+      "absent": "\ufffd"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Remove-Item -LiteralPath (Join-Path $env:SystemRoot \"Temp\\vmm-\u00e9t\u00e9-file\") -Force\n\"gone\""
+    },
+    "expect": {
+      "contains": "gone"
     }
   },
   {

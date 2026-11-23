@@ -472,7 +472,7 @@ The command that arms the run:
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
 | 1. `exec`: non-ASCII program arguments on Windows | `fix(exec): refuse text the Windows guest agent cannot pass` | Probe on `t-win11`: a non-ASCII `env` entry fails like an argument, with `program` and with `command`, so `env` is refused in both modes. Three new unit tests pass; `win-exec.json` passes on `t-win11` with both refusals and `echo été` through `command` | Self-reviewed |
-| 2. Windows scripts: UTF-8 errors |  |  |  |
+| 2. Windows scripts: UTF-8 errors | `fix(winsteps): write guest error text as UTF-8` | Parse test passes; under code page 437 on `t-win11`, a push below a file named `vmm-été-file` fails naming the path intact; the seven Windows cases pass. Built in [follow-ups run 2](followups-run-2-implementation-plan.md) | Self-reviewed |
 | 3. Probe: panics, devices and event sequences |  |  |  |
 | 4. Config and devices on created VMs |  |  |  |
 | 5. Event log core |  |  |  |

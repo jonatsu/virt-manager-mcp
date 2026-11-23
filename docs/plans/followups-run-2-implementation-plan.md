@@ -73,7 +73,7 @@ commits finds no blocking defect, its findings fixed or recorded.
 
 | Item | Commits | Evidence | Review |
 | -- | -- | -- | -- |
-| 1. UTF-8 error text (24) |  |  |  |
+| 1. UTF-8 error text (24) | `fix(winsteps): write guest error text as UTF-8` | Parse test passes; under code page 437 on `t-win11`, a push below a file named `vmm-été-file` fails with `Cannot create "C:\Windows\Temp\vmm-été-file" because ...` intact; `run-all.sh win-transfer.json win-transfer-caps.json` passed all seven Windows cases | Self-reviewed; the closing review covers it |
 | 2. PowerShell errors as text (15) |  |  |  |
 | 3. Archive access probe (25) |  |  |  |
 | 4. Install from scratch (26) |  |  |  |
@@ -81,7 +81,9 @@ commits finds no blocking defect, its findings fixed or recorded.
 
 ## Judgement calls
 
-None yet.
+- `.gitattributes` pins `src/winsteps/*.ps1` to LF, as it pinned `src/jobs/*.ps1` (`9da8db5`). A global `*.ps1` CRLF
+  rule turned the staged scripts into CRLF, which the editorconfig check refuses, although the server compiles them in
+  with `include_str!`. Undo: revert that commit.
 
 ## Parked questions
 

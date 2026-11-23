@@ -4,11 +4,15 @@
 
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
+# The server reads stderr as UTF-8, while [Console]::Error writes in the console's code page. AutoFlush keeps a
+# message written just before exit.
+$stderr = New-Object IO.StreamWriter ([Console]::OpenStandardError()), (New-Object Text.UTF8Encoding $false)
+$stderr.AutoFlush = $true
 try {
   $file = [IO.FileInfo]::new($argv[0])
   if ($file.Exists) { [Console]::Out.Write($file.Length) } else { [Console]::Out.Write('none') }
   exit 0
 } catch {
-  [Console]::Error.Write($_.Exception.Message)
+  $stderr.Write($_.Exception.Message)
   exit 1
 }

@@ -64,6 +64,9 @@ Each release's section lists what changed for people who run the server and for 
   for first use".
 - `exec` refuses `args` together with `command`, and runs nothing. It used to run the command line and drop the
   arguments silently. `args` goes with `program`.
+- Windows directory pushes and pulls report a guest error that names a non-ASCII path, such as
+  `C:\Windows\Temp\vmm-été`, with the path intact. The guest scripts wrote such errors in the console code page, and
+  the path arrived with replacement characters.
 - `exec` on a Windows guest refuses a `program` path or argument that is not ASCII, and suggests `command`, which
   passes any text. It also refuses an `env` entry that is not ASCII, with either `program` or `command`. The guest
   agent failed such calls with only `failed to parse JSON: invalid utf-8 string`.
