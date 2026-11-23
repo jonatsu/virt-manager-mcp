@@ -18,7 +18,7 @@ use super::{Raw, Source};
 use crate::manage::now_epoch;
 
 /// How many events wait for the worker before new ones are dropped and a gap is recorded instead.
-const QUEUE_CAPACITY: usize = 1024;
+pub const QUEUE_CAPACITY: usize = 1024;
 
 /// What the worker takes from the queue in one go.
 #[derive(Debug, Default)]

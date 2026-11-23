@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use virt::domain::Domain;
 
-use super::ffi::{Batch, Live, Queue, Registration};
+use super::ffi::{Batch, Live, QUEUE_CAPACITY, Queue, Registration};
 use super::{Events, Raw, Source};
 use crate::manage::now_epoch;
 use crate::server::State;
@@ -19,8 +19,9 @@ const POLL: Duration = Duration::from_secs(1);
 
 /// What the worker needs from the rest of the server.
 pub trait Host {
-    /// Whether config lets the server see the VM with this UUID, or `None` when that cannot be told now, such as
-    /// while libvirt is unreachable or the VM is already gone.
+    /// Whether config lets the server see the VM with this UUID, `false` for a VM that is already gone, or `None`
+    /// when that cannot be told now, while libvirt is unreachable. The worker tries such an event again with the next
+    /// batch.
     fn visible(&self, uuid: &str) -> Option<bool>;
     /// Drops what the server keeps for a VM besides its log, such as its console sessions.
     fn forget(&self, uuid: &str);
@@ -63,6 +64,9 @@ pub struct Listener {
     queue: Arc<Queue>,
     events: Arc<Events>,
     state: Mutex<Registered>,
+    /// The UUIDs of the events the worker has taken from the queue and not yet handled. A reconnect can run in the
+    /// middle of a batch, and these events still speak for their VMs, as queued ones do.
+    in_flight: Mutex<Vec<String>>,
 }
 
 impl Listener {
@@ -71,7 +75,15 @@ impl Listener {
             queue,
             events,
             state: Mutex::new(Registered::default()),
+            in_flight: Mutex::new(Vec::new()),
         }
+    }
+
+    fn in_flight(&self) -> MutexGuard<'_, Vec<String>> {
+        // A list of names that no panic can leave half-written.
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn queue(&self) -> &Arc<Queue> {
@@ -163,7 +175,8 @@ impl Listener {
     }
 
     /// Records `during_gap` for each visible VM whose state differs from its last record. A VM with events still
-    /// queued is left to them, so a stop just before the loss is recorded once, by its own event.
+    /// queued, or in the worker's batch and not yet handled, is left to them, so a stop just before the loss is
+    /// recorded once, by its own event.
     fn compare(&self, session: &dyn Session, now: u64) {
         let vms = match session.visible_vms() {
             Ok(vms) => vms,
@@ -172,7 +185,8 @@ impl Listener {
                 return;
             }
         };
-        let pending = self.queue.pending();
+        let mut pending = self.queue.pending();
+        pending.extend(self.in_flight().iter().cloned());
         for vm in vms {
             if !pending.contains(&vm.uuid)
                 && self
@@ -194,6 +208,9 @@ pub struct Worker<H> {
     /// Visibility by UUID, for the name it was checked under.
     cache: HashMap<String, (String, bool)>,
     reconnect_pending: bool,
+    /// Events whose VM could not be looked up yet, oldest first, tried again with the next batch. Past
+    /// `QUEUE_CAPACITY`, the oldest are dropped for a gap.
+    unplaced: Vec<Raw>,
 }
 
 impl<H: Host> Worker<H> {
@@ -203,37 +220,85 @@ impl<H: Host> Worker<H> {
             host,
             cache: HashMap::new(),
             reconnect_pending: false,
+            unplaced: Vec::new(),
         }
     }
 
-    fn visible(&mut self, raw: &Raw) -> bool {
+    /// Whether the event's VM is visible, or `None` when that cannot be told now.
+    fn visible(&mut self, raw: &Raw) -> Option<bool> {
         if let Some((name, visible)) = self.cache.get(&raw.uuid)
             && *name == raw.name
         {
-            return *visible;
+            return Some(*visible);
         }
         // Only a definite answer is cached, so a VM is not hidden for good by a lookup during a reconnect.
-        let Some(visible) = self.host.visible(&raw.uuid) else {
-            return false;
-        };
+        let visible = self.host.visible(&raw.uuid)?;
         self.cache
             .insert(raw.uuid.clone(), (raw.name.clone(), visible));
-        visible
+        Some(visible)
     }
 
-    /// Handles one batch at `now`.
+    /// Handles one batch at `now`, after the events whose VM could not be looked up before.
     pub fn handle(&mut self, batch: Batch, now: u64) {
         let events = self.listener.events().clone();
-        for raw in batch.events {
+        let mut all = std::mem::take(&mut self.unplaced);
+        all.extend(batch.events);
+        *self.listener.in_flight() = all.iter().map(|r| r.uuid.clone()).collect();
+        // After a lookup that could not be answered, the pass makes no more: libvirt is unreachable, and each lookup
+        // would try to reconnect again.
+        let mut lookups_stopped = false;
+        for raw in all {
+            let uuid = raw.uuid.clone();
+            let cached = self
+                .cache
+                .get(&raw.uuid)
+                .is_some_and(|(name, _)| *name == raw.name);
+            // A VM's events keep their order: one behind a waiting event of its VM waits too.
+            if !is_undefined(raw.source)
+                && ((lookups_stopped && !cached) || self.unplaced.iter().any(|r| r.uuid == uuid))
+            {
+                self.unplaced.push(raw);
+                continue;
+            }
             if is_undefined(raw.source) {
                 // The VM is gone, so a lookup cannot say whether it was visible; dropping is harmless either way.
                 self.cache.remove(&raw.uuid);
                 self.host.forget(&raw.uuid);
                 events.drop_vm(&raw.uuid);
-            } else if self.visible(&raw) {
-                let (name, source) = (raw.name.clone(), raw.source);
-                if let Some(seq) = events.append(raw) {
-                    tracing::debug!(vm = %name, ?source, seq, "recorded");
+            } else {
+                match self.visible(&raw) {
+                    Some(true) => {
+                        let (name, source) = (raw.name.clone(), raw.source);
+                        if let Some(seq) = events.append(raw) {
+                            tracing::debug!(vm = %name, ?source, seq, "recorded");
+                        }
+                    }
+                    Some(false) => {}
+                    // Kept for the next batch, in order, and still in flight, so a reconnect leaves the VM to it.
+                    None => {
+                        lookups_stopped = true;
+                        self.unplaced.push(raw);
+                        continue;
+                    }
+                }
+            }
+            let mut in_flight = self.listener.in_flight();
+            if let Some(at) = in_flight.iter().position(|u| *u == uuid) {
+                in_flight.remove(at);
+            }
+        }
+        if self.unplaced.len() > QUEUE_CAPACITY {
+            let over = self.unplaced.len() - QUEUE_CAPACITY;
+            let lost: Vec<Raw> = self.unplaced.drain(..over).collect();
+            let from = lost.iter().map(|r| r.time).min().unwrap_or(now);
+            tracing::warn!(
+                "libvirt stayed unreachable for too many events' lookups; recording a gap"
+            );
+            events.record_gap(from, now);
+            let mut in_flight = self.listener.in_flight();
+            for raw in &lost {
+                if let Some(at) = in_flight.iter().position(|u| *u == raw.uuid) {
+                    in_flight.remove(at);
                 }
             }
         }
@@ -278,10 +343,16 @@ struct ServerHost {
 impl Host for ServerHost {
     fn visible(&self, uuid: &str) -> Option<bool> {
         let hv = &self.state.hv;
-        hv.with_conn(|conn| Ok(Domain::lookup_by_uuid_string(conn, uuid).ok()))
-            .ok()
-            .flatten()
-            .map(|dom| hv.is_visible(&dom))
+        // A VM that no longer exists has no log to add to. Any other failure, such as libvirt going away during the
+        // lookup, leaves the answer open, so nothing is cached and the event is tried again.
+        let dom = hv
+            .with_conn(|conn| match Domain::lookup_by_uuid_string(conn, uuid) {
+                Ok(dom) => Ok(Some(dom)),
+                Err(e) if matches!(e.code(), virt::error::ErrorNumber::NoDomain) => Ok(None),
+                Err(e) => Err(e.into()),
+            })
+            .ok()?;
+        Some(dom.is_some_and(|dom| hv.is_visible(&dom)))
     }
 
     fn forget(&self, uuid: &str) {
@@ -370,11 +441,22 @@ mod tests {
         reconnects: Cell<usize>,
         fail_reconnects: Cell<usize>,
         registers: Cell<usize>,
+        /// Runs once inside the next lookup, as a reconnect through `with_conn` would.
+        on_lookup: RefCell<Option<Box<dyn FnOnce()>>>,
+        /// How many of the next lookups cannot be answered, whatever the VM.
+        unanswered: Cell<usize>,
     }
 
     impl Host for &FakeHost {
         fn visible(&self, uuid: &str) -> Option<bool> {
             self.lookups.set(self.lookups.get() + 1);
+            if self.unanswered.get() > 0 {
+                self.unanswered.set(self.unanswered.get() - 1);
+                return None;
+            }
+            if let Some(hook) = self.on_lookup.borrow_mut().take() {
+                hook();
+            }
             if self.unknown.borrow().contains(&uuid) {
                 return None;
             }
@@ -499,10 +581,102 @@ mod tests {
         let mut w = Worker::new(l.clone(), &host);
         w.handle(batch(vec![started("a", "t-a", 1)]), 1);
         assert!(kinds(l.events(), "a").is_empty());
+        // The VM is still in flight, so a reconnect meanwhile leaves it to its own event.
+        assert_eq!(*l.in_flight(), ["a"]);
         host.unknown.borrow_mut().clear();
-        w.handle(batch(vec![started("a", "t-a", 2)]), 2);
-        assert_eq!(kinds(l.events(), "a").len(), 1);
+        w.handle(Batch::default(), 2);
+        // Kept, tried again with the next batch, and recorded at its own time.
+        let records = l.events().read("a", 0, None).records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].time, 1);
         assert_eq!(host.lookups.get(), 2);
+        assert!(l.in_flight().is_empty());
+    }
+
+    #[test]
+    fn a_vm_whose_event_waits_keeps_its_events_in_order_and_the_pass_stops_looking_up() {
+        let host = FakeHost::default();
+        host.unanswered.set(1);
+        let l = listener();
+        let mut w = Worker::new(l.clone(), &host);
+        let stopped = lifecycle(
+            "a",
+            "t-a",
+            sys::VIR_DOMAIN_EVENT_STOPPED,
+            sys::VIR_DOMAIN_EVENT_STOPPED_DESTROYED,
+            2,
+        );
+        // libvirt could answer again by the time a's second event or b's event came up; they wait all the same.
+        w.handle(
+            batch(vec![
+                started("a", "t-a", 1),
+                stopped,
+                started("b", "t-b", 3),
+            ]),
+            3,
+        );
+        assert_eq!(host.lookups.get(), 1);
+        assert!(kinds(l.events(), "a").is_empty());
+        w.handle(Batch::default(), 4);
+        let a: Vec<Kind> = kinds(l.events(), "a").into_iter().map(|(k, _)| k).collect();
+        assert_eq!(a, [Kind::Started, Kind::Stopped]);
+        assert_eq!(kinds(l.events(), "b").len(), 1);
+        assert!(l.in_flight().is_empty());
+    }
+
+    #[test]
+    fn events_that_cannot_be_placed_for_too_long_give_way_to_a_gap() {
+        let host = FakeHost::default();
+        let l = listener();
+        let mut w = Worker::new(l.clone(), &host);
+        w.handle(batch(vec![started("b", "t-b", 1)]), 1);
+        host.unknown.borrow_mut().push("a");
+        let many = (0..=QUEUE_CAPACITY as u64)
+            .map(|t| started("a", "t-a", 10 + t))
+            .collect();
+        w.handle(batch(many), 2000);
+        let last = l.events().read("b", 0, None).records.pop().unwrap();
+        assert_eq!(last.gap, Some((10, 2000)));
+        assert_eq!(l.in_flight().len(), QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn a_reconnect_in_the_middle_of_a_batch_leaves_its_events_to_record_themselves() {
+        let host = FakeHost::default();
+        let l = listener();
+        let mut w = Worker::new(l.clone(), &host);
+        w.handle(batch(vec![started("a", "t-a", 1)]), 1);
+        // The lookup of b's VM reconnects, and the new connection already shows a shut off.
+        let hook_listener = l.clone();
+        *host.on_lookup.borrow_mut() = Some(Box::new(move || {
+            let new = FakeSession {
+                vms: vec![VmState {
+                    uuid: "a".into(),
+                    name: "t-a".into(),
+                    running: false,
+                }],
+                ..FakeSession::default()
+            };
+            hook_listener.reconnected(&FakeSession::default(), &new, 2, 3);
+        }));
+        w.handle(
+            batch(vec![
+                started("b", "t-b", 2),
+                lifecycle(
+                    "a",
+                    "t-a",
+                    sys::VIR_DOMAIN_EVENT_STOPPED,
+                    sys::VIR_DOMAIN_EVENT_STOPPED_DESTROYED,
+                    2,
+                ),
+            ]),
+            3,
+        );
+        let stops: Vec<_> = kinds(l.events(), "a")
+            .into_iter()
+            .filter(|(kind, _)| *kind == Kind::Stopped)
+            .collect();
+        assert_eq!(stops, [(Kind::Stopped, "destroyed".to_string())]);
     }
 
     #[test]
