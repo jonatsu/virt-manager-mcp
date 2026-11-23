@@ -24,7 +24,7 @@ after the run of follow-ups 17 and 19 to 21.
 | Starting paused | Every start the server makes starts the VM paused, opens the console, then resumes it | Without the pause, firmware and early kernel output can pass before the console opens | resolved |
 | VMs started elsewhere | No automatic capture for a VM started outside the server, or already running when the server starts; `console_open` still works on them | Capturing them would take the console from whoever started the VM | deferred: such a VM has no output from before `console_open`. A capture on the `started` event would fix that, at the cost of taking the console from virt-manager |
 | Output across a stop and start | One previous run per VM, read with `console_read` `run: "previous"` | Agents restart first and investigate second | resolved |
-| Event delivery | `vm_events`, a `wait_for` `event` condition, and a notice in the next reply about events the agent did not cause | An agent that does not know something went wrong will not look | resolved |
+| Event delivery | `vm_events`, a `wait_for` `event` condition, and a notice in the next reply that names the VM, from any client, about events no tool caused | An agent that does not know something went wrong will not look; MCP no longer has sessions to keep apart | resolved |
 | Event source | libvirt's domain event callbacks, registered through `virt-sys` | Polling misses a crash followed by a quick restart. The `virt` 0.4.3 crate has no safe wrapper for them; the console code already calls `virt-sys` | resolved |
 | Identity | Diagnostics are keyed by domain UUID, with the name kept for display, and dropped when the VM is deleted | A VM deleted and recreated under the same name must not inherit the old VM's output and events | resolved |
 | Resource usage | `vm_stats` returns one snapshot, sampled twice about a second apart; no history | The console and tool errors already show most resource failures, and a snapshot confirms the cause | deferred: a spike that is over before the call leaves no trace. Sampling history could be added later without changing the tool |
@@ -147,7 +147,7 @@ run's probe confirms the sequences and fills in any detail this table misses.
 | libvirt event | Kind | Detail | Notice |
 | -- | -- | -- | -- |
 | lifecycle `started` | `started` | `booted`, `restored`, `from_snapshot`, `wakeup` | no |
-| lifecycle `suspended` | `paused` | `paused`, `ioerror`, `watchdog`, `api_error` and the rest | when the detail is `ioerror`, `watchdog` or `api_error` |
+| lifecycle `suspended` | `paused` | `paused`, `from_snapshot`, `ioerror`, `watchdog`, `api_error` and the rest | when the detail is `ioerror`, `watchdog` or `api_error` |
 | lifecycle `resumed` | `resumed` | libvirt's detail | no |
 | lifecycle `shutdown` | `shutdown` | `finished`, `guest`, `host`: the guest finished powering off | no; the `stopped` that follows carries it |
 | lifecycle `stopped`, except detail `crashed` | `stopped` | `shutdown`, `destroyed`, `failed`, `saved`, `from_snapshot` | yes |
@@ -156,7 +156,7 @@ run's probe confirms the sequences and fills in any detail this table misses.
 | lifecycle `pmsuspended` | `pmsuspended` | libvirt's detail | no |
 | lifecycle `defined` | none |  |  |
 | lifecycle `undefined` | none: the server drops the VM's diagnostics |  |  |
-| reboot | `rebooted` |  | yes |
+| reboot | `rebooted`; libvirt sends a guest reboot twice, so a second within 1 s is the same record |  | yes |
 | watchdog | `watchdog` | the watchdog's action | yes |
 | agent lifecycle | `agent_connected` or `agent_disconnected` | libvirt's reason | no |
 | lost connection | `gap` | when events may be missing, from and to | yes |
@@ -176,10 +176,10 @@ the deregistration returns.
 
 #### Who caused an event
 
-Before a tool changes a VM's power state, it records an expectation: the VM, the MCP session, the tool, and the set of
-kinds the action produces, each to be used once. The window opens before the libvirt call and closes 5 s after the
-tool returns. The worker maps a record's kind first, so an outside crash can never use up a `stop_vm` expectation.
-A matching record takes the tool's name as its `cause`, with the session. Destroys by the expiry sweep take the cause
+Before a tool changes a VM's power state, it records an expectation: the VM, the tool, and the set of kinds the
+action produces, each to be used once. The window opens before the libvirt call and closes 5 s after the tool returns.
+The worker maps a record's kind first, so an outside crash can never use up a `stop_vm` expectation. A matching record
+takes the tool's name as its `cause`, whichever client made the call. Destroys by the expiry sweep take the cause
 `expiry`. Every other record has the cause `outside`.
 
 A `stop_vm` that gives up waiting while the guest powers off later produces an outside `stopped`; the tool description
@@ -189,15 +189,17 @@ reboot.
 #### The notice in replies
 
 After any tool call that names a VM, the server checks that VM's log for records with a notice in the table above that
-this MCP session has not seen and did not cause. A record caused by another session counts as not caused by this one.
-If there are any, the reply gains a separate trailing text block, such as
+no reply has announced yet and that no tool caused; only `outside` and `expiry` records raise notices. If there are
+any, the reply gains a separate trailing text block, such as
 `VM 't-deb' crashed (panicked) at 14:02:11Z; see vm_events since 41`, so a reply whose first block is JSON stays
 parseable. The notice never replaces a tool's result or error.
 
-Each MCP session keeps a seen-cursor per VM. stdio mode has one session. HTTP mode has one per client, so one client
-never consumes another's notice. Reading and advancing a cursor happen under one lock, and a cursor advances only over
-records actually returned: by a notice, by `vm_events` without a `kinds` filter, or by a `wait_for` event match. A
-`vm_events` call filtered by `kinds` advances nothing, so a crash it did not return is still announced.
+Each VM's log has one seen-cursor in the server process, because MCP protocol `2026-07-28` removes sessions and tells
+servers not to treat a stdio process or a connection as one ([research](../research/2026-11-15-mcp-sessions.md)). The
+first reply, from any client, that names the VM carries the notice; with several agents on one server, `vm_events`
+lists every record for the others. Reading and advancing the cursor happen under one lock, and the cursor advances
+only over records actually returned: by a notice, by `vm_events` without a `kinds` filter, or by a `wait_for` event
+match. A `vm_events` call filtered by `kinds` advances nothing, so a crash it did not return is still announced.
 
 A crash notice under `preserve` tells the agent that the VM holds its memory until it is stopped with `force: true`.
 

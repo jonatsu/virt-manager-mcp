@@ -5,6 +5,7 @@ mod config;
 mod console;
 mod dirpull;
 mod display;
+mod events;
 mod fsops;
 mod guestpath;
 mod hypervisor;

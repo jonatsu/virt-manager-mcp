@@ -520,6 +520,11 @@ Judgement calls:
   redefining it from `tests/testbed/t-win11.xml`, because the file holds no UUID and redefining would mean undefining
   the VM with its NVRAM and TPM state. The file carries the same two changes. Undo: remove both from the file and run
   `virt-xml t-win11 --remove-device --panic all` and `--edit --events on_crash=destroy`.
+- Unit 5: a second `reboot` event within 1 s of the first makes no record, because the probe saw libvirt send each
+  guest reboot twice, 6 ms apart, and a notice per event would announce one reboot twice. Undo: drop the
+  `REBOOT_REPEAT_SECS` check in `Events::append`.
+- Unit 5: amendment 1's design edits (one server-wide cursor; expectations without a session) land with this unit,
+  which holds the cursor; units 11 and 12 build on them.
 - Unit 3: `wininit` is protected even from `SYSTEM`, so the Windows stop error came from a process that marked itself
   critical with `RtlSetProcessIsCritical` and exited. The result is the same kind of stop error.
 
@@ -550,7 +555,7 @@ The command that arms the run:
 | 2. Windows scripts: UTF-8 errors | `fix(winsteps): write guest error text as UTF-8` | Parse test passes; under code page 437 on `t-win11`, a push below a file named `vmm-été-file` fails naming the path intact; the seven Windows cases pass. Built in [follow-ups run 2](followups-run-2-implementation-plan.md) | Self-reviewed |
 | 3. Probe: panics, devices and event sequences | `docs(research): record the crash and event probe for outcome 4` | [Probe note](../research/2026-11-23-crash-and-events-probe.md). Debian loads pvpanic; both `isa` and `hyperv` raise `Crashed Panicked`; `preserve` leaves `crashed (panicked)` with the vCPUs stopped, and `destroy` adds `Stopped Crashed`; a console opened during a paused start holds the boot from GRUB on. `t-win11` booted after the crash and the clone was deleted. None of the stop outcomes held; design amendment 7 records the missing stop screen | Self-reviewed |
 | 4. Config and devices on created VMs | `feat(manage): give created VMs a panic device, balloon stats and a crash action` | Unit tests: `on_crash` defaults to `preserve`, refuses `restart` and `coredump-destroy` naming both values, and `max_events = 0` is refused; the XML holds `<on_crash>`, the panic model per OS and `<stats period='5'/>` for both OSes, both `secure_boot` values and both actions; a reset of a VM without them keeps it that way. `virsh dumpxml` of a VM from `create_vm_from_template` shows all three; `firmware-secure-boot.json` passes | Self-reviewed |
-| 5. Event log core |  |  |  |
+| 5. Event log core | `feat(events): add the per-VM event log` | `src/events.rs`, 14 unit tests: every row of the probe's kind table; the crash stop merged into its crash and standing alone; the `max_events` bound and dropped count; an outside crash leaving a `stop_vm` expectation unused; an expectation claiming each kind once and lapsing 5 s after the tool returns; the `expiry` cause and its notice; one notice per record and none for a tool's record; a filtered read advancing nothing; a wait match advancing the cursor; a repeated reboot as one record; two threads taking 200 notices with each once; a gap in every log; a dropped or undefined VM keeping nothing; the UTC formatter | Unit 12's review |
 | 6. Console sessions by UUID, with a previous run |  |  |  |
 | 7. Shared start operation |  |  |  |
 | 8. Snapshot revert with a capture |  |  |  |
