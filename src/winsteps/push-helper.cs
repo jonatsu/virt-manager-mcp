@@ -87,7 +87,7 @@ public static class VmmPush
 
     const int StatusNotFound = unchecked((int)0xC0000034), StatusPathNotFound = unchecked((int)0xC000003A),
       StatusCollision = unchecked((int)0xC0000035), StatusAccessDenied = unchecked((int)0xC0000022),
-      StatusSharingViolation = unchecked((int)0xC0000043);
+      StatusSharingViolation = unchecked((int)0xC0000043), StatusNotADirectory = unchecked((int)0xC0000103);
 
     // Only SYSTEM and Administrators, inherited by everything inside, as push-mkdir.ps1 sets.
     const string Protected = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
@@ -494,6 +494,11 @@ public static class VmmPush
             }
             catch (Win32Exception e)
             {
+                var nt = e as NtFailure;
+                if (nt != null && nt.Status == StatusNotADirectory)
+                {
+                    throw new Failure(NoParents, reached + " exists and is not a directory");
+                }
                 throw new Failure(NoParents, "cannot open or create " + reached + ": " + e.Message);
             }
             if ((info[0] & AttrReparsePoint) != 0 && (info[1] & NameSurrogate) != 0)
@@ -504,10 +509,15 @@ public static class VmmPush
             parent = next;
         }
 
-        // The staged tree, in the parent under its own name, or copied into a protected directory there.
-        SafeFileHandle staged;
+        // The staged tree, in the parent under its own name, or copied into a protected directory there. The staging
+        // root stays open, so a failure before the inheritance can move the tree back for a retry.
+        SafeFileHandle staged, home;
+        string stagingName = Path.GetFileName(staging);
         try
         {
+            home = Open(null, @"\??\" + Path.GetDirectoryName(staging), ListDir | AddSubdir, ShareReadWrite, 1,
+              DispOpen, true, IntPtr.Zero);
+            held.Add(home);
             staged = Open(null, @"\??\" + staging, Delete | WriteDac | ReadControl | ListDir, ShareReadWrite, 1,
               DispOpen, true, IntPtr.Zero);
             held.Add(staged);
@@ -565,6 +575,14 @@ public static class VmmPush
             }
         }
         string freshPath = Path.Combine(reached, freshName);
+        // Undoes the new tree after a failure before its inheritance: a moved tree goes back to the staging root, still
+        // protected, so a retry finds it there; a copy is deleted. Returns nothing, or the end of the failure's message
+        // saying where the tree stays when that fails.
+        Func<string> abandon = () =>
+        {
+            if (sameVolume && PutBack(fresh, home, stagingName)) return "";
+            return Discard(fresh) ? "" : "; undoing the new tree failed too, so it stays at " + freshPath;
+        };
 
         // An existing target moves aside.
         SafeFileHandle old = null;
@@ -578,13 +596,13 @@ public static class VmmPush
             if (e.Status != StatusNotFound && e.Status != StatusPathNotFound)
             {
                 throw new Failure(e.IsBusy ? Busy : OldStuck, "cannot open " + target + ": " + e.Message +
-                  Abandon(fresh, freshPath));
+                  abandon());
             }
         }
         string oldPath = Path.Combine(reached, oldName);
         if (old != null)
         {
-            if (!replace) throw new Failure(Exists, target + " exists" + Abandon(fresh, freshPath));
+            if (!replace) throw new Failure(Exists, target + " exists" + abandon());
             uint[] info;
             try
             {
@@ -592,12 +610,12 @@ public static class VmmPush
             }
             catch (Win32Exception e)
             {
-                throw new Failure(OldStuck, "cannot read " + target + ": " + e.Message + Abandon(fresh, freshPath));
+                throw new Failure(OldStuck, "cannot read " + target + ": " + e.Message + abandon());
             }
             if ((info[0] & AttrDirectory) == 0 || (info[0] & AttrReparsePoint) != 0)
             {
                 throw new Failure(NotADirectory,
-                  target + " is not a directory, or is a link" + Abandon(fresh, freshPath));
+                  target + " is not a directory, or is a link" + abandon());
             }
             try
             {
@@ -606,7 +624,7 @@ public static class VmmPush
             catch (NtFailure e)
             {
                 throw new Failure(e.IsBusy ? Busy : OldStuck, "cannot move " + target + " aside: " + e.Message +
-                  Abandon(fresh, freshPath));
+                  abandon());
             }
         }
 
@@ -627,7 +645,7 @@ public static class VmmPush
                   "), nor the old tree back; the old tree is at " + oldPath + " and the new one at " + freshPath);
             }
             throw new Failure(code,
-              "cannot move the new tree into " + target + ": " + e.Message + Abandon(fresh, freshPath));
+              "cannot move the new tree into " + target + ": " + e.Message + abandon());
         }
 
         // The new tree gets its parent's access list; one failure is retried.
@@ -686,18 +704,12 @@ public static class VmmPush
         }
     }
 
-    // Deletes the new tree after a failure before it took the target's name. Returns nothing, or the end of the
-    // failure's message saying where the tree stays when deleting it fails.
-    static string Abandon(SafeFileHandle fresh, string freshPath)
-    {
-        return Discard(fresh) ? "" : "; deleting the new tree failed too, so it stays at " + freshPath;
-    }
-
-    static bool PutBack(SafeFileHandle old, SafeFileHandle parent, string name)
+    // Renames the entry open as `handle` to `name` in `parent`, and tells whether that worked.
+    static bool PutBack(SafeFileHandle handle, SafeFileHandle parent, string name)
     {
         try
         {
-            Rename(old, parent, name);
+            Rename(handle, parent, name);
             return true;
         }
         catch (Win32Exception)

@@ -779,26 +779,50 @@ impl Target {
         })
     }
 
-    /// A temporary name beside the target, starting with `.vmm-`.
+    /// A temporary name, starting with `.vmm-`.
+    fn name(&self, suffix: &str) -> String {
+        format!(".vmm-{}.{suffix}", self.id)
+    }
+
+    /// A temporary name beside the target.
     fn temp(&self, suffix: &str) -> String {
         let base = self.parent.trim_end_matches(self.separator);
-        format!("{base}{}.vmm-{}.{suffix}", self.separator, self.id)
+        format!("{base}{}{}", self.separator, self.name(suffix))
     }
 
-    /// The directory a Windows push writes its archive into, which `push-mkdir.ps1` makes writable only by `SYSTEM`
-    /// and `Administrators`, so no other guest user can rewrite the archive before `tar.exe` reads it. A Linux push
-    /// has none.
-    fn archive_dir(&self) -> Option<String> {
-        (self.os == GuestOs::Windows).then(|| self.temp("a"))
-    }
-
-    /// Where the push writes its archive.
-    fn archive(&self) -> String {
-        match self.archive_dir() {
-            Some(dir) => format!("{dir}{}push.tar", self.separator),
-            None => self.temp("tar"),
+    /// Where the push writes its archive and unpacks it. A Linux push does both beside the target. A Windows push
+    /// does both in `root`, the guest's `%SystemRoot%\Temp`, where other users cannot rename or delete the push's
+    /// entries, in directories that `push-mkdir.ps1` makes writable only by `SYSTEM` and `Administrators`.
+    fn staging(&self, root: &str) -> Staging {
+        match self.os {
+            GuestOs::Linux => Staging {
+                dir: None,
+                archive: self.temp("tar"),
+                helper: None,
+                unpacked: self.temp("d"),
+            },
+            GuestOs::Windows => {
+                let base = root.trim_end_matches('\\');
+                let dir = format!(r"{base}\{}", self.name("a"));
+                Staging {
+                    archive: format!(r"{dir}\push.tar"),
+                    helper: Some(format!(r"{dir}\helper.cs")),
+                    dir: Some(dir),
+                    unpacked: format!(r"{base}\{}", self.name("d")),
+                }
+            }
         }
     }
+}
+
+/// Where a push writes its archive and unpacks it; `Target::staging` explains where that is.
+struct Staging {
+    /// The protected directory that holds a Windows push's archive and helper.
+    dir: Option<String>,
+    archive: String,
+    /// The push helper's source, which a Windows push writes for its `Place` step.
+    helper: Option<String>,
+    unpacked: String,
 }
 
 /// One step a push runs in the guest.
@@ -812,10 +836,11 @@ pub enum Step {
     /// `tar.exe` runs without a shell.
     MakeDir,
     Unpack,
-    /// Giving the unpacked tree back the access list its parent passes on, Windows only: `MakeDir` protects the
-    /// staging directory so that no other guest user can plant a junction in it while `tar.exe` unpacks.
-    Inherit,
+    /// Moving the unpacked tree into the target, the old tree aside first, on Linux.
     Swap,
+    /// Everything a Windows push does in the target's parent, in one guest call: the push helper creates missing
+    /// parents, moves or copies the tree in, gives it its parent's access list, and deletes the old tree.
+    Place,
     Cleanup,
 }
 
@@ -873,8 +898,8 @@ impl Steps {
                     }
                     _ => bail!("unpacking needs the archive, the directory and tar.exe's path"),
                 },
-                Step::Inherit => winsteps::script(winsteps::PUSH_INHERIT, args),
-                Step::Swap => winsteps::script(winsteps::PUSH_SWAP, args),
+                Step::Place => winsteps::script(winsteps::PUSH_PLACE, args),
+                Step::Swap => bail!("a Windows push moves its tree in with the Place step"),
                 Step::Cleanup => winsteps::script(winsteps::PUSH_CLEANUP, args),
                 #[cfg(test)]
                 Step::Write => bail!("writing the archive is no script step"),
@@ -891,7 +916,7 @@ fn linux_script(step: Step) -> Result<&'static str> {
         Step::Swap => SWAP,
         Step::Cleanup => CLEANUP,
         Step::MakeDir => bail!("a Linux push creates its directory in the Unpack step"),
-        Step::Inherit => bail!("a Linux push creates its directory with its final mode"),
+        Step::Place => bail!("a Linux push moves its tree in with the Swap step"),
         #[cfg(test)]
         Step::Write => bail!("writing the archive is no script step"),
     })
@@ -933,8 +958,8 @@ pub struct OnGuest<'a> {
 impl Guest for OnGuest<'_> {
     fn run(&self, step: Step, args: &[&str]) -> Result<Ran> {
         let timeout = match step {
-            // Restoring inheritance makes Windows rewrite the access list of every entry in the tree.
-            Step::Unpack | Step::Inherit | Step::Cleanup => LONG_TIMEOUT,
+            // The Place step may copy the tree to another volume, and sets the access list of every entry in it.
+            Step::Unpack | Step::Place | Step::Cleanup => LONG_TIMEOUT,
             _ => STEP_TIMEOUT,
         };
         let out = self
@@ -996,12 +1021,15 @@ else
 fi
 exit 0"#;
 
-/// The Windows swap's exit status for a move the guest refused because a file is in use or access was denied, after
-/// which nothing has changed.
-const SWAP_BUSY: i64 = 20;
+/// The exit status of a Windows `Place` step whose move the guest refused because a file is in use or access was
+/// denied, after which nothing has changed.
+const PLACE_BUSY: i64 = 20;
 
-/// How long a push waits before it runs a refused Windows swap once more.
-const SWAP_RETRY: Duration = Duration::from_secs(1);
+/// The exit status of a Windows `Place` step that put the new tree in place but could not delete the old one.
+const PLACE_OLD_LEFT: i64 = 30;
+
+/// How long a push waits before it runs a refused Windows `Place` step once more.
+const PLACE_RETRY: Duration = Duration::from_secs(1);
 
 /// Deletes the push's own `.vmm-` entries named in its arguments. `rm` replaces the shell, so stopping the step
 /// after a timeout stops `rm` too.
@@ -1019,11 +1047,11 @@ pub fn push(
     push_retrying(guest, target, replace, bytes, archive, CLEANUP_RETRY)
 }
 
-/// How long a Windows push retries its cleanup after a timed-out unpack or inherit step, while the stopped process may
-/// still hold files.
+/// How long a Windows push retries its cleanup after a timed-out unpack or `Place` step, while the stopped process
+/// may still hold files.
 const CLEANUP_RETRY: Duration = Duration::from_secs(10);
 
-/// `push`, retrying the cleanup after a timed-out Windows unpack for up to `cleanup_retry`.
+/// `push`, retrying the cleanup after a timed-out Windows unpack or `Place` step for up to `cleanup_retry`.
 fn push_retrying(
     guest: &dyn Guest,
     target: &Target,
@@ -1048,36 +1076,59 @@ fn push_retrying(
             "{} exists in the guest and is not a directory; replace replaces only a directory",
             target.path
         ),
+        Some(15) if target.os == GuestOs::Windows => bail!(
+            "the guest's PowerShell runs in a restricted language mode, such as Constrained Language Mode, which \
+             cannot load the helper that copy_dir_to_vm runs in a Windows guest"
+        ),
         _ => bail!(
             "cannot create the parent directories of {} in the guest: {}",
             target.path,
             probe.describe()
         ),
     }
-    let (packed, unpacked, old) = (target.archive(), target.temp("d"), target.temp("old"));
-    let archive_dir = target.archive_dir();
-    // The Windows probe prints the path of `tar.exe`; the Linux steps find `tar` on the guest's `PATH`.
-    let tar = probe.stdout.lines().last().unwrap_or_default();
-    let result = send_and_swap(
-        guest,
-        target,
-        flag,
-        bytes,
-        archive,
-        archive_dir.as_deref(),
-        [&packed, &unpacked, &old, tar],
-    );
-    // The old tree goes only once the new one is in place; after a failed swap it may be all that is left of it.
-    let mut leftovers = vec![archive_dir.as_deref().unwrap_or(&packed), unpacked.as_str()];
-    if result.is_ok() {
+    // The Windows probe prints the staging root, then the path of `tar.exe`; the Linux steps find `tar` on the
+    // guest's `PATH` and stage beside the target.
+    let mut lines = probe.stdout.lines().map(str::trim);
+    let (root, tar) = match target.os {
+        GuestOs::Linux => ("", ""),
+        GuestOs::Windows => match (lines.next(), lines.next()) {
+            (Some(root), Some(tar)) if !root.is_empty() && !tar.is_empty() => (root, tar),
+            _ => bail!(
+                "the guest's check before the push printed no staging directory and tar.exe path: {}",
+                probe.describe()
+            ),
+        },
+    };
+    let staging = target.staging(root);
+    let old = target.temp("old");
+    let result = send_and_place(guest, target, flag, bytes, archive, &staging, &old, tar);
+    // A Windows push leaves nothing of its own in the target's parent once its `Place` step ends. On Linux the old
+    // tree goes only once the new one is in place; after a failed swap it may be all that is left of it.
+    let mut leftovers = vec![
+        staging.dir.as_deref().unwrap_or(&staging.archive),
+        staging.unpacked.as_str(),
+    ];
+    if target.os == GuestOs::Linux && result.is_ok() {
         leftovers.push(&old);
     }
     let timed_out = match &result {
         Err(e) if target.os == GuestOs::Windows => e
             .downcast_ref::<StepTimedOut>()
-            .filter(|t| matches!(t.step, Step::Unpack | Step::Inherit)),
+            .filter(|t| matches!(t.step, Step::Unpack | Step::Place)),
         _ => None,
     };
+    // A `Place` step that ran out of time may have stopped anywhere, so the reply names what it may have left.
+    let place_left = timed_out.filter(|t| t.step == Step::Place).map(|_| {
+        format!(
+            "the Place step may have left {} as it was, or the new tree there, or {}, {} or {} in {}; check them \
+             before pushing again",
+            target.path,
+            target.name("d"),
+            target.name("c"),
+            target.name("old"),
+            target.parent
+        )
+    });
     let retry_for = timed_out.map_or(Duration::ZERO, |_| cleanup_retry);
     let failure = clean_up(guest, &leftovers, retry_for).map(|failure| match timed_out {
         Some(t) if !t.stopped => format!("{failure}; the {:?} step may still be running", t.step),
@@ -1089,10 +1140,18 @@ fn push_retrying(
             leftovers.join(", ")
         )
     };
+    let result = match place_left {
+        Some(note) => result.map_err(|e| e.context(note)),
+        None => result,
+    };
     match (result, failure) {
         (Ok(summary), None) => Ok(summary),
         (Ok(mut summary), Some(failure)) => {
-            summary.note = Some(format!("the new tree is in place, but {}", left(failure)));
+            let cleanup = format!("the new tree is in place, but {}", left(failure));
+            summary.note = Some(match summary.note.take() {
+                Some(note) => format!("{note}; {cleanup}"),
+                None => cleanup,
+            });
             Ok(summary)
         }
         (Err(e), None) => Err(e),
@@ -1135,17 +1194,27 @@ fn make_private_dir(guest: &dyn Guest, dir: &str, what: &str) -> Result<()> {
     }
 }
 
-fn send_and_swap(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one of the push's own names, which push_retrying works out once"
+)]
+fn send_and_place(
     guest: &dyn Guest,
     target: &Target,
     flag: &str,
     bytes: &AtomicU64,
     archive: impl FnOnce(&mut dyn Write) -> Result<Summary> + Send,
-    archive_dir: Option<&str>,
-    [packed, unpacked, old, tar]: [&str; 4],
+    staging: &Staging,
+    old: &str,
+    tar: &str,
 ) -> Result<Summary> {
-    if let Some(dir) = archive_dir {
+    if let Some(dir) = &staging.dir {
         make_private_dir(guest, dir, "archive directory")?;
+    }
+    if let Some(helper) = &staging.helper {
+        guest
+            .write(helper, &mut winsteps::PUSH_HELPER.as_bytes())
+            .context("sending the push helper to the guest")?;
     }
     let (reader, writer) = io::pipe()?;
     let summary = std::thread::scope(|s| -> Result<Summary> {
@@ -1157,7 +1226,7 @@ fn send_and_swap(
             inner: reader,
             count: bytes,
         };
-        let sent = guest.write(packed, &mut counted);
+        let sent = guest.write(&staging.archive, &mut counted);
         // Without a reader, a builder still writing fails at once instead of blocking.
         drop(counted);
         let built = builder
@@ -1167,6 +1236,7 @@ fn send_and_swap(
         sent.context("sending the archive to the guest")?;
         built.context("building the archive")
     })?;
+    let (packed, unpacked) = (staging.archive.as_str(), staging.unpacked.as_str());
     let ran = match target.os {
         GuestOs::Linux => guest.run(Step::Unpack, &[packed, unpacked])?,
         GuestOs::Windows => {
@@ -1180,29 +1250,22 @@ fn send_and_swap(
             ran.describe()
         );
     }
-    if target.os == GuestOs::Windows {
-        let mut inherited = guest.run(Step::Inherit, &[unpacked])?;
-        if inherited.code != Some(0) {
-            // One run in the test bed ended with exit status 1 and no output, for no reason found; a second run
-            // repeats an idempotent change.
-            std::thread::sleep(SWAP_RETRY);
-            inherited = guest.run(Step::Inherit, &[unpacked])?;
-        }
-        if inherited.code != Some(0) {
-            bail!(
-                "restoring the inherited access list of the unpacked tree in the guest failed twice, so nothing was \
-                 replaced: {}",
-                inherited.describe()
-            );
-        }
+    match (target.os, &staging.helper) {
+        (GuestOs::Windows, Some(helper)) => place(guest, target, flag, helper, unpacked, summary),
+        _ => swap(guest, target, flag, unpacked, old, summary),
     }
-    let swap = [target.path.as_str(), unpacked, old, flag];
-    let mut ran = guest.run(Step::Swap, &swap)?;
-    if ran.code == Some(SWAP_BUSY) {
-        // A virus scanner may still hold a file it is checking in the freshly unpacked tree.
-        std::thread::sleep(SWAP_RETRY);
-        ran = guest.run(Step::Swap, &swap)?;
-    }
+}
+
+/// Moves a Linux push's unpacked tree into its target.
+fn swap(
+    guest: &dyn Guest,
+    target: &Target,
+    flag: &str,
+    unpacked: &str,
+    old: &str,
+    summary: Summary,
+) -> Result<Summary> {
+    let ran = guest.run(Step::Swap, &[target.path.as_str(), unpacked, old, flag])?;
     match ran.code {
         Some(0) => Ok(summary),
         Some(11) => bail!(
@@ -1223,17 +1286,71 @@ fn send_and_swap(
              tree is at {old}",
             target.path
         ),
-        Some(SWAP_BUSY) => bail!(
-            "the guest refused to move the tree into {}, usually because a file in it is open; the old tree is \
-             unchanged: {}",
-            target.path,
-            ran.describe()
-        ),
         _ => bail!(
             "could not move the new tree into {}; the old tree is unchanged: {}",
             target.path,
             ran.describe()
         ),
+    }
+}
+
+/// Runs a Windows push's `Place` step, once more when the guest refused a move because a file is in use.
+fn place(
+    guest: &dyn Guest,
+    target: &Target,
+    flag: &str,
+    helper: &str,
+    unpacked: &str,
+    mut summary: Summary,
+) -> Result<Summary> {
+    let (copy, old) = (target.name("c"), target.name("old"));
+    let args = [
+        helper,
+        target.path.as_str(),
+        unpacked,
+        copy.as_str(),
+        old.as_str(),
+        flag,
+    ];
+    let mut ran = guest.run(Step::Place, &args)?;
+    if ran.code == Some(PLACE_BUSY) {
+        // A virus scanner may still hold a file it is checking in the freshly unpacked tree.
+        std::thread::sleep(PLACE_RETRY);
+        ran = guest.run(Step::Place, &args)?;
+    }
+    let path = &target.path;
+    let why = ran.describe();
+    match ran.code {
+        Some(0) => Ok(summary),
+        Some(PLACE_OLD_LEFT) => {
+            summary.note = Some(why);
+            Ok(summary)
+        }
+        Some(11) => bail!(
+            "{path} exists in the guest, or appeared during the push; nothing was replaced: {why}"
+        ),
+        Some(12) => bail!(
+            "{path} became something other than a directory during the push; nothing was replaced: {why}"
+        ),
+        Some(13) => bail!("cannot create the parent directories of {path} in the guest: {why}"),
+        Some(18) => bail!("could not move the new tree into {path}, nor the old tree back: {why}"),
+        Some(PLACE_BUSY) => bail!(
+            "the guest refused to move the tree into {path}, usually because a file in it is open; the old tree is \
+             unchanged: {why}"
+        ),
+        Some(21) => bail!(
+            "the push stopped, because the path to {path} passes through a junction, a symbolic link or a mount \
+             point, which could send it elsewhere; push to a path without one: {why}"
+        ),
+        Some(22) => bail!(
+            "giving the new tree the access list of its parent failed, so nothing was replaced: {why}"
+        ),
+        Some(23) => bail!("the guest could not compile the push helper: {why}"),
+        Some(24) => bail!("the guest cannot hold this path: {why}"),
+        Some(25) => {
+            bail!("copying the tree to the volume of {path} failed, so nothing was replaced: {why}")
+        }
+        _ => bail!("could not move the new tree into {path}; the old tree is unchanged: {why}"),
     }
 }
 
@@ -1683,6 +1800,24 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_push_stages_in_the_guests_temp_and_a_linux_push_beside_the_target() {
+        let t = Target::parse(GuestOs::Windows, r"C:\work\app", true).unwrap();
+        let s = t.staging(r"C:\Windows\Temp\");
+        let a = format!(r"C:\Windows\Temp\{}", t.name("a"));
+        assert_eq!(s.dir.as_deref(), Some(a.as_str()));
+        assert_eq!(s.archive, format!(r"{a}\push.tar"));
+        assert_eq!(s.helper, Some(format!(r"{a}\helper.cs")));
+        assert_eq!(s.unpacked, format!(r"C:\Windows\Temp\{}", t.name("d")));
+
+        let t = Target::parse(GuestOs::Linux, "/srv/app", true).unwrap();
+        let s = t.staging("");
+        assert_eq!((s.dir, s.helper), (None, None));
+        assert_eq!(s.archive, t.temp("tar"));
+        assert_eq!(s.unpacked, t.temp("d"));
+        assert!(s.unpacked.starts_with("/srv/.vmm-"), "{}", s.unpacked);
+    }
+
+    #[test]
     fn each_step_runs_its_own_script_for_the_guest_os() {
         let spec = Steps(GuestOs::Linux)
             .spec(Step::Cleanup, &["/a/.vmm-x.tar"])
@@ -1690,21 +1825,21 @@ mod tests {
         assert_eq!(spec.path, "/bin/sh");
         assert_eq!(spec.args.last().map(String::as_str), Some("/a/.vmm-x.tar"));
         assert!(Steps(GuestOs::Linux).spec(Step::MakeDir, &["/a"]).is_err());
-        assert!(Steps(GuestOs::Linux).spec(Step::Inherit, &["/a"]).is_err());
+        assert!(Steps(GuestOs::Linux).spec(Step::Place, &["/a"]).is_err());
 
         let windows = Steps(GuestOs::Windows);
         let args = [r"C:\it's\x", r"C:\y"];
         for (step, script) in [
             (Step::Probe, winsteps::PUSH_PROBE),
             (Step::MakeDir, winsteps::PUSH_MKDIR),
-            (Step::Inherit, winsteps::PUSH_INHERIT),
-            (Step::Swap, winsteps::PUSH_SWAP),
+            (Step::Place, winsteps::PUSH_PLACE),
             (Step::Cleanup, winsteps::PUSH_CLEANUP),
         ] {
             let spec = windows.spec(step, &args).unwrap();
             assert_eq!(spec.path, "powershell.exe", "{step:?}");
             assert_eq!(spec.args, winsteps::script(script, &args).args, "{step:?}");
         }
+        assert!(windows.spec(Step::Swap, &args).is_err());
         assert!(windows.spec(Step::Unpack, &[r"C:\a.tar", r"C:\d"]).is_err());
         let spec = windows
             .spec(Step::Unpack, &[r"C:\a.tar", r"C:\d", WIN_TAR])
@@ -1715,26 +1850,27 @@ mod tests {
 
     const WIN_TAR: &str = r"C:\Windows\System32\tar.exe";
 
+    /// What the scripted Windows guest's probe prints: the staging root, then `tar.exe`.
+    const WIN_PROBE_OUT: &str = "C:\\Windows\\Temp\nC:\\Windows\\System32\\tar.exe";
+
     /// A Windows guest that records each step with its arguments and answers with the exit codes it is given: `probe`,
-    /// `make_dir` and `unpack` once each, and `swaps` one per swap run, 0 once they run out.
+    /// `make_dir` and `unpack` once each, and `places` one per `Place` run, 0 once they run out.
     struct WindowsGuest {
         calls: RefCell<Vec<String>>,
         probe: i64,
+        probe_out: &'static str,
         make_dir: i64,
         /// Gives `make_dir` only to the directory whose name ends with this, and 0 to the other.
         make_dir_only: Option<&'static str>,
         unpack: i64,
-        inherit: i64,
-        swaps: RefCell<Vec<i64>>,
+        places: RefCell<Vec<i64>>,
         cleanup: i64,
         /// Makes the unpack time out; the value says whether the agent stopped `tar.exe`.
         unpack_times_out: Option<bool>,
+        /// Makes the `Place` step time out; the value says whether the agent stopped it.
+        place_times_out: Option<bool>,
         /// Fails the cleanup this many times first, while `cleanup` is 0.
         failed_cleanups: Cell<u32>,
-        /// Fails the inherit step this many times first, while `inherit` is 0.
-        failed_inherits: Cell<u32>,
-        /// Makes the inherit step time out; the value says whether the agent stopped it.
-        inherit_times_out: Option<bool>,
     }
 
     impl WindowsGuest {
@@ -1742,16 +1878,15 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 probe: 0,
+                probe_out: WIN_PROBE_OUT,
                 make_dir: 0,
                 make_dir_only: None,
                 unpack: 0,
-                inherit: 0,
-                swaps: RefCell::new(Vec::new()),
+                places: RefCell::new(Vec::new()),
                 cleanup: 0,
                 unpack_times_out: None,
+                place_times_out: None,
                 failed_cleanups: Cell::new(0),
-                failed_inherits: Cell::new(0),
-                inherit_times_out: None,
             }
         }
 
@@ -1772,6 +1907,10 @@ mod tests {
                     out
                 })
                 .collect()
+        }
+
+        fn count(&self, step: &str) -> usize {
+            self.calls().iter().filter(|c| c.starts_with(step)).count()
         }
 
         fn push(&self, replace: bool) -> Result<Summary> {
@@ -1797,23 +1936,12 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("{step:?} {}", args.join(" | ")));
-            if let (Step::Inherit, Some(stopped)) = (step, self.inherit_times_out) {
-                return Err(StepTimedOut {
-                    step,
-                    after: LONG_TIMEOUT,
-                    stopped,
-                }
-                .into());
-            }
-            if step == Step::Inherit && self.inherit == 0 && self.failed_inherits.get() > 0 {
-                self.failed_inherits.set(self.failed_inherits.get() - 1);
-                return Ok(Ran {
-                    code: Some(1),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
-            if let (Step::Unpack, Some(stopped)) = (step, self.unpack_times_out) {
+            let times_out = match step {
+                Step::Unpack => self.unpack_times_out,
+                Step::Place => self.place_times_out,
+                _ => None,
+            };
+            if let Some(stopped) = times_out {
                 return Err(StepTimedOut {
                     step,
                     after: LONG_TIMEOUT,
@@ -1826,31 +1954,30 @@ mod tests {
                 return Ok(Ran {
                     code: Some(1),
                     stdout: String::new(),
-                    stderr: "C:\\work\\.vmm-x.d: in use".into(),
+                    stderr: r"C:\Windows\Temp\.vmm-x.d: in use".into(),
                 });
             }
             let (code, stdout, stderr) = match step {
-                Step::Probe => (self.probe, WIN_TAR, ""),
+                Step::Probe => (self.probe, self.probe_out, ""),
                 Step::MakeDir => match self.make_dir_only {
                     Some(suffix) if !args[0].ends_with(suffix) => (0, "", ""),
                     _ => (self.make_dir, "", "cannot create"),
                 },
-                Step::Inherit => (
-                    self.inherit,
-                    "",
-                    "Attempted to perform an unauthorized operation",
-                ),
                 Step::Unpack => (
                     self.unpack,
                     "",
                     "tar.exe: Archive entry has empty or unreadable filename",
                 ),
-                Step::Swap => {
-                    let mut swaps = self.swaps.borrow_mut();
-                    let code = if swaps.is_empty() { 0 } else { swaps.remove(0) };
-                    (code, "", "The process cannot access the file")
+                Step::Place => {
+                    let mut places = self.places.borrow_mut();
+                    let code = if places.is_empty() {
+                        0
+                    } else {
+                        places.remove(0)
+                    };
+                    (code, "", "the helper's own words")
                 }
-                Step::Cleanup => (self.cleanup, "", "C:\\work\\.vmm-x.d: in use"),
+                Step::Cleanup => (self.cleanup, "", r"C:\Windows\Temp\.vmm-x.d: in use"),
                 _ => (0, "", ""),
             };
             Ok(Ran {
@@ -1865,60 +1992,61 @@ mod tests {
         }
 
         fn write(&self, path: &str, data: &mut dyn Read) -> Result<u64> {
-            self.calls.borrow_mut().push(format!("write {path}"));
-            Ok(io::copy(data, &mut io::sink())?)
+            let mut sent = Vec::new();
+            data.read_to_end(&mut sent)?;
+            let what = if sent == winsteps::PUSH_HELPER.as_bytes() {
+                "the helper"
+            } else {
+                "data"
+            };
+            self.calls
+                .borrow_mut()
+                .push(format!("write {path} with {what}"));
+            Ok(sent.len() as u64)
         }
     }
 
     #[test]
-    fn a_windows_push_unpacks_with_tar_exe_and_swaps_the_tree_in() {
+    fn a_windows_push_stages_in_temp_and_places_the_tree_with_the_helper() {
         let guest = WindowsGuest::new();
         guest.push(true).unwrap();
         assert_eq!(
             guest.calls(),
             [
                 r"Probe C:\work\app | C:\work | 1",
-                r"MakeDir C:\work\.vmm-ID.a",
-                r"write C:\work\.vmm-ID.a\push.tar",
-                r"MakeDir C:\work\.vmm-ID.d",
-                r"Unpack C:\work\.vmm-ID.a\push.tar | C:\work\.vmm-ID.d | C:\Windows\System32\tar.exe",
-                r"Inherit C:\work\.vmm-ID.d",
-                r"Swap C:\work\app | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old | 1",
-                r"Cleanup C:\work\.vmm-ID.a | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old",
+                r"MakeDir C:\Windows\Temp\.vmm-ID.a",
+                r"write C:\Windows\Temp\.vmm-ID.a\helper.cs with the helper",
+                r"write C:\Windows\Temp\.vmm-ID.a\push.tar with data",
+                r"MakeDir C:\Windows\Temp\.vmm-ID.d",
+                r"Unpack C:\Windows\Temp\.vmm-ID.a\push.tar | C:\Windows\Temp\.vmm-ID.d | C:\Windows\System32\tar.exe",
+                r"Place C:\Windows\Temp\.vmm-ID.a\helper.cs | C:\work\app | C:\Windows\Temp\.vmm-ID.d | .vmm-ID.c | .vmm-ID.old | 1",
+                r"Cleanup C:\Windows\Temp\.vmm-ID.a | C:\Windows\Temp\.vmm-ID.d",
             ]
         );
     }
 
     #[test]
-    fn each_windows_failure_has_its_message_and_keeps_the_old_tree() {
+    fn each_windows_failure_has_its_message_and_cleans_up_only_the_staging_entries() {
+        let probe = |code| WindowsGuest {
+            probe: code,
+            ..WindowsGuest::new()
+        };
+        let place = |code| WindowsGuest {
+            places: RefCell::new(vec![code]),
+            ..WindowsGuest::new()
+        };
         let cases = [
+            (probe(10), "no System32\\tar.exe"),
+            (probe(11), "pass replace: true"),
+            (probe(12), "not a directory"),
+            (probe(13), "parent directories"),
+            (probe(15), "restricted language mode"),
             (
                 WindowsGuest {
-                    probe: 10,
+                    probe_out: WIN_TAR,
                     ..WindowsGuest::new()
                 },
-                "no System32\\tar.exe",
-            ),
-            (
-                WindowsGuest {
-                    probe: 11,
-                    ..WindowsGuest::new()
-                },
-                "pass replace: true",
-            ),
-            (
-                WindowsGuest {
-                    probe: 12,
-                    ..WindowsGuest::new()
-                },
-                "not a directory",
-            ),
-            (
-                WindowsGuest {
-                    probe: 13,
-                    ..WindowsGuest::new()
-                },
-                "parent directories",
+                "printed no staging directory",
             ),
             (
                 WindowsGuest {
@@ -1932,15 +2060,7 @@ mod tests {
                     make_dir: 2,
                     ..WindowsGuest::new()
                 },
-                "the archive directory C:\\work\\.vmm-",
-            ),
-            (
-                WindowsGuest {
-                    make_dir: 1,
-                    make_dir_only: Some(".d"),
-                    ..WindowsGuest::new()
-                },
-                ".d in the guest failed: cannot create",
+                r"the archive directory C:\Windows\Temp\.vmm-",
             ),
             (
                 WindowsGuest {
@@ -1948,14 +2068,7 @@ mod tests {
                     make_dir_only: Some(".d"),
                     ..WindowsGuest::new()
                 },
-                "the staging directory C:\\work\\.vmm-",
-            ),
-            (
-                WindowsGuest {
-                    inherit: 1,
-                    ..WindowsGuest::new()
-                },
-                "restoring the inherited access list",
+                r"the staging directory C:\Windows\Temp\.vmm-",
             ),
             (
                 WindowsGuest {
@@ -1965,43 +2078,54 @@ mod tests {
                 "unreadable filename",
             ),
             (
-                WindowsGuest {
-                    swaps: RefCell::new(vec![11]),
-                    ..WindowsGuest::new()
-                },
-                "appeared",
+                place(11),
+                "or appeared during the push; nothing was replaced",
             ),
+            (place(12), "something other than a directory"),
+            (place(13), "parent directories"),
+            (place(14), "old tree is unchanged"),
+            (place(18), "nor the old tree back: the helper's own words"),
+            (place(21), "a junction, a symbolic link or a mount point"),
             (
-                WindowsGuest {
-                    swaps: RefCell::new(vec![14]),
-                    ..WindowsGuest::new()
-                },
-                "old tree is unchanged",
+                place(22),
+                "access list of its parent failed, so nothing was replaced",
             ),
-            (
-                WindowsGuest {
-                    swaps: RefCell::new(vec![18]),
-                    ..WindowsGuest::new()
-                },
-                "the old tree is at",
-            ),
+            (place(23), "could not compile the push helper"),
+            (place(24), "cannot hold this path"),
+            (place(25), "copying the tree to the volume"),
         ];
         for (guest, why) in cases {
             let err = guest.push(true).unwrap_err().to_string();
             assert!(err.contains(why), "{why}: {err}");
             let calls = guest.calls();
-            if guest.probe != 0 {
+            if guest.probe != 0 || guest.probe_out != WIN_PROBE_OUT {
                 // A refused probe sends nothing and leaves nothing to clean up.
                 assert_eq!(calls.len(), 1, "{calls:?}");
                 continue;
             }
-            // Every later failure deletes the archive and the unpacked tree, never the old tree.
+            // Every later failure deletes the archive and the unpacked tree in the staging root, and nothing in the
+            // target's parent, which the Place step owns.
             assert_eq!(
                 calls.last().unwrap(),
-                r"Cleanup C:\work\.vmm-ID.a | C:\work\.vmm-ID.d",
+                r"Cleanup C:\Windows\Temp\.vmm-ID.a | C:\Windows\Temp\.vmm-ID.d",
                 "{why}"
             );
         }
+    }
+
+    #[test]
+    fn an_old_tree_the_place_step_could_not_delete_is_a_note_on_success() {
+        let guest = WindowsGuest {
+            places: RefCell::new(vec![PLACE_OLD_LEFT]),
+            cleanup: 1,
+            ..WindowsGuest::new()
+        };
+        let note = guest.push(true).unwrap().note.unwrap();
+        assert!(
+            note.starts_with("the helper's own words; the new tree is in place, but deleting")
+                && note.contains("in use"),
+            "{note}"
+        );
     }
 
     #[test]
@@ -2035,14 +2159,6 @@ mod tests {
     /// The cleanup retry window in the scripted guest's tests.
     const CLEANUP_RETRY_TEST: Duration = Duration::from_millis(200);
 
-    fn cleanups(guest: &WindowsGuest) -> usize {
-        guest
-            .calls()
-            .iter()
-            .filter(|c| c.starts_with("Cleanup"))
-            .count()
-    }
-
     #[test]
     fn after_a_timed_out_unpack_the_cleanup_is_retried_until_it_succeeds() {
         let guest = WindowsGuest {
@@ -2054,7 +2170,7 @@ mod tests {
         assert!(err.contains("did not finish within"), "{err}");
         // The cleanup succeeded on its third try, so the error names no leftovers.
         assert!(!err.contains("deleting"), "{err}");
-        assert_eq!(cleanups(&guest), 3);
+        assert_eq!(guest.count("Cleanup"), 3);
     }
 
     #[test]
@@ -2075,56 +2191,28 @@ mod tests {
                 && err.contains("stopping it failed"),
             "{err}"
         );
-        assert!(cleanups(&guest) > 1);
+        assert!(guest.count("Cleanup") > 1);
     }
 
     #[test]
-    fn a_failed_inherit_step_runs_once_more() {
+    fn a_timed_out_place_step_names_what_it_may_have_left_in_the_parent() {
         let guest = WindowsGuest {
-            failed_inherits: Cell::new(1),
-            ..WindowsGuest::new()
-        };
-        guest.push(true).unwrap();
-        let inherits = guest
-            .calls()
-            .iter()
-            .filter(|c| c.starts_with("Inherit"))
-            .count();
-        assert_eq!(inherits, 2);
-
-        let guest = WindowsGuest {
-            failed_inherits: Cell::new(2),
-            ..WindowsGuest::new()
-        };
-        let err = guest.push(true).unwrap_err().to_string();
-        assert!(
-            err.contains("failed twice") && err.contains("exit status 1"),
-            "{err}"
-        );
-        assert!(
-            !guest.calls().iter().any(|c| c.starts_with("Swap")),
-            "{:?}",
-            guest.calls()
-        );
-    }
-
-    #[test]
-    fn after_a_timed_out_inherit_step_the_cleanup_is_retried() {
-        let guest = WindowsGuest {
-            inherit_times_out: Some(false),
+            place_times_out: Some(false),
             failed_cleanups: Cell::new(u32::MAX),
             ..WindowsGuest::new()
         };
         let err = format!("{:#}", guest.push(true).unwrap_err());
-        assert!(
-            err.contains("the Inherit step may still be running"),
-            "{err}"
-        );
-        assert!(cleanups(&guest) > 1);
-        let calls = guest.calls();
-        let inherits = calls.iter().filter(|c| c.starts_with("Inherit")).count();
-        assert_eq!(inherits, 1, "{calls:?}");
-        assert!(!calls.iter().any(|c| c.starts_with("Swap")), "{calls:?}");
+        for part in [
+            r"may have left C:\work\app as it was",
+            ".vmm-",
+            r".old in C:\work",
+            "the Place step may still be running",
+            "did not finish within",
+        ] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
+        assert!(guest.count("Cleanup") > 1);
+        assert_eq!(guest.count("Place"), 1);
     }
 
     #[test]
@@ -2139,34 +2227,33 @@ mod tests {
             err.contains("deleting") && !err.contains("may still be running"),
             "{err}"
         );
-        assert_eq!(cleanups(&guest), 1);
+        assert_eq!(guest.count("Cleanup"), 1);
     }
 
     #[test]
-    fn a_swap_refused_for_an_open_file_runs_once_more_then_fails() {
+    fn a_place_refused_for_an_open_file_runs_once_more_then_fails() {
         let guest = WindowsGuest {
-            swaps: RefCell::new(vec![SWAP_BUSY]),
+            places: RefCell::new(vec![PLACE_BUSY]),
             ..WindowsGuest::new()
         };
         guest.push(true).unwrap();
-        let swaps = |g: &WindowsGuest| g.calls().iter().filter(|c| c.starts_with("Swap")).count();
-        assert_eq!(swaps(&guest), 2);
+        assert_eq!(guest.count("Place"), 2);
 
         let guest = WindowsGuest {
-            swaps: RefCell::new(vec![SWAP_BUSY, SWAP_BUSY]),
+            places: RefCell::new(vec![PLACE_BUSY, PLACE_BUSY]),
             ..WindowsGuest::new()
         };
         let err = guest.push(true).unwrap_err().to_string();
         assert!(
             err.contains("usually because a file in it is open")
                 && err.contains("old tree is unchanged")
-                && err.contains("cannot access the file"),
+                && err.contains("the helper's own words"),
             "{err}"
         );
-        assert_eq!(swaps(&guest), 2);
+        assert_eq!(guest.count("Place"), 2);
         assert_eq!(
             guest.calls().last().unwrap(),
-            r"Cleanup C:\work\.vmm-ID.a | C:\work\.vmm-ID.d"
+            r"Cleanup C:\Windows\Temp\.vmm-ID.a | C:\Windows\Temp\.vmm-ID.d"
         );
     }
 

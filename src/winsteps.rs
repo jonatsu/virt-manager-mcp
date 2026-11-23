@@ -11,17 +11,17 @@ pub const PULL_SIZE: &str = include_str!("winsteps/pull-size.ps1");
 pub const PULL_REMOVE: &str = include_str!("winsteps/pull-remove.ps1");
 /// Packs a pull whose path is not ASCII, which `guest-exec` cannot pass to `tar.exe`.
 pub const PULL_PACK: &str = include_str!("winsteps/pull-pack.ps1");
-/// Checks a directory push's target, creates its parents, and prints the path of `tar.exe`.
+/// Checks a directory push's target, and prints the staging root and the path of `tar.exe`.
 pub const PUSH_PROBE: &str = include_str!("winsteps/push-probe.ps1");
 /// Creates a directory, for a push's archive or for the push to unpack into, that only `SYSTEM` and
 /// `Administrators` can write.
 pub const PUSH_MKDIR: &str = include_str!("winsteps/push-mkdir.ps1");
-/// Moves a pushed tree into its target, the old tree aside first.
-pub const PUSH_SWAP: &str = include_str!("winsteps/push-swap.ps1");
+/// Compiles and runs the push helper, which places the unpacked tree in its target.
+pub const PUSH_PLACE: &str = include_str!("winsteps/push-place.ps1");
+/// The C# source of the push helper, which a push writes into its protected archive directory for `PUSH_PLACE`.
+pub const PUSH_HELPER: &str = include_str!("winsteps/push-helper.cs");
 /// Deletes a push's temporary entries.
 pub const PUSH_CLEANUP: &str = include_str!("winsteps/push-cleanup.ps1");
-/// Gives a pushed tree back the access list its parent passes on.
-pub const PUSH_INHERIT: &str = include_str!("winsteps/push-inherit.ps1");
 
 /// Runs the constant script `body` with `args` defined before it as `$argv`, an array of quoted literals, so no
 /// argument is ever parsed as PowerShell code.
@@ -95,6 +95,47 @@ exit $errors.Count"#;
             "{text}"
         );
         assert!(text.ends_with(PULL_SIZE));
+    }
+
+    /// Compiles the push helper with `pwsh`'s `Add-Type` and reads the parameter types of the method that
+    /// `push-place.ps1` calls. pre-commit also builds the helper as C# 5, which Windows PowerShell 5.1 needs. Without
+    /// `pwsh` the test is skipped, unless `VIRTMANAGER_REQUIRE_PWSH=1`.
+    #[test]
+    fn the_push_helper_compiles_with_the_method_the_place_script_calls() {
+        const CHECK: &str = r#"Add-Type -Path $env:VMM_CS_FILE
+$m = [VmmPush].GetMethod('Place')
+if ($null -eq $m) { 'no Place method'; exit 1 }
+($m.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ','"#;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/winsteps/push-helper.cs");
+        let out = match Command::new("pwsh")
+            .args(["-NoProfile", "-NonInteractive", "-Command", CHECK])
+            .env("VMM_CS_FILE", &path)
+            .output()
+        {
+            Ok(out) => out,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                assert!(
+                    std::env::var("VIRTMANAGER_REQUIRE_PWSH").as_deref() != Ok("1"),
+                    "VIRTMANAGER_REQUIRE_PWSH=1, but pwsh is not installed"
+                );
+                eprintln!("skipped: pwsh is not installed, so the push helper was not compiled");
+                return;
+            }
+            Err(e) => panic!("running pwsh: {e}"),
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            stdout.trim(),
+            "String,String,String,String,Boolean,TextWriter"
+        );
+        assert!(PUSH_PLACE.contains(
+            "[VmmPush]::Place($target, $staging, $copy, $old, $replace -eq '1', $stderr)"
+        ));
     }
 
     /// Every `.ps1` file under `src/jobs/` and `src/winsteps/`.

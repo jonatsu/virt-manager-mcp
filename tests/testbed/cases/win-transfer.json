@@ -72,7 +72,7 @@
     },
     "expect": {
       "error": true,
-      "contains": "C:\\Windows\\Temp\\vmm-\u00e9t\u00e9-file\" because",
+      "contains": "C:\\Windows\\Temp\\vmm-\u00e9t\u00e9-file exists and is not a directory",
       "absent": "\ufffd"
     }
   },
@@ -392,7 +392,7 @@
     "tool": "job_start",
     "args": {
       "vm": "t-win11",
-      "command": "$pub = $env:PUBLIC\n$sids = { param($acl) ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique) -join ',' }\n'watching'\n$end = (Get-Date).AddSeconds(90)\nwhile ((Get-Date) -lt $end) {\n  $d = Get-ChildItem -LiteralPath $pub -Directory -Force -Filter '.vmm-*.a' -ErrorAction SilentlyContinue | Select-Object -First 1\n  if ($d) {\n    $a = Get-Acl -LiteralPath $d.FullName\n    'dir protected=' + $a.AreAccessRulesProtected + ' rules=' + (& $sids $a)\n    $t = Join-Path $d.FullName 'push.tar'\n    $wait = (Get-Date).AddSeconds(20)\n    while (-not (Test-Path -LiteralPath $t) -and (Get-Date) -lt $wait) { Start-Sleep -Milliseconds 10 }\n    'tar rules=' + (& $sids (Get-Acl -LiteralPath $t))\n    exit 0\n  }\n  Start-Sleep -Milliseconds 10\n}\n'not seen'\n"
+      "command": "$pub = Join-Path $env:SystemRoot 'Temp'\n$sids = { param($acl) ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique) -join ',' }\n'watching'\n$end = (Get-Date).AddSeconds(90)\nwhile ((Get-Date) -lt $end) {\n  $d = Get-ChildItem -LiteralPath $pub -Directory -Force -Filter '.vmm-*.a' -ErrorAction SilentlyContinue | Select-Object -First 1\n  if ($d) {\n    $a = Get-Acl -LiteralPath $d.FullName\n    'dir protected=' + $a.AreAccessRulesProtected + ' rules=' + (& $sids $a)\n    $t = Join-Path $d.FullName 'push.tar'\n    $wait = (Get-Date).AddSeconds(20)\n    while (-not (Test-Path -LiteralPath $t) -and (Get-Date) -lt $wait) { Start-Sleep -Milliseconds 10 }\n    'tar rules=' + (& $sids (Get-Acl -LiteralPath $t))\n    exit 0\n  }\n  Start-Sleep -Milliseconds 10\n}\n'not seen'\n"
     },
     "save": {
       "watch": "job"
@@ -463,7 +463,7 @@
     "tool": "exec",
     "args": {
       "vm": "t-win11",
-      "command": "\"vmm=\" + (Get-ChildItem -Force -LiteralPath $env:PUBLIC -Filter \".vmm-*\" | Measure-Object).Count"
+      "command": "\"vmm=\" + (Get-ChildItem -Force -LiteralPath $env:PUBLIC, (Join-Path $env:SystemRoot 'Temp') -Filter \".vmm-*\" | Measure-Object).Count"
     },
     "expect": {
       "contains": "vmm=0"
