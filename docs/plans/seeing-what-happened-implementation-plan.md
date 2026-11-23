@@ -1,8 +1,9 @@
 # Seeing what happened: implementation plan
 
-Status: draft, revised after a plan-critic review and refreshed after follow-ups 25, 29 and 30; for approval. Built
-from [`seeing-what-happened-design.md`](seeing-what-happened-design.md) at `d41fa1c`, which owns the behaviour, and
-from roadmap follow-ups 22, 24, 28 and 31 in [`fork-roadmap.md`](fork-roadmap.md) at `75794cb`. This plan owns order
+Status: draft, revised after a plan-critic review, refreshed after follow-ups 25, 29 and 30, and revised after a
+second plan-critic review; for approval. Built from [`seeing-what-happened-design.md`](seeing-what-happened-design.md)
+at `d41fa1c`, which owns the behaviour, and from roadmap follow-ups 22, 24, 28 and 31 in
+[`fork-roadmap.md`](fork-roadmap.md) at `deaf2b3`. This plan owns order
 and checks. Progress goes in the execution record at the end.
 
 ## Overview
@@ -14,9 +15,10 @@ small follow-ups first.
   that suggests `command` (follow-up 22). The Windows transfer scripts write their error text as UTF-8, as
   `pull-pack.ps1` already does (follow-up 24). Both landed in follow-ups run 2. `job_stop` on Windows no longer
   reports a failure when the tree is already gone (follow-up 28), and `templates-reset-saved.json` waits for the login
-  prompt instead of reading for a fixed time (follow-up 31). These two are units 17 and 18: they run right after
-  units 1 and 2 and before the probe, and are numbered last so that the references among units 3 to 16 stay as they
-  are.
+  prompt instead of reading for a fixed time (follow-up 31). These two are units 17 and 18. They run first, before
+  the probe: unit 17 needs a working `t-win11`, which the probe's forced stop error could leave unbootable, and unit
+  18 changes a case that unit 7 changes again. They are numbered last so that the references among units 3 to 16 stay
+  as they are. They also keep `run-all.sh` reliable, which the run's goal needs.
 - **A probe before code.** The design leaves three facts to a probe: the libvirt event sequence of a guest panic under
   each crash action, whether Debian's pvpanic driver and Windows' Hyper-V crash registers raise the panic event, and
   which state a preserved crash leaves the VM in.
@@ -55,8 +57,10 @@ flowchart TD
   U14 --> U15
   U1 --> U15
   U2 --> U15
-  U17[17 job_stop: taskkill statuses] --> U15
-  U18[18 templates-reset-saved waits for the prompt] --> U6
+  U17[17 job_stop: taskkill statuses] --> U3
+  U17 --> U15
+  U18[18 templates-reset-saved waits for the prompt] --> U3
+  U18 --> U7
   U15 --> U16[16 Final gate and reviews]
 ```
 
@@ -148,34 +152,16 @@ The design asks for a test of each invariant. Each row names its owning unit.
 
 ## Units
 
-### 1. `exec`: non-ASCII program arguments on Windows (self-reviewed)
+### 1. `exec`: non-ASCII program arguments on Windows (built in follow-ups run 2)
 
-**Result.** On a Windows guest, `exec` with `program` whose program path, arguments or `env` entries are not ASCII is
-refused before any `guest-exec`, with a message that the Windows guest agent cannot pass them and that `command` can.
-Follow-up 22.
+Built in [follow-ups run 2](followups-run-2-implementation-plan.md) as `888fc3f`: on a Windows guest, `exec` refuses a
+program path, arguments or `env` entries that are not ASCII, and suggests `command`. Follow-up 22. The goal counts it
+as landed; its row below holds the evidence.
 
-**Changes.** First, on `t-win11`, try `exec` with `program: "cmd.exe"`, `args: ["/c", "set", "X"]` and
-`env: ["X=été"]`, and record whether a non-ASCII `env` entry fails the same way; refuse `env` entries only if it
-does. Then `exec_spec` in `src/server.rs` asks for the guest's OS when any of them is not ASCII, and refuses on
-Windows. ASCII calls still reach no OS query. The roadmap marks 22 done, and the CHANGELOG gains a "Fixed" entry.
+### 2. Windows scripts: UTF-8 errors (built in follow-ups run 2)
 
-**Verification.** Unit tests: a non-ASCII argument on Windows is refused; the same on Linux builds the spec; an ASCII
-call asks nothing. On `t-win11`, `program: "cmd.exe"` with `args: ["/c", "echo", "été"]` is refused with the new
-message, and `command: "echo été"` prints `été`.
-
-### 2. Windows scripts: UTF-8 errors (self-reviewed)
-
-**Result.** Every script in `src/winsteps/` that writes error text writes it through a UTF-8 writer on standard
-error, so a non-ASCII path in a message arrives intact. Follow-up 24.
-
-**Changes.** `push-probe.ps1`, `push-mkdir.ps1`, `push-inherit.ps1`, `push-swap.ps1`, `push-cleanup.ps1`,
-`pull-size.ps1` and `pull-remove.ps1` create the writer `pull-pack.ps1` uses at the top, with `AutoFlush = $true` so a
-message written just before `exit` is not lost, and write through it instead of `[Console]::Error`. The roadmap marks
-24 done.
-
-**Verification.** The parse test passes. On `t-win11`, under a console set to code page 437, a pull of a missing
-`C:\Windows\Temp\vmm-été-missing` and a push whose target parent is a file named `vmm-été` return errors naming the
-path intact. `win-transfer.json` and `win-transfer-caps.json` still pass.
+Built in [follow-ups run 2](followups-run-2-implementation-plan.md) as `2799546`: every script in `src/winsteps/` that
+writes error text writes it as UTF-8. Follow-up 24. The goal counts it as landed; its row below holds the evidence.
 
 ### 3. Probe: panics, devices and event sequences
 
@@ -268,10 +254,9 @@ VM, and pass the UUID; `console_open` and `console_write` keep `Hypervisor::doma
 closed with its reason. `reset_vm`, `delete_vm` and `snapshot_revert` close the session, which now moves it to the
 previous run, as intended: the output from before the reset or revert stays readable.
 
-The cases that `console_open`'s new attach behaviour changes are updated here: at least `console-reopen.json`,
-`console-generation.json` and `console-stall.json`, and every other case that calls `console_open` and whose expected
-reply changes (`job-wait`, `wait-for`, `owrt-boot`, `owrt-pacing`, `owrt-wait`, `templates-reset-saved`,
-`templates-reset-uefi`, `console-after-start`, `console-closed-on-power-off`).
+The cases whose reply this unit's own rules change are updated here: those that call `console_open` over a live
+session of this server, at least `console-reopen.json`, `console-generation.json` and `console-stall.json`. Cases
+that open the console of a VM the server started change only in unit 7, when that start opens a capture first.
 
 **Verification.** Unit tests on the buffer and slot logic: a replacement by a new domain ID moves the old run; a
 `force` or a non-force reopen over a closed session within the same ID drops it; close moves; a second move drops the
@@ -294,6 +279,11 @@ the boot path; its state-to-action choice moves into a pure function, so both cr
 cursor at 0. A failed open still resumes and the reply says why; a failed resume leaves the VM paused and says so.
 The tool descriptions for `start_vm`, `console_open` and `console_read` tell agents that a start captures the console
 from its first byte, and that a Windows guest writes nothing there, so its boot shows through the screen tools.
+
+A `console_open` after a start, reset or template create now attaches to the capture, so the cases that do that are
+updated here: at least `templates-reset-saved`, `templates-reset-uefi`, `console-after-start`,
+`console-closed-on-power-off`, `job-wait`, `wait-for`, `owrt-boot`, `owrt-pacing` and `owrt-wait`. Units 6 and 7
+each run every case that calls `console_open` and fix any other whose reply changed.
 
 **Verification.** Unit tests: the start decision for each state; the reply on each open result; the fake opener
 records one safe-mode open per start of an allowed VM and none with force; the guard refuses a concurrent start. On
@@ -458,15 +448,27 @@ after a crash.
 **Result.** `job_stop` on a Windows job whose process tree is gone by the time `taskkill` runs, or goes during it,
 reports the job ended instead of "taskkill failed". Follow-up 28.
 
-**Changes.** First, on `t-win11`, record the exit status and output of `taskkill.exe /T /F /PID` for a live tree, for
-a PID that has just exited, and for a tree whose root exits while `taskkill` walks it, such as a job's
-`ping.exe -n 300 127.0.0.1` ended with `Stop-Process` a moment before. Then `src/jobs/stop.ps1` treats a non-zero
-status as success when the recorded process, by PID and start time, no longer runs afterwards, and says so in its
-output, such as "ended (taskkill exited 255 after the tree had gone)". It still exits 5 with the status when the
-process runs on. The roadmap marks 28 done, and the CHANGELOG gains a "Fixed" entry.
+**Changes.** First, a probe on `t-win11`: a loop of at least 20 cycles that starts a job running
+`ping.exe -n 300 127.0.0.1` and stops it, with the root ended at varying moments around the `taskkill` call so the
+race happens, through `mcp_call.py` or a guest-side loop. The probe records a histogram of `taskkill` exit statuses
+and outputs, and whether any descendant of the tree survives a stop; its results go in a dated note in
+`docs/research/`. Then:
 
-**Verification.** The parse test passes. A unit test checks the script text for the recheck. On `t-win11`,
-`win-jobs.json` passes five times in a row, and the record says how many of those stops met a non-zero status.
+- `src/jobs/stop.ps1` lists the tree's descendants by parent PID before `taskkill`. After a non-zero status, it
+  rechecks the recorded process (PID and start time) and those descendants, retrying for up to 2 s while one is still
+  terminating. When all are gone, it exits with a new status, 7, "ended; taskkill exited N after the tree had gone",
+  and it still exits 5 with the status while any of them runs. Its header lists the new status. Jobs scripts live in
+  `src/jobs/` and take `$id`, not `$argv`; the parse test covers them.
+- `jobs::stop` in `src/jobs.rs` maps exit 7 to the same success text as exit 0, followed by the script's line, so
+  `win-jobs.json`'s `contains` strings still hold and the agent sees what happened.
+
+The roadmap marks 28 done, and the CHANGELOG gains a "Fixed" entry.
+
+**Verification.** The parse test passes. Unit tests with the fake Windows guest in `src/jobs.rs`: exit 7 gives the
+success text with the script's line, and exit 5 still fails with it. On `t-win11`, the probe loop run again on the
+fixed script ends every cycle without a failure and with no surviving descendant, and the record gives both
+histograms. `win-jobs.json` passing five times in a row is a regression check only, because one stop per run rarely
+meets the race.
 
 ### 18. `templates-reset-saved.json` waits for the login prompt (self-reviewed)
 
@@ -474,12 +476,16 @@ process runs on. The roadmap marks 28 done, and the CHANGELOG gains a "Fixed" en
 instead of a fixed 3 s `console_read` that a slow guest missed once. Follow-up 31.
 
 **Changes.** In `tests/testbed/cases/templates-reset-saved.json`, after the `console_write` of an empty line, a
-`wait_for` console condition for `login:` with `since: 0` and a 30 s timeout replaces the `console_read`, and a
-`console_read` from offset 0 then checks that the console is open and holds output. Unit 6 later changes the same
-case for its attach behaviour, on top of this. The roadmap marks 31 done; the change is to a test only, so the
-CHANGELOG has no entry.
+`wait_for` console condition for `login:` without `since` and with a 30 s timeout replaces the `console_read`.
+Without `since`, the wait starts where the last `console_write` began, so only a prompt the guest printed after the
+Enter matches, which is the case's claim that the console still answers. A `console_read` from offset 0 then checks
+that the console is open and holds output. Unit 7 later changes the same case, on top of this. The roadmap marks 31
+done; the change is to a test only, so the CHANGELOG has no entry.
 
-**Verification.** The `templates-reset-uefi` unit of `run-all.sh`, which runs the case, passes three times in a row.
+**Verification.** The evidence is the structural one: the case waits up to 30 s for an answer instead of reading for
+a fixed 3 s. That the Debian template's serial getty prints `login:` again after a bare Enter is unverified; the first
+run confirms it, and the `templates-reset-uefi` unit of `run-all.sh`, which runs the case, then passes three times in
+a row.
 
 ## Exceptions the run records
 
