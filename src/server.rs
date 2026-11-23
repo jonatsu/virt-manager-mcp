@@ -7,10 +7,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ProgressNotificationParam, ServerCapabilities,
-    ServerConfig,
+    CallToolResponse, CallToolResult, ContentBlock, Implementation, ProgressNotificationParam,
+    ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -23,7 +24,7 @@ use crate::config::Config;
 use crate::console::{
     CLOSED_BY_CONSOLE_CLOSE, Consoles, LibvirtOpener, OpenRequest, Pacing, Run, VmId,
 };
-use crate::events::{Cause, Events, Kind, Record};
+use crate::events::{self, Cause, Events, Kind, Record};
 use crate::guestpath::GuestPath;
 use crate::hypervisor::{self, Hypervisor};
 use crate::start::Starting;
@@ -1503,7 +1504,7 @@ impl VirtServer {
         an error. Results: `matched` with the condition's index and the matched text (lowest index wins a tie; \
         console and job_output matches add `next`, console matches also `generation`, screen matches `screen`, and a \
         console match moves the session's wait cursor past it); `closed` when the VM stops or restarts or the \
-        console session ends; `timed_out` with a resume point per console and job_output condition (pass it back as \
+        console session ends; `timed_out` with a resume point per console, job_output and event condition (pass it back as \
         `since`, with `generation` for a console, to keep matching output that arrived in between), each command's \
         running PID, and each screen_text condition's last OCR text, to loosen a pattern that missed. With \
         `screenshot: true`, a match attaches a screenshot and gives \
@@ -1511,7 +1512,13 @@ impl VirtServer {
         `since` starts where the last console_write began, so write first, then wait. A wait never changes what \
         console_read returns. `transfer_done` (a copy that replied with a `transfer` ID has ended) must be the only \
         condition of its wait and takes no screenshot; it matches with the copy's own reply as `text`, or its \
-        failure as `error`, and times out with the bytes moved so far. It answers even after the VM stopped."
+        failure as `error`, and times out with the bytes moved so far. It answers even after the VM stopped. \
+        `event` (a record of one of `kinds`, such as `crashed` or `stopped`, lands in the VM's event log) matches \
+        with the record as `record` and its `seq` as `next`; without `since` only records after the call began \
+        count, so pass `next` from vm_events when an event could land between two calls. Event conditions are \
+        checked before the check for a stopped VM, so a crash wins over the stop, and a wait on events alone works \
+        on a VM in any state; an event match attaches no screenshot. An event wait on a VM deleted during it runs \
+        to its timeout."
     )]
     async fn wait_for(
         &self,
@@ -1556,7 +1563,15 @@ impl VirtServer {
             }
             let checks = wait::validate_conditions(&s.hv.config, timeout, &p.conditions)?;
             let attach = attachment_wanted(&s.hv.config, p.screenshot)?;
-            let dom = s.hv.domain(&p.vm)?;
+            // A wait on events alone answers for a VM in any state, so it looks the VM up without requiring it to run.
+            let dom = if checks
+                .iter()
+                .all(|c| matches!(c, wait::Check::Event { .. }))
+            {
+                s.hv.lookup(&p.vm)?
+            } else {
+                s.hv.domain(&p.vm)?
+            };
             let recogniser = if checks.iter().any(wait::Check::reads_text) {
                 Some(s.recogniser()?)
             } else {
@@ -1570,6 +1585,7 @@ impl VirtServer {
                 cancelled: Box::new(|| ct.is_cancelled()),
                 progress: Box::new(notify),
                 recogniser,
+                events: &s.events,
             };
             let started = std::time::Instant::now();
             let guest: Arc<dyn wait::Guest> = Arc::new(wait::LiveGuest(dom));
@@ -2255,8 +2271,78 @@ impl VirtServer {
     }
 }
 
+/// The notice for a VM's records that have one and that no reply has announced yet, which moves the VM's seen-cursor
+/// past them. `lookup` gives the VM's UUID and whether it sits in libvirt's crashed state, or fails for a VM the server
+/// may not see, which then gets no notice.
+fn take_notice(
+    events: &Events,
+    vm: &str,
+    lookup: impl FnOnce() -> Result<(String, bool)>,
+) -> Option<String> {
+    let (uuid, crashed_now) = lookup().ok()?;
+    let (name, records) = events.take_notices(&uuid);
+    let name = if name.is_empty() { vm } else { &name };
+    // A crash under `preserve` keeps the VM in place, holding its memory, until a forced stop.
+    let holds_memory = crashed_now
+        && records
+            .iter()
+            .any(|r| r.kind == Kind::Crashed && !r.stopped);
+    events::notice_text(name, &records, holds_memory)
+}
+
+/// Adds `notice` to a tool's reply as a block of its own after the result or error, which it never replaces.
+fn append_notice(result: &mut CallToolResult, notice: Option<String>) {
+    if let Some(notice) = notice {
+        result.content.push(ContentBlock::text(notice));
+    }
+}
+
+impl VirtServer {
+    /// The notice for the VM a call named, if any, found off the async runtime.
+    async fn notice(&self, vm: String) -> Option<String> {
+        // Most replies have nothing to announce; only those that might pay for the libvirt lookup.
+        if !self.state.events.has_pending_notice(&vm) {
+            return None;
+        }
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            take_notice(&state.events, &vm, || {
+                let dom = state.hv.lookup(&vm)?;
+                let crashed = dom.get_state()?.0 == virt::sys::VIR_DOMAIN_CRASHED;
+                Ok((dom.get_uuid_string()?, crashed))
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for VirtServer {
+    /// Runs the tool, then adds a notice for unannounced records of the VM the call named, such as a crash that
+    /// happened outside any tool call.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let vm = request
+            .arguments
+            .as_ref()
+            .and_then(|a| a.get("vm"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let tcc = ToolCallContext::new(self, request, context);
+        match (self.tool_router.call(tcc).await?, vm) {
+            (CallToolResponse::Complete(mut result), Some(vm)) => {
+                append_notice(&mut result, self.notice(vm).await);
+                Ok(CallToolResponse::Complete(result))
+            }
+            (response, _) => Ok(response),
+        }
+    }
+
     fn get_info(&self) -> ServerConfig {
         let config = &self.state.hv.config;
         let mut extra = String::new();
@@ -2532,6 +2618,86 @@ mod tests {
         let p =
             exec_params(json!({"vm": "v", "program": "cmd.exe", "args": ["/c"], "env": ["X=1"]}));
         assert!(exec_spec(&p, no_guest).is_ok());
+    }
+
+    /// An event log holding one outside crash of `uuid`, under `preserve`.
+    fn crashed_log(uuid: &str) -> Events {
+        let events = Events::new(16);
+        events.append(crate::events::Raw {
+            uuid: uuid.into(),
+            name: "t-a".into(),
+            source: crate::events::Source::Lifecycle {
+                event: virt::sys::VIR_DOMAIN_EVENT_CRASHED as i32,
+                detail: virt::sys::VIR_DOMAIN_EVENT_CRASHED_PANICKED as i32,
+            },
+            time: 1_800_000_000,
+        });
+        events
+    }
+
+    fn texts(result: &CallToolResult) -> Vec<String> {
+        result
+            .content
+            .iter()
+            .map(|c| c.as_text().unwrap().text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_notice_is_its_own_block_after_the_result_and_comes_once() {
+        let events = crashed_log("u");
+        let mut result = CallToolResult::success(vec![json_block(&json!({"a": 1})).unwrap()]);
+        let notice = take_notice(&events, "t-a", || Ok(("u".into(), true)));
+        append_notice(&mut result, notice);
+        let blocks = texts(&result);
+        assert_eq!(blocks.len(), 2);
+        assert!(serde_json::from_str::<Value>(&blocks[0]).is_ok());
+        assert!(
+            blocks[1].starts_with("VM 't-a' crashed (panicked) at")
+                && blocks[1].contains("holds its memory until stop_vm with force: true")
+                && blocks[1].ends_with("see vm_events since 0"),
+            "{}",
+            blocks[1]
+        );
+        assert_eq!(take_notice(&events, "t-a", || Ok(("u".into(), true))), None);
+    }
+
+    #[test]
+    fn an_error_keeps_its_error_and_gains_the_notice_after_it() {
+        let events = crashed_log("u");
+        let mut result = CallToolResult::error(vec![ContentBlock::text("VM 't-a' has crashed")]);
+        append_notice(
+            &mut result,
+            take_notice(&events, "t-a", || Ok(("u".into(), false))),
+        );
+        assert_eq!(result.is_error, Some(true));
+        let blocks = texts(&result);
+        assert_eq!(blocks[0], "VM 't-a' has crashed");
+        // Stopped since, so it no longer holds its memory.
+        assert!(!blocks[1].contains("holds its memory"), "{}", blocks[1]);
+    }
+
+    #[test]
+    fn a_hidden_vm_gets_no_notice_and_keeps_its_records_unannounced() {
+        let events = crashed_log("u");
+        let hidden = || anyhow::bail!("VM 't-a' is not in allowed_vms");
+        assert_eq!(take_notice(&events, "t-a", hidden), None);
+        assert_eq!(events.take_notices("u").1.len(), 1);
+    }
+
+    #[test]
+    fn two_concurrent_calls_carry_the_notice_once_between_them() {
+        let events = Arc::new(crashed_log("u"));
+        let notices: Vec<Option<String>> = (0..2)
+            .map(|_| {
+                let events = events.clone();
+                std::thread::spawn(move || take_notice(&events, "t-a", || Ok(("u".into(), true))))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert_eq!(notices.iter().filter(|n| n.is_some()).count(), 1);
     }
 
     #[test]

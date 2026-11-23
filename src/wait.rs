@@ -36,6 +36,9 @@ const POLL: Duration = Duration::from_millis(30);
 const PROBE_EVERY: Duration = Duration::from_secs(1);
 /// How often the loop checks that the VM still runs.
 const VM_CHECK_EVERY: Duration = Duration::from_millis(500);
+/// How long a wait with event conditions keeps reading the event log after it finds the VM stopped or its console
+/// closed, for the record of a crash that ended it, which lands just after.
+const EVENT_GRACE: Duration = Duration::from_secs(1);
 /// How often a progress notification goes out.
 const PROGRESS_EVERY: Duration = Duration::from_secs(5);
 /// Most bytes of matched text or command output a result carries.
@@ -121,6 +124,16 @@ pub enum Condition {
         /// Display head index (default 0).
         screen: Option<u32>,
     },
+    /// A record of one of `kinds` lands in the VM's event log (see vm_events), such as `crashed`, `stopped` or
+    /// `rebooted`. The result carries the record. It is checked before the wait's check for a stopped VM, so a
+    /// crash wins over the VM stopping. A wait whose conditions are all events works on a VM in any state.
+    Event {
+        /// The kinds to wait for. Default: any kind.
+        kinds: Option<Vec<crate::events::Kind>>,
+        /// Match records after this sequence number, such as `next` from vm_events, so a record that landed
+        /// between the two calls still counts. Default: only records that arrive after the call began.
+        since: Option<u64>,
+    },
     /// A copy that outlasted its call and replied with a transfer ID has finished or failed; the result carries the copy's reply or error. It must be the call's only condition, and is answered from
     /// the server's own records whatever state the VM is in.
     TransferDone {
@@ -141,6 +154,7 @@ impl Condition {
             Condition::ScreenSettled { .. } => "screen_settled",
             Condition::ScreenText { .. } => "screen_text",
             Condition::TransferDone { .. } => "transfer_done",
+            Condition::Event { .. } => "event",
         }
     }
 
@@ -155,7 +169,8 @@ impl Condition {
             | Condition::Command { .. }
             | Condition::JobDone { .. }
             | Condition::JobOutput { .. }
-            | Condition::TransferDone { .. } => None,
+            | Condition::TransferDone { .. }
+            | Condition::Event { .. } => None,
         }
     }
 }
@@ -169,6 +184,11 @@ pub enum Check {
         strip_ansi: bool,
     },
     Agent,
+    /// An event record of one of `kinds`, or of any kind when empty, after `since`.
+    Event {
+        kinds: Vec<crate::events::Kind>,
+        since: Option<u64>,
+    },
     Command(String),
     JobDone(Uuid),
     JobOutput {
@@ -244,6 +264,10 @@ pub fn validate_conditions(
                     }
                 }
                 Condition::Agent {} => Check::Agent,
+                Condition::Event { kinds, since } => Check::Event {
+                    kinds: kinds.clone().unwrap_or_default(),
+                    since: *since,
+                },
                 Condition::TransferDone { .. } => {
                     bail!("condition {i}: transfer_done must be the only condition of its wait")
                 }
@@ -352,6 +376,14 @@ pub trait Env {
     fn progress(&self, waited: Duration);
     /// The recogniser `screen_text` reads frames with, loaded once and shared, or `None` without OCR models.
     fn recogniser(&self) -> Option<Arc<dyn Recognise>>;
+    /// The highest sequence number in the VM's event log: the `since` that matches only what arrives from now on.
+    fn event_head(&self) -> u64;
+    /// The first record after `since` of one of `kinds`, or of any kind when empty, which counts as seen.
+    fn take_event(
+        &self,
+        since: u64,
+        kinds: &[crate::events::Kind],
+    ) -> Option<crate::events::Record>;
 }
 
 /// Reads the text lines of a frame. Probe threads share one behind an `Arc`, so tests use a fake.
@@ -481,6 +513,8 @@ pub struct LiveEnv<'a> {
     pub cancelled: Box<dyn Fn() -> bool + 'a>,
     pub progress: Box<dyn Fn(Duration) + 'a>,
     pub recogniser: Option<Arc<dyn Recognise>>,
+    /// The event log `event` conditions read.
+    pub events: &'a crate::events::Events,
 }
 
 impl Env for LiveEnv<'_> {
@@ -518,6 +552,18 @@ impl Env for LiveEnv<'_> {
     fn recogniser(&self) -> Option<Arc<dyn Recognise>> {
         self.recogniser.clone()
     }
+
+    fn event_head(&self) -> u64 {
+        self.events.head(self.uuid)
+    }
+
+    fn take_event(
+        &self,
+        since: u64,
+        kinds: &[crate::events::Kind],
+    ) -> Option<crate::events::Record> {
+        self.events.take_match(self.uuid, since, kinds)
+    }
 }
 
 /// How a wait ended.
@@ -533,6 +579,13 @@ pub enum Outcome {
         generation: Option<u64>,
         /// For a screen condition: the frame it matched on.
         frame: Option<ScreenFrame>,
+    },
+    /// An event condition matched this record, as vm_events shows it.
+    Event {
+        index: usize,
+        record: Value,
+        /// The record's sequence number: the `since` for the next call.
+        next: u64,
     },
     Closed {
         index: Option<usize>,
@@ -576,6 +629,14 @@ impl Outcome {
                 }
                 v
             }
+            Outcome::Event {
+                index,
+                record,
+                next,
+            } => json!({
+                "result": "matched", "index": index, "kind": "event", "record": record, "next": next,
+                "waited_ms": waited_ms,
+            }),
             Outcome::Closed { index, reason } => {
                 json!({ "result": "closed", "index": index, "reason": reason, "waited_ms": waited_ms })
             }
@@ -619,12 +680,18 @@ pub fn run(
     checks: Vec<Check>,
     timeout: Duration,
 ) -> Result<Outcome> {
-    if timeout.is_zero() && checks.iter().any(|c| !matches!(c, Check::Console { .. })) {
+    if timeout.is_zero()
+        && checks
+            .iter()
+            .any(|c| !matches!(c, Check::Console { .. } | Check::Event { .. }))
+    {
         bail!(
-            "timeout_secs 0 checks console conditions once; agent, command, job and screen conditions need at \
-             least 1 s"
+            "timeout_secs 0 checks console and event conditions once; agent, command, job and screen conditions \
+             need at least 1 s"
         );
     }
+    // A wait on events alone answers for a VM in any state, so it never checks that the VM runs.
+    let events_only = checks.iter().all(|c| matches!(c, Check::Event { .. }));
     let start = env.now();
     let deadline = start + timeout;
     // Validation made every screen condition name the same head.
@@ -642,6 +709,11 @@ pub fn run(
     let mut next_progress = start + PROGRESS_EVERY;
     // Seeded from the call's own lookup, so a restart before the call is caught on the first poll.
     let mut domain_id = guest.initial_id();
+    // When a VM check found the VM stopped; it stays stopped for the rest of the wait.
+    let mut stopped_at: Option<Instant> = None;
+    // When a condition first reported its session closed.
+    let mut closed_at: Option<Instant> = None;
+    let has_events = states.iter().any(|s| matches!(s, State::Event(_)));
     loop {
         let now = env.now();
         if env.cancelled() {
@@ -651,7 +723,7 @@ pub fn run(
             let started: Instant = vm_started.take().expect("a finished VM check had a start");
             (id, started)
         });
-        let stopped = match &checked {
+        let just_stopped = match &checked {
             Some((Ok(None), _)) => true,
             Some((Ok(id), _)) => {
                 domain_id = *id;
@@ -659,6 +731,10 @@ pub fn run(
             }
             Some((Err(_), _)) | None => false,
         };
+        if just_stopped {
+            stopped_at.get_or_insert(now);
+        }
+        let stopped = stopped_at.is_some();
         // A check that started after the failure and did not find the VM stopped confirms the failure.
         let failure_confirmed = !stopped
             && matches!((&checked, &capture_failure), (Some((_, started)), Some((_, at))) if started >= at);
@@ -675,7 +751,9 @@ pub fn run(
             },
             None => None,
         };
-        if !stopped && vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id())
+        if !stopped
+            && !events_only
+            && vm.start_if_due(now, deadline, VM_CHECK_EVERY, &guest, |g, _| g.domain_id())
         {
             vm_started = Some(now);
         }
@@ -685,6 +763,17 @@ pub fn run(
         let stripped = OnceCell::new();
         let mut closed = None;
         for (index, state) in states.iter_mut().enumerate() {
+            // Event conditions come before the stopped check below, so a crash that also stops the VM matches.
+            if let State::Event(e) = state {
+                if let Some(record) = env.take_event(e.since, &e.kinds) {
+                    return Ok(Outcome::Event {
+                        index,
+                        next: record.seq,
+                        record: record.to_json(),
+                    });
+                }
+                continue;
+            }
             // After a stop, console conditions still get one look at the output stored before it.
             if stopped && !matches!(state, State::Console(_)) {
                 continue;
@@ -720,17 +809,26 @@ pub fn run(
                 }
             }
         }
-        if stopped {
-            return Ok(Outcome::Closed {
-                index: None,
-                reason: "the VM is not running".into(),
-            });
+        if let Some(at) = stopped_at {
+            // Records of a crash that stopped the VM land just after the stop, so event conditions get a moment.
+            if !has_events || now >= at + EVENT_GRACE || now >= deadline {
+                return Ok(Outcome::Closed {
+                    index: None,
+                    reason: "the VM is not running".into(),
+                });
+            }
+            env.sleep(POLL.min(deadline - now));
+            continue;
         }
         if let Some((index, reason)) = closed {
-            return Ok(Outcome::Closed {
-                index: Some(index),
-                reason,
-            });
+            // A console that ends with a crash can close before the crash record lands, as a stop can.
+            let at = *closed_at.get_or_insert(now);
+            if !has_events || now >= at + EVENT_GRACE || now >= deadline {
+                return Ok(Outcome::Closed {
+                    index: Some(index),
+                    reason,
+                });
+            }
         }
         if failure_confirmed && let Some((e, _)) = capture_failure {
             return Err(e);
@@ -808,6 +906,7 @@ fn timed_out(states: &mut [State]) -> Result<Outcome> {
                 }
                 texts.push((index, t.last_text.as_deref().map(cut_text)));
             }
+            State::Event(e) => resume.push((index, e.since, None)),
             State::Agent(_) | State::Settled(_) => {}
         }
     }
@@ -1046,6 +1145,7 @@ enum State {
     Job(JobState),
     Settled(SettleState),
     Text(TextState),
+    Event(EventState),
 }
 
 impl State {
@@ -1070,6 +1170,11 @@ impl State {
                 })
             }
             Check::Agent => State::Agent(Probe::default()),
+            // Without `since`, only records that land after the call began count.
+            Check::Event { kinds, since } => State::Event(EventState {
+                since: since.unwrap_or_else(|| env.event_head()),
+                kinds,
+            }),
             Check::Command(command) => State::Command(CommandState {
                 command: Arc::from(command),
                 os: None,
@@ -1111,6 +1216,7 @@ impl State {
             State::Job(j) => j.kind(),
             State::Settled(_) => "screen_settled",
             State::Text(_) => "screen_text",
+            State::Event(_) => "event",
         }
     }
 
@@ -1140,6 +1246,8 @@ impl State {
             }
             State::Command(c) => c.poll(now, deadline, guest),
             State::Job(j) => j.poll(now, deadline, guest),
+            // The loop reads the event log itself, through its environment.
+            State::Event(_) => Ok(Poll::Pending),
         }
     }
 }
@@ -1158,9 +1266,16 @@ impl Check {
             | Check::Agent
             | Check::Command(_)
             | Check::JobDone(_)
-            | Check::JobOutput { .. } => None,
+            | Check::JobOutput { .. }
+            | Check::Event { .. } => None,
         }
     }
+}
+
+/// An `event` condition: the first record after `since` of one of `kinds`, or of any kind when empty.
+struct EventState {
+    since: u64,
+    kinds: Vec<crate::events::Kind>,
 }
 
 /// A `screen_settled` condition.
@@ -1833,6 +1948,9 @@ mod tests {
         /// hold the loop until its probes have delivered.
         on_sleep: Option<Box<dyn Fn(u32) + Send + Sync>>,
         sleeps: AtomicU32,
+        /// The VM's event log, and (time since start, event) to add to it once due, in time order.
+        events: crate::events::Events,
+        due_events: Mutex<Vec<(Duration, crate::events::Raw)>>,
     }
 
     /// Counts the probe threads that have exited. A thread-local's destructor runs when its thread exits, after the
@@ -1888,6 +2006,17 @@ mod tests {
                 recogniser: None,
                 on_sleep: None,
                 sleeps: AtomicU32::new(0),
+                events: crate::events::Events::new(16),
+                due_events: Mutex::default(),
+            }
+        }
+
+        /// Adds the scripted events whose time has come to the log.
+        fn deliver_events(&self) {
+            let t = self.elapsed();
+            let mut due = self.due_events.lock().unwrap();
+            while due.first().is_some_and(|(at, _)| *at <= t) {
+                self.events.append(due.remove(0).1);
             }
         }
 
@@ -1906,6 +2035,20 @@ mod tests {
     }
 
     impl Env for FakeEnv {
+        fn event_head(&self) -> u64 {
+            self.deliver_events();
+            self.events.head(FAKE_UUID)
+        }
+
+        fn take_event(
+            &self,
+            since: u64,
+            kinds: &[crate::events::Kind],
+        ) -> Option<crate::events::Record> {
+            self.deliver_events();
+            self.events.take_match(FAKE_UUID, since, kinds)
+        }
+
         fn now(&self) -> Instant {
             *self.clock.lock().unwrap()
         }
@@ -3877,5 +4020,154 @@ mod tests {
         assert!(
             serde_json::from_value::<Condition>(json!({"kind": "console", "patern": "x"})).is_err()
         );
+    }
+
+    /// The UUID the fake environment's event log keys its VM by.
+    const FAKE_UUID: &str = "fake-vm";
+
+    fn event(kinds: &[crate::events::Kind], since: Option<u64>) -> Condition {
+        Condition::Event {
+            kinds: Some(kinds.to_vec()),
+            since,
+        }
+    }
+
+    fn lifecycle(event: u32, detail: u32) -> crate::events::Raw {
+        crate::events::Raw {
+            uuid: FAKE_UUID.into(),
+            name: "t-a".into(),
+            source: crate::events::Source::Lifecycle {
+                event: event as i32,
+                detail: detail as i32,
+            },
+            time: 1_800_000_000,
+        }
+    }
+
+    fn crash() -> crate::events::Raw {
+        lifecycle(
+            virt::sys::VIR_DOMAIN_EVENT_CRASHED,
+            virt::sys::VIR_DOMAIN_EVENT_CRASHED_PANICKED,
+        )
+    }
+
+    fn started() -> crate::events::Raw {
+        lifecycle(
+            virt::sys::VIR_DOMAIN_EVENT_STARTED,
+            virt::sys::VIR_DOMAIN_EVENT_STARTED_BOOTED,
+        )
+    }
+
+    fn matched_event(o: &Outcome) -> (usize, &Value, u64) {
+        match o {
+            Outcome::Event {
+                index,
+                record,
+                next,
+            } => (*index, record, *next),
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_event_condition_refuses_an_unknown_field() {
+        let refused = serde_json::from_value::<Condition>(
+            json!({"kind": "event", "kinds": ["crashed"], "timeout_secs": 5}),
+        );
+        assert!(refused.is_err());
+        assert!(
+            serde_json::from_value::<Condition>(json!({"kind": "event", "kinds": ["boom"]}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_event_comes_before_the_stopped_check_and_wins_over_closed() {
+        use crate::events::Kind;
+        let env = FakeEnv::new(vec![]);
+        env.due_events.lock().unwrap().push((ms(50), crash()));
+        let guest = FakeGuest::new();
+        guest.domain.store(0, Ordering::SeqCst);
+        let o = wait(
+            &env,
+            guest,
+            &[console("never"), event(&[Kind::Crashed], None)],
+            5,
+        );
+        let (index, record, next) = matched_event(&o);
+        assert_eq!((index, next), (1, 1));
+        assert_eq!(record["kind"], "crashed");
+        assert_eq!(record["detail"], "panicked");
+        assert_eq!(
+            o.to_json(Duration::ZERO)["result"],
+            "matched",
+            "an event match reads as a match"
+        );
+        // Without the event, the same stopped VM ends the wait as closed.
+        let guest = FakeGuest::new();
+        guest.domain.store(0, Ordering::SeqCst);
+        let o = wait(&FakeEnv::new(vec![]), guest, &[console("never")], 5);
+        assert!(matches!(o, Outcome::Closed { .. }), "{o:?}");
+    }
+
+    #[test]
+    fn a_wait_on_events_alone_matches_started_on_a_stopped_vm() {
+        use crate::events::Kind;
+        let env = FakeEnv::new(vec![]);
+        env.due_events.lock().unwrap().push((ms(800), started()));
+        let guest = FakeGuest::new();
+        guest.domain.store(0, Ordering::SeqCst);
+        let o = wait(&env, guest, &[event(&[Kind::Started], None)], 5);
+        assert_eq!(matched_event(&o).1["kind"], "started");
+    }
+
+    #[test]
+    fn since_catches_a_record_that_landed_between_two_calls_and_without_it_only_new_ones_count() {
+        use crate::events::Kind;
+        let env = FakeEnv::new(vec![]);
+        // The record lands before the wait starts, after a vm_events call returned next 0.
+        env.events.append(crash());
+        let o = wait(
+            &env,
+            FakeGuest::new(),
+            &[event(&[Kind::Crashed], Some(0))],
+            1,
+        );
+        assert_eq!(matched_event(&o).2, 1);
+        let env = FakeEnv::new(vec![]);
+        env.events.append(crash());
+        let o = wait(&env, FakeGuest::new(), &[event(&[Kind::Crashed], None)], 1);
+        assert!(matches!(o, Outcome::TimedOut { .. }), "{o:?}");
+    }
+
+    #[test]
+    fn a_zero_timeout_checks_event_conditions_once() {
+        use crate::events::Kind;
+        let env = FakeEnv::new(vec![]);
+        env.events.append(crash());
+        let o = wait(
+            &env,
+            FakeGuest::new(),
+            &[event(&[Kind::Crashed], Some(0))],
+            0,
+        );
+        assert_eq!(matched_event(&o).1["kind"], "crashed");
+    }
+
+    #[test]
+    fn records_of_another_vm_or_kind_never_match() {
+        use crate::events::Kind;
+        let env = FakeEnv::new(vec![]);
+        let mut other = crash();
+        other.uuid = "hidden-vm".into();
+        env.events.append(other);
+        env.events.append(started());
+        let o = wait(
+            &env,
+            FakeGuest::new(),
+            &[event(&[Kind::Crashed], Some(0))],
+            1,
+        );
+        assert!(matches!(o, Outcome::TimedOut { .. }), "{o:?}");
     }
 }

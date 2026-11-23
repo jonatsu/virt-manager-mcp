@@ -85,6 +85,15 @@ Each release's section lists what changed for people who run the server and for 
   Each record names its cause: the tool that caused it, `expiry` for the server's own expiry sweep, or `outside`,
   which includes expiries by the `virtmanager-mcp sweep` command. It works on a VM in any state and in read-only
   mode, and takes `since` and `kinds`.
+- `wait_for` takes an `event` condition with `kinds` and `since`, which matches a record of the VM's event log and
+  returns it as `record`, with its `seq` as `next`. It is checked before the check for a stopped VM, and after a stop
+  or a closed console the wait reads the log for 1 s more, so a crash wins over the stop it causes. A wait on events
+  alone works on a VM in any state.
+- A reply to any tool call that names a VM ends with a notice when something the agent should know happened to it
+  outside any tool call: a crash, a stop, a reboot, a watchdog firing, a pause for an I/O error, or a gap in the
+  events. The notice is its own text block after the result or error, names `vm_events since` for the details, and
+  appears once per server process, in the first such reply from any client. A crash under `preserve` adds that the VM
+  holds its memory until `stop_vm` with `force: true`.
 - Each VM keeps the console output of one earlier run. When a new run replaces a session, or `console_close`,
   `reset_vm` or `snapshot_revert` ends one, `console_read` with `run: "previous"` reads its output, closed, with the
   reason it ended and its own generation. `console_read` and `console_close` work on a stopped VM.

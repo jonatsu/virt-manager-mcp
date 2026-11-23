@@ -86,7 +86,7 @@ The path is passed as data, never spliced into shell code.
 | `vm_addresses`: a running VM's addresses per interface, from libvirt's DHCP lease, else the guest agent, else ARP | ✅ (lease and ARP only) |
 | `console_open`, `console_read`, `console_close` | ✅ |
 | `vm_events`: what happened to a VM since the server started (starts, stops, crashes, reboots, watchdog, guest agent, connection gaps), with what caused each | ✅ |
-| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text, background copy finished), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
+| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text, background copy finished, VM event), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
 | `job_read`, `job_list`: a background job's output and state | ✅ |
 | `job_start`, `job_stop`: run a long command detached in a Linux or Windows guest, and stop it | ❌ |
 | `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
@@ -499,6 +499,11 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 
 ## Notes and limitations
 
+- The server records each visible VM's starts, stops, crashes, reboots and similar events in memory, up to
+  `limits.max_events` per VM, until it exits or the VM is deleted; `vm_events` lists them. When one of them happened
+  outside any tool call, such as a guest panic, the next reply to a call that names the VM ends with a notice, once
+  per server process whichever client makes the call. With several agents on one server, only the first sees the
+  notice, and the others find the records with `vm_events`.
 - `exec` is not interactive: output is returned when the process exits. On timeout the server tries
   to kill the process (`kill -KILL` / `taskkill /F /T`). On Linux, children of the shell may survive.
 - When this server boots a VM, through `start_vm`, `create_vm_from_template` or `reset_vm`, it starts the VM paused,

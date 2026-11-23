@@ -12,7 +12,7 @@
 pub mod ffi;
 pub mod worker;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -275,8 +275,8 @@ struct VmLog {
     name: String,
     records: VecDeque<Record>,
     dropped: u64,
-    /// The highest `seq` an agent has been shown, by a notice, an unfiltered `vm_events` or a wait.
-    seen: u64,
+    /// The records a reply has shown, by a notice, an unfiltered `vm_events` or a wait match; they raise no notice.
+    shown: HashSet<u64>,
 }
 
 /// What `Events::read` returns.
@@ -464,8 +464,8 @@ impl Events {
         inner.push(uuid, name, record)
     }
 
-    /// The VM's records after `since`, oldest first, of `kinds` when given. Without `kinds`, the VM's seen-cursor
-    /// moves past what is returned.
+    /// The VM's records after `since`, oldest first, of `kinds` when given. Without `kinds`, the records returned
+    /// count as shown, so no notice announces them again.
     pub fn read(&self, uuid: &str, since: u64, kinds: Option<&[Kind]>) -> Read {
         let mut inner = self.lock();
         let Some(log) = inner.logs.get_mut(uuid) else {
@@ -483,7 +483,7 @@ impl Events {
             .collect();
         let next = records.last().map_or(since, |r| r.seq);
         if kinds.is_none() {
-            log.seen = log.seen.max(next);
+            log.shown.extend(records.iter().map(|r| r.seq));
         }
         Read {
             records,
@@ -502,7 +502,7 @@ impl Events {
             .map_or(0, |r| r.seq)
     }
 
-    /// The first record after `since` of one of `kinds`, which moves the seen-cursor past it.
+    /// The first record after `since` of one of `kinds`, or of any kind when empty, which then counts as shown.
     pub fn take_match(&self, uuid: &str, since: u64, kinds: &[Kind]) -> Option<Record> {
         let mut inner = self.lock();
         let log = inner.logs.get_mut(uuid)?;
@@ -511,27 +511,37 @@ impl Events {
             .iter()
             .find(|r| r.seq > since && (kinds.is_empty() || kinds.contains(&r.kind)))
             .cloned()?;
-        log.seen = log.seen.max(found.seq);
+        log.shown.insert(found.seq);
         Some(found)
     }
 
-    /// The VM's records with a notice that no agent has been shown yet; the seen-cursor moves past them, so each is
-    /// announced once per server process.
+    /// Whether a log kept under the VM name `name` holds a record with a notice that no reply has shown, so a reply
+    /// naming that VM needs the libvirt lookup that finds its UUID.
+    pub fn has_pending_notice(&self, name: &str) -> bool {
+        let inner = self.lock();
+        inner.logs.values().any(|log| {
+            log.name == name
+                && log
+                    .records
+                    .iter()
+                    .any(|r| r.has_notice() && !log.shown.contains(&r.seq))
+        })
+    }
+
+    /// The VM's records with a notice that no reply has shown yet, which then count as shown, so each is announced
+    /// once per server process.
     pub fn take_notices(&self, uuid: &str) -> (String, Vec<Record>) {
         let mut inner = self.lock();
         let Some(log) = inner.logs.get_mut(uuid) else {
             return (String::new(), Vec::new());
         };
-        let seen = log.seen;
         let notices: Vec<Record> = log
             .records
             .iter()
-            .filter(|r| r.seq > seen && r.has_notice())
+            .filter(|r| r.has_notice() && !log.shown.contains(&r.seq))
             .cloned()
             .collect();
-        if let Some(last) = notices.last() {
-            log.seen = last.seq;
-        }
+        log.shown.extend(notices.iter().map(|r| r.seq));
         (log.name.clone(), notices)
     }
 
@@ -549,7 +559,7 @@ impl Inner {
             name: String::new(),
             records: VecDeque::new(),
             dropped: 0,
-            seen: 0,
+            shown: HashSet::new(),
         });
         if !name.is_empty() {
             log.name = name.to_string();
@@ -563,7 +573,9 @@ impl Inner {
         let log = self.log(uuid, name);
         log.records.push_back(record);
         while log.records.len() > max {
-            log.records.pop_front();
+            if let Some(old) = log.records.pop_front() {
+                log.shown.remove(&old.seq);
+            }
             log.dropped += 1;
         }
         seq
@@ -1028,5 +1040,52 @@ mod tests {
         assert_eq!(format_utc(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(format_utc(1_795_438_931), "2026-11-23T13:02:11Z");
         assert_eq!(format_utc(4_107_542_399), "2100-02-28T23:59:59Z");
+    }
+
+    fn started(time: u64) -> Raw {
+        lifecycle(
+            sys::VIR_DOMAIN_EVENT_STARTED,
+            sys::VIR_DOMAIN_EVENT_STARTED_BOOTED,
+            time,
+        )
+    }
+
+    #[test]
+    fn a_read_from_past_an_unannounced_record_leaves_it_to_announce() {
+        let e = Events::new(16);
+        e.append(crashed(1));
+        e.append(started(2));
+        // A `since` from another VM or an earlier server process lies past the crash.
+        let read = e.read(UUID, 1, None);
+        assert_eq!(read.records.len(), 1);
+        assert!(e.has_pending_notice("t-deb"));
+        assert_eq!(e.take_notices(UUID).1[0].kind, Kind::Crashed);
+        assert!(!e.has_pending_notice("t-deb"));
+        // A stale `since` beyond every record returns nothing and changes nothing.
+        e.append(destroyed(3));
+        assert!(e.read(UUID, 500, None).records.is_empty());
+        assert_eq!(e.take_notices(UUID).1.len(), 1);
+    }
+
+    #[test]
+    fn a_wait_match_past_an_unannounced_record_leaves_it_to_announce() {
+        let e = Events::new(16);
+        e.append(crashed(1));
+        e.append(started(2));
+        let found = e.take_match(UUID, 0, &[Kind::Started]).unwrap();
+        assert_eq!(found.kind, Kind::Started);
+        let notices = e.take_notices(UUID).1;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, Kind::Crashed);
+    }
+
+    #[test]
+    fn a_record_the_bound_drops_leaves_nothing_behind() {
+        let e = Events::new(1);
+        e.append(crashed(1));
+        assert_eq!(e.read(UUID, 0, None).records.len(), 1);
+        e.append(destroyed(2));
+        let inner = e.lock();
+        assert!(inner.logs[UUID].shown.is_empty());
     }
 }
