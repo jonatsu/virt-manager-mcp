@@ -134,8 +134,9 @@ Other symlinks, device files, FIFOs and sockets are skipped and named in the rep
 gid 0 in the archive and unpacked with `tar -x -o`, so files belong to the user the guest agent runs as. GNU tar and
 busybox `tar` read `-o` on extraction as "do not restore the archive's owner", and so does Windows `tar.exe`.
 
-In the guest, the archive is written beside the target as `.vmm-<random>.tar`, on the same filesystem, and unpacked
-into `.vmm-<random>.d`. Without `replace`, an existing target is refused before anything is sent. With `replace`, the
+In the guest, the archive is written beside the target, on the same filesystem, and unpacked into `.vmm-<random>.d`.
+A Linux guest gets it as `.vmm-<random>.tar`, and a Windows guest as `push.tar` inside `.vmm-<random>.a` (see Windows
+guests). Without `replace`, an existing target is refused before anything is sent. With `replace`, the
 old tree is moved aside, the new one moved in, and the old one deleted. A failed push deletes its temporary files and
 leaves the old tree in place. `replace` refuses `/` and any directory directly below it, and on Windows a drive root
 and its direct children, as a guard against mistakes.
@@ -261,12 +262,12 @@ to a directory that `SYSTEM` creates there ([probe note](../research/2026-11-13-
 therefore creates its staging directory with an access list that is protected from inheritance and grants full
 control only to `SYSTEM` and `Administrators`, given as SIDs because group names are localized. It reads the
 directory back before unpacking, and refuses one that is a junction, has another owner, or holds any other list. The
-owner matters because the archive, written first, shows the staging directory's name, and a user who created that
-directory first could change its list later. So no other guest user can add entries while `tar.exe` unpacks. The
-archive itself goes into a second directory made and checked the same way, `.vmm-<random>.a`, as `push.tar`, because
-a file `SYSTEM` writes under `C:\Users\Public` would otherwise let an interactive user rewrite it before the unpack
-([probe note](../research/2026-11-23-windows-archive-probe.md)). After the
-unpack, in a step of its own with the unpack's long timeout, the directory gets back the access list its parent passes
+owner matters because the archive directory, made first, shows the random part of the staging directory's name, and a
+user who created that directory first could change its list later. So no other guest user can add entries while
+`tar.exe` unpacks. The archive itself goes into that second directory, `.vmm-<random>.a`, made and checked the same
+way, as `push.tar`, because a file `SYSTEM` writes under `C:\Users\Public` would otherwise let an interactive user
+rewrite it before the unpack ([probe note](../research/2026-11-23-windows-archive-probe.md)). After the unpack, in a
+step of its own with the unpack's long timeout, the directory gets back the access list its parent passes
 on, and Windows propagates it to every entry, so the pushed tree ends with the permissions that a directory created
 there would have. The step applies the same list each time, so a failed run is repeated once; a second failure fails
 the push and deletes the staging tree.
@@ -369,9 +370,8 @@ that meets a symlinked directory.
 8. A guest user who may delete or rename entries in a Windows push's target parent can replace the staging directory
    with a junction between its creation and the unpack, and so make the push write elsewhere as `SYSTEM`. That user
    might own the parent, as in `C:\Users\alice\app`. The parent might also be a directory that a push's probe created
-   below `C:\Users\Public`, which passes delete rights on to interactive users. Roadmap follow-up 23 records it. The
-   archive, written beside the target before the staging directory exists, inherits the parent's list too, so under
-   `C:\Users\Public` an interactive user could rewrite it before the unpack; follow-up 25 records that.
+   below `C:\Users\Public`, which passes delete rights on to interactive users. Roadmap follow-up 23 records it. Such
+   a user could swap the archive directory the same way.
 9. The Windows guest agent from `virtio-win` 0.1.302 fails any `guest-exec` whose arguments are not ASCII, and libvirt
    reports only `failed to parse JSON: invalid utf-8 string`. The pull works around it; `exec` with `program` meets it
    too, which roadmap follow-up 22 records.

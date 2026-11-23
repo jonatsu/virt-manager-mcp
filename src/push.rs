@@ -1721,6 +1721,8 @@ mod tests {
         calls: RefCell<Vec<String>>,
         probe: i64,
         make_dir: i64,
+        /// Gives `make_dir` only to the directory whose name ends with this, and 0 to the other.
+        make_dir_only: Option<&'static str>,
         unpack: i64,
         inherit: i64,
         swaps: RefCell<Vec<i64>>,
@@ -1741,6 +1743,7 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 probe: 0,
                 make_dir: 0,
+                make_dir_only: None,
                 unpack: 0,
                 inherit: 0,
                 swaps: RefCell::new(Vec::new()),
@@ -1828,7 +1831,10 @@ mod tests {
             }
             let (code, stdout, stderr) = match step {
                 Step::Probe => (self.probe, WIN_TAR, ""),
-                Step::MakeDir => (self.make_dir, "", "cannot create"),
+                Step::MakeDir => match self.make_dir_only {
+                    Some(suffix) if !args[0].ends_with(suffix) => (0, "", ""),
+                    _ => (self.make_dir, "", "cannot create"),
+                },
                 Step::Inherit => (
                     self.inherit,
                     "",
@@ -1927,6 +1933,22 @@ mod tests {
                     ..WindowsGuest::new()
                 },
                 "the archive directory C:\\work\\.vmm-",
+            ),
+            (
+                WindowsGuest {
+                    make_dir: 1,
+                    make_dir_only: Some(".d"),
+                    ..WindowsGuest::new()
+                },
+                ".d in the guest failed: cannot create",
+            ),
+            (
+                WindowsGuest {
+                    make_dir: 2,
+                    make_dir_only: Some(".d"),
+                    ..WindowsGuest::new()
+                },
+                "the staging directory C:\\work\\.vmm-",
             ),
             (
                 WindowsGuest {
