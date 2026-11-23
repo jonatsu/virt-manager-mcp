@@ -265,6 +265,16 @@ impl<H: Host> Worker<H> {
                 self.cache.remove(&raw.uuid);
                 self.host.forget(&raw.uuid);
                 events.drop_vm(&raw.uuid);
+                // Its waiting events go too: retried, their lookup would find the VM gone and cache it as hidden, which
+                // nothing clears if a VM comes back under the same UUID.
+                let before = self.unplaced.len();
+                self.unplaced.retain(|r| r.uuid != uuid);
+                let mut in_flight = self.listener.in_flight();
+                for _ in self.unplaced.len()..before {
+                    if let Some(at) = in_flight.iter().position(|u| *u == uuid) {
+                        in_flight.remove(at);
+                    }
+                }
             } else {
                 match self.visible(&raw) {
                     Some(true) => {
@@ -801,6 +811,37 @@ mod tests {
         assert!(kinds(l.events(), "a").is_empty());
         assert_eq!(*host.forgotten.borrow(), vec!["a".to_string()]);
         assert_eq!(host.lookups.get(), 1);
+    }
+
+    #[test]
+    fn undefined_drops_its_vms_waiting_events_so_a_vm_back_under_its_uuid_is_seen() {
+        let host = FakeHost::default();
+        host.unanswered.set(1);
+        let l = listener();
+        let mut w = Worker::new(l.clone(), &host);
+        // a's start waits for an unanswered lookup, then its undefine comes in the same pass.
+        w.handle(
+            batch(vec![
+                started("a", "t-a", 1),
+                lifecycle(
+                    "a",
+                    "t-a",
+                    sys::VIR_DOMAIN_EVENT_UNDEFINED,
+                    sys::VIR_DOMAIN_EVENT_UNDEFINED_REMOVED,
+                    2,
+                ),
+            ]),
+            2,
+        );
+        // The waiting start is gone with its VM, so no later retry can find the VM missing and cache it as hidden.
+        assert!(w.unplaced.is_empty());
+        assert!(l.in_flight().is_empty());
+        // Defined again under the same UUID and name: its events are looked up afresh and recorded.
+        w.handle(batch(vec![started("a", "t-a", 3)]), 3);
+        let records = l.events().read("a", 0, None).records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].time, 3);
+        assert_eq!(host.lookups.get(), 2);
     }
 
     #[test]
