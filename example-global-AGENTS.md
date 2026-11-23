@@ -89,7 +89,7 @@ Keep a record of what is installed in each VM so later sessions do not re-check 
   ```markdown
   # ubuntu26.04
   OS: Ubuntu 26.04, package manager: apt
-  Normal user: skorooblacik
+  Normal user: alice
   Last system update: 2026-10-15
 
   - rustc 1.94 (rustup for alice, ~/.cargo/bin) - 2026-10-15
