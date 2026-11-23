@@ -201,8 +201,8 @@ described below.
   `C:\ProgramData`, and an owner can rewrite an access list, so the owner check matters.
 - Windows exit codes follow `powershell -File`: the code passed to `exit`, 1 after an uncaught error, and 0 otherwise,
   even after a failing native program. A job ends with `exit $LASTEXITCODE` to pass on a native program's code. The
-  `command` condition runs like `exec`, through `-EncodedCommand`, where a failing native program or cmdlet as the last
-  command gives 1. In both, `$false` is not a failure, so a test needs `exit [int](-not (...))`.
+  `command` condition runs like `exec`, through `-Command` with a closing `$?` check, where a failing native program or
+  cmdlet as the last command gives 1. In both, `$false` is not a failure, so a test needs `exit [int](-not (...))`.
 
 `job_read` returns output from an offset, up to `max_bytes` (by default `max_output_bytes`), the next offset, and
 the exit code once the job has ended. A job whose process is gone without an exit code, after a reboot or a kill,

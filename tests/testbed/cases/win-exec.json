@@ -100,6 +100,99 @@
     }
   },
   {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Write-Output x; cmd /c exit 5"
+    },
+    "expect": {
+      "contains": "\"exit_code\":1,",
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Get-Item C:\\nope"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":1,",
+        "Cannot find path"
+      ],
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Get-Item C:\\nope; 'after'"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0,",
+        "after"
+      ],
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "cmd /c exit 5 `"
+    },
+    "expect": {
+      "contains": "\"exit_code\":1,",
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "if ("
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":1,",
+        "Missing closing ')'"
+      ],
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$input | ForEach-Object { 'in:' + $_ }",
+      "stdin": "abc\ndef\n"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0,",
+        "in:abc",
+        "in:def"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "'all:' + [Console]::In.ReadToEnd()",
+      "stdin": "xyz"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":0,",
+        "all:xyz"
+      ]
+    }
+  },
+  {
     "tool": "write_file",
     "args": {
       "vm": "t-win11",

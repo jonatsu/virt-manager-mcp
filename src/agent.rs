@@ -511,15 +511,27 @@ pub enum Shell {
 /// first use", so the script turns them off. It also writes error records as CLIXML whenever it runs
 /// `-EncodedCommand`, whatever `-OutputFormat` says. So the command runs through `-Command -OutputFormat Text`
 /// instead, as a dot-sourced script block decoded from base64, which keeps the command line ASCII. The last line
-/// keeps the exit status `-Command` gives: 1 when the last statement failed, unless the command exits itself.
+/// keeps the exit status `-Command` gives: 1 when the last statement failed, unless the command exits itself. A blank
+/// line before it ends a command whose last line continues with a backtick.
+///
+/// A script block has its own empty `$input`, so a command that reads stdin through `$input` gets the outer one
+/// passed in. Any use of the outer `$input` reads all of stdin, which would leave `[Console]::In` empty, so it is
+/// passed only when the command names `$input`.
 fn powershell_command(cmd: &str) -> ExecSpec {
+    let lower = cmd.to_ascii_lowercase();
+    let uses_input = lower.contains("$input") || lower.contains("${input}");
+    let (outer, inner) = if uses_input {
+        ("$vmmInput = ,$input; ", "$input = $vmmInput[0]; ")
+    } else {
+        ("", "")
+    };
     let script = format!(
-        "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}\n\
+        "{inner}$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}\n\n\
          if (-not $?) {{ exit 1 }}"
     );
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let run = format!(
-        ". ([scriptblock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'))))",
+        "{outer}. ([scriptblock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'))))",
         B64.encode(utf16)
     );
     ExecSpec::new(
@@ -586,8 +598,33 @@ mod tests {
             let script = command_script(&shell_spec(GuestOs::Windows, shell, "Get-Date").unwrap());
             assert_eq!(
                 script,
-                "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\nGet-Date\n\
+                "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\nGet-Date\n\n\
                  if (-not $?) { exit 1 }"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_powershell_passes_input_only_to_a_command_that_reads_it() {
+        let plain = shell_spec(
+            GuestOs::Windows,
+            Shell::Default,
+            "[Console]::In.ReadToEnd()",
+        )
+        .unwrap();
+        assert!(!plain.args.last().unwrap().contains("$input"));
+        assert!(!command_script(&plain).contains("$vmmInput"));
+
+        for cmd in ["$input | Sort-Object", "${Input} | Measure-Object"] {
+            let spec = shell_spec(GuestOs::Windows, Shell::Default, cmd).unwrap();
+            assert!(
+                spec.args
+                    .last()
+                    .unwrap()
+                    .starts_with("$vmmInput = ,$input; . ")
+            );
+            assert!(
+                command_script(&spec).starts_with("$input = $vmmInput[0]; $ProgressPreference")
             );
         }
     }
