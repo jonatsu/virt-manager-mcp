@@ -1049,7 +1049,8 @@ impl VirtServer {
         Files arrive owned by the guest agent's user, without setuid or setgid bits. The reply \
         counts files, bytes and the files .gitignore kept out. A push still running after limits.max_wait_secs \
         continues in the background and replies with a `transfer` ID; wait_for's `transfer_done` condition reports \
-        how it ended. Temporary entries beside the target start with .vmm-."
+        how it ended. Temporary entries start with .vmm-: beside the target on Linux, and in %SystemRoot%\\Temp on \
+        Windows."
     )]
     async fn copy_dir_to_vm(
         &self,

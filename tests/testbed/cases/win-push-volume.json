@@ -25,6 +25,17 @@
     "args": {
       "vm": "t-win11",
       "host_path": "${tree}",
+      "guest_path": "C:\\vmm-volref\\app"
+    },
+    "expect": {
+      "contains": "\"files\":4"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${tree}",
       "guest_path": "X:\\vmm-vol\\app",
       "replace": true
     },
@@ -37,16 +48,20 @@
     "tool": "exec",
     "args": {
       "vm": "t-win11",
-      "command": "$t = 'X:\\vmm-vol\\app'\nGet-ChildItem -LiteralPath $t -Recurse -File -Force | Sort-Object FullName | ForEach-Object { $_.FullName.Substring($t.Length + 1) + ' ' + (Get-FileHash -LiteralPath $_.FullName).Hash }\nfunction Rules($d) { foreach ($r in '', '\\a.txt', '\\sub', '\\sub\\b.txt') { $a = Get-Acl -LiteralPath \"$d$r\"; \"$r protected=$($a.AreAccessRulesProtected)\"; $a.Access | ForEach-Object { \"$r $($_.IdentityReference) $($_.FileSystemRights) $($_.InheritanceFlags) $($_.PropagationFlags) inherited=$($_.IsInherited)\" } } }\n$ref = 'X:\\vmm-vol\\ref'\n[void](New-Item -ItemType Directory \"$ref\\sub\")\nSet-Content -LiteralPath \"$ref\\a.txt\" -Value a\nSet-Content -LiteralPath \"$ref\\sub\\b.txt\" -Value b\nif (Compare-Object (Rules $t) (Rules $ref)) { 'acl=differs'; Rules $t; '--'; Rules $ref } else { 'acl=same' }\n'vmm=' + (Get-ChildItem -Force -LiteralPath 'X:\\vmm-vol', (Join-Path $env:SystemRoot 'Temp') -Filter '.vmm-*' | Measure-Object).Count"
+      "command": "$t = 'X:\\vmm-vol\\app'\nGet-ChildItem -LiteralPath $t -Recurse -File -Force | Sort-Object FullName | ForEach-Object { $_.FullName.Substring($t.Length + 1) + ' ' + (Get-FileHash -LiteralPath $_.FullName).Hash }\nfunction Rules($d) { foreach ($r in '', '\\a.txt', '\\sub', '\\sub\\b.txt') { $a = Get-Acl -LiteralPath \"$d$r\"; \"$r protected=$($a.AreAccessRulesProtected)\"; $a.Access | ForEach-Object { \"$r $($_.IdentityReference) $($_.FileSystemRights) $($_.InheritanceFlags) $($_.PropagationFlags) inherited=$($_.IsInherited)\" } } }\n$ref = 'X:\\vmm-vol\\ref'\n[void](New-Item -ItemType Directory \"$ref\\sub\")\nSet-Content -LiteralPath \"$ref\\a.txt\" -Value a\nSet-Content -LiteralPath \"$ref\\sub\\b.txt\" -Value b\nif (Compare-Object (Rules $t) (Rules $ref)) { 'acl=differs'; Rules $t; '--'; Rules $ref } else { 'acl=same' }\n'vmm=' + (Get-ChildItem -Force -LiteralPath 'X:\\vmm-vol', (Join-Path $env:SystemRoot 'Temp') -Filter '.vmm-*' | Measure-Object).Count\n# A push on the system volume moves the unpacked tree, so its times are the ones tar.exe set; the copy must keep them.\n$c = 'C:\\vmm-volref\\app'\n$times = Get-ChildItem -LiteralPath $t -Recurse -Force | ForEach-Object { $r = $_.FullName.Substring($t.Length); $o = Get-Item -LiteralPath \"$c$r\" -Force; if ($_ -is [IO.FileInfo] -and $_.LastWriteTimeUtc -ne $o.LastWriteTimeUtc) { \"$r $($_.LastWriteTimeUtc.Ticks) $($o.LastWriteTimeUtc.Ticks)\" } }\nif ($times) { 'times=differ'; $times } else { 'times=same' }\nRemove-Item -LiteralPath 'C:\\vmm-volref' -Recurse -Force"
     },
     "expect": {
       "contains": [
+        "times=same",
         "a.txt B6A98D9CE9A2D9149288FA3DF42D377C3E42737AFDCDAF714E33C0A100B51060",
         "sub\\b.txt F2C82DECDD7181CF98945929A62598DB7E6B477E11F6E0EB0AE97020EFF151AD",
         "acl=same",
         "vmm=0"
       ],
-      "absent": "acl=differs"
+      "absent": [
+        "acl=differs",
+        "times=differ"
+      ]
     }
   },
   {

@@ -11,8 +11,13 @@ $ErrorActionPreference = 'Stop'
 $stderr = New-Object IO.StreamWriter ([Console]::OpenStandardError()), (New-Object Text.UTF8Encoding $false)
 $stderr.AutoFlush = $true
 $helper, $target, $staging, $copy, $old, $replace = $argv
+# Add-Type writes its source, options and assembly to the temporary directory. Recent Windows gives SYSTEM its own,
+# %SystemRoot%\SystemTemp, whatever TEMP says. Older Windows takes TEMP, which for SYSTEM is %SystemRoot%\Temp, where
+# every user may create files, so there the compiler works in the push's own directory, which only SYSTEM and
+# Administrators can write.
+$env:TEMP = $env:TMP = Split-Path -LiteralPath $helper
 try {
-  Add-Type -Path $helper
+  Add-Type -LiteralPath $helper
 } catch {
   $stderr.Write("compiling the push helper failed: $($_.Exception.Message)")
   exit 23

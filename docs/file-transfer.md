@@ -35,9 +35,11 @@ and read-only mode hides all four.
 - `copy_dir_to_vm` pushes a host directory into a guest, for example a checkout. It follows the
   `.gitignore` rules in the tree and in its parent directories inside the share (`respect_gitignore`, on by default),
   leaves `.git` out unless `include_git` is set, and takes more `exclude` patterns. A symlink goes along only when it
-  stays inside the tree; other links, FIFOs, sockets and devices are skipped and named in the reply. The guest
-  unpacks the archive beside the target as `.vmm-<random>.d`. Files keep their host modes without setuid and setgid
-  bits, and belong to the user the guest agent runs as. An existing target is replaced as a whole only with
+  stays inside the tree; other links, FIFOs, sockets and devices are skipped and named in the reply. A Linux guest
+  unpacks the archive beside the target as `.vmm-<random>.d`, and a Windows guest as
+  [Directory transfers on Windows](#directory-transfers-on-windows) describes. Files keep their host modes without
+  setuid and setgid bits, and belong to the user the guest agent runs as. An existing target is replaced as a whole
+  only with
   `replace: true`, never `/` or a directory directly below it, and a failed push leaves the old target in place.
 - `copy_dir_from_vm` pulls a directory from a guest. A Linux guest packs it in `/var/tmp`, or `/tmp` when that is
   missing, and the server deletes the archive afterwards. The server unpacks the archive itself, because
@@ -55,7 +57,7 @@ Every copy waits up to `limits.max_wait_secs`. A longer copy goes on in the back
 ID, and `wait_for` with a lone `transfer_done` condition reports how it ended. At most `limits.max_transfers`
 (default 4) copies run at once, and the server keeps the newest 64 results. A background copy lives in the server
 process, so it ends when the server does. A push cut short, for example by the VM stopping, can leave `.vmm-*`
-entries beside its target in the guest; delete them through `exec`.
+entries in the guest, beside its target on Linux and in `%SystemRoot%\Temp` on Windows; delete them through `exec`.
 
 `vm_addresses` tells an agent where to reach a guest for other ways of moving files, such as `scp`. For each
 interface it takes libvirt's DHCP lease, then the guest agent's answer, then the host's ARP table, and names the
@@ -83,11 +85,12 @@ The guest agent fails a command whose arguments are not ASCII, so a pull from su
   file or a directory. A name outside the guest's code page, such as a Japanese name on a Western guest, fails the
   push in `tar.exe`.
 - Every pushed file and directory arrives writable; host modes do not carry over. A push writes its archive and
-  unpacks it in `%SystemRoot%\Temp`, in directories that only `SYSTEM` and `Administrators` can write, where no
-  other guest user may rename or delete them. A helper that the push compiles in the guest then does everything in
-  the target's parent in one step: it creates missing parents, moves the tree in, gives it the access list its
-  parent passes on, and deletes a replaced tree. It holds each directory on the way open and acts only on open
-  handles, so a guest user who may rename entries in the parent, such as its owner, cannot redirect the push.
+  unpacks it in `%SystemRoot%\Temp`, so the system drive needs room for both. Only `SYSTEM` and `Administrators` can
+  write those directories, and no other guest user may rename or delete them. A helper that the push compiles in the
+  guest then does everything in the target's parent in one step: it creates missing parents, moves the tree in,
+  gives it the access list its parent passes on, and deletes a replaced tree. It holds each directory on the way open
+  and acts only on open handles, so a guest user who may rename entries in the parent, such as its owner, cannot
+  redirect the push.
 - A push refuses a target whose path passes through a junction, a symbolic link or a mount point, and a reserved
   device name such as `CON` as the target or one of its parents. A folder of a cloud-file provider, such as OneDrive,
   is no such link and works. A target on another drive than `%SystemRoot%` is copied there instead of moved, which

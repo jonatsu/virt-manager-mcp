@@ -1021,12 +1021,25 @@ else
 fi
 exit 0"#;
 
-/// The exit status of a Windows `Place` step whose move the guest refused because a file is in use or access was
-/// denied, after which nothing has changed.
-const PLACE_BUSY: i64 = 20;
-
-/// The exit status of a Windows `Place` step that put the new tree in place but could not delete the old one.
-const PLACE_OLD_LEFT: i64 = 30;
+/// The exit statuses of a Windows `Place` step, named as the public constants of `VmmPush` in `push-helper.cs`, which a
+/// test in `winsteps.rs` compares with these.
+pub(crate) mod place_status {
+    pub const EXISTS: i64 = 11;
+    pub const NOT_A_DIRECTORY: i64 = 12;
+    pub const NO_PARENTS: i64 = 13;
+    pub const BOTH_STUCK: i64 = 18;
+    /// The guest refused a move because a file is in use or access was denied, after which nothing has changed.
+    pub const BUSY: i64 = 20;
+    pub const REDIRECTED: i64 = 21;
+    pub const NOT_INHERITED: i64 = 22;
+    /// Set by `push-place.ps1`, not the helper.
+    pub const NOT_COMPILED: i64 = 23;
+    pub const RESERVED_NAME: i64 = 24;
+    pub const NOT_COPIED: i64 = 25;
+    pub const INHERIT_STUCK: i64 = 26;
+    /// The new tree is in place, but the old one could not be deleted.
+    pub const OLD_LEFT: i64 = 30;
+}
 
 /// How long a push waits before it runs a refused Windows `Place` step once more.
 const PLACE_RETRY: Duration = Duration::from_secs(1);
@@ -1079,6 +1092,12 @@ fn push_retrying(
         Some(15) if target.os == GuestOs::Windows => bail!(
             "the guest's PowerShell runs in a restricted language mode, such as Constrained Language Mode, which \
              cannot load the helper that copy_dir_to_vm runs in a Windows guest"
+        ),
+        // The Windows probe only reads; its Place step creates the parents.
+        _ if target.os == GuestOs::Windows => bail!(
+            "checking {} in the guest failed: {}",
+            target.path,
+            probe.describe()
         ),
         _ => bail!(
             "cannot create the parent directories of {} in the guest: {}",
@@ -1313,7 +1332,7 @@ fn place(
         flag,
     ];
     let mut ran = guest.run(Step::Place, &args)?;
-    if ran.code == Some(PLACE_BUSY) {
+    if ran.code == Some(place_status::BUSY) {
         // A virus scanner may still hold a file it is checking in the freshly unpacked tree.
         std::thread::sleep(PLACE_RETRY);
         ran = guest.run(Step::Place, &args)?;
@@ -1322,34 +1341,44 @@ fn place(
     let why = ran.describe();
     match ran.code {
         Some(0) => Ok(summary),
-        Some(PLACE_OLD_LEFT) => {
+        Some(place_status::OLD_LEFT) => {
             summary.note = Some(why);
             Ok(summary)
         }
-        Some(11) => bail!(
+        Some(place_status::EXISTS) => bail!(
             "{path} exists in the guest, or appeared during the push; nothing was replaced: {why}"
         ),
-        Some(12) => bail!(
+        Some(place_status::NOT_A_DIRECTORY) => bail!(
             "{path} became something other than a directory during the push; nothing was replaced: {why}"
         ),
-        Some(13) => bail!("cannot create the parent directories of {path} in the guest: {why}"),
-        Some(18) => bail!("could not move the new tree into {path}, nor the old tree back: {why}"),
-        Some(PLACE_BUSY) => bail!(
+        Some(place_status::NO_PARENTS) => {
+            bail!("cannot create the parent directories of {path} in the guest: {why}")
+        }
+        Some(place_status::BOTH_STUCK) => {
+            bail!("could not move the new tree into {path}, nor the old tree back: {why}")
+        }
+        Some(place_status::BUSY) => bail!(
             "the guest refused to move the tree into {path}, usually because a file in it is open; the old tree is \
              unchanged: {why}"
         ),
-        Some(21) => bail!(
+        Some(place_status::REDIRECTED) => bail!(
             "the push stopped, because the path to {path} passes through a junction, a symbolic link or a mount \
              point, which could send it elsewhere; push to a path without one: {why}"
         ),
-        Some(22) => bail!(
+        Some(place_status::NOT_INHERITED) => bail!(
             "giving the new tree the access list of its parent failed, so nothing was replaced: {why}"
         ),
-        Some(23) => bail!("the guest could not compile the push helper: {why}"),
-        Some(24) => bail!("the guest cannot hold this path: {why}"),
-        Some(25) => {
+        Some(place_status::NOT_COMPILED) => {
+            bail!("the guest could not compile the push helper: {why}")
+        }
+        Some(place_status::RESERVED_NAME) => bail!("the guest cannot hold this path: {why}"),
+        Some(place_status::NOT_COPIED) => {
             bail!("copying the tree to the volume of {path} failed, so nothing was replaced: {why}")
         }
+        Some(place_status::INHERIT_STUCK) => bail!(
+            "giving the new tree the access list of its parent failed, and undoing the push failed too, so the \
+             trees are not where they belong: {why}"
+        ),
         _ => bail!("could not move the new tree into {path}; the old tree is unchanged: {why}"),
     }
 }
@@ -2039,7 +2068,7 @@ mod tests {
             (probe(10), "no System32\\tar.exe"),
             (probe(11), "pass replace: true"),
             (probe(12), "not a directory"),
-            (probe(13), "parent directories"),
+            (probe(13), r"checking C:\work\app in the guest failed"),
             (probe(15), "restricted language mode"),
             (
                 WindowsGuest {
@@ -2093,6 +2122,7 @@ mod tests {
             (place(23), "could not compile the push helper"),
             (place(24), "cannot hold this path"),
             (place(25), "copying the tree to the volume"),
+            (place(26), "undoing the push failed too"),
         ];
         for (guest, why) in cases {
             let err = guest.push(true).unwrap_err().to_string();
@@ -2116,7 +2146,7 @@ mod tests {
     #[test]
     fn an_old_tree_the_place_step_could_not_delete_is_a_note_on_success() {
         let guest = WindowsGuest {
-            places: RefCell::new(vec![PLACE_OLD_LEFT]),
+            places: RefCell::new(vec![place_status::OLD_LEFT]),
             cleanup: 1,
             ..WindowsGuest::new()
         };
@@ -2233,14 +2263,14 @@ mod tests {
     #[test]
     fn a_place_refused_for_an_open_file_runs_once_more_then_fails() {
         let guest = WindowsGuest {
-            places: RefCell::new(vec![PLACE_BUSY]),
+            places: RefCell::new(vec![place_status::BUSY]),
             ..WindowsGuest::new()
         };
         guest.push(true).unwrap();
         assert_eq!(guest.count("Place"), 2);
 
         let guest = WindowsGuest {
-            places: RefCell::new(vec![PLACE_BUSY, PLACE_BUSY]),
+            places: RefCell::new(vec![place_status::BUSY, place_status::BUSY]),
             ..WindowsGuest::new()
         };
         let err = guest.push(true).unwrap_err().to_string();

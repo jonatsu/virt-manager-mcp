@@ -134,9 +134,9 @@ Other symlinks, device files, FIFOs and sockets are skipped and named in the rep
 gid 0 in the archive and unpacked with `tar -x -o`, so files belong to the user the guest agent runs as. GNU tar and
 busybox `tar` read `-o` on extraction as "do not restore the archive's owner", and so does Windows `tar.exe`.
 
-In the guest, the archive is written beside the target, on the same filesystem, and unpacked into `.vmm-<random>.d`.
-A Linux guest gets it as `.vmm-<random>.tar`, and a Windows guest as `push.tar` inside `.vmm-<random>.a` (see Windows
-guests). Without `replace`, an existing target is refused before anything is sent. With `replace`, the
+A Linux guest gets the archive beside the target, on the same filesystem, as `.vmm-<random>.tar`, and unpacks it into
+`.vmm-<random>.d` there. A Windows guest gets it as `push.tar` inside `.vmm-<random>.a` in `%SystemRoot%\Temp` (see
+Windows guests). Without `replace`, an existing target is refused before anything is sent. With `replace`, the
 old tree is moved aside, the new one moved in, and the old one deleted. A failed push deletes its temporary files and
 leaves the old tree in place. `replace` refuses `/` and any directory directly below it, and on Windows a drive root
 and its direct children, as a guard against mistakes.
@@ -272,9 +272,10 @@ on, and Windows propagates it to every entry, so the pushed tree ends with the p
 there would have. The step applies the same list each time, so a failed run is repeated once; a second failure fails
 the push and deletes the staging tree.
 
-Those directories now live in `%SystemRoot%\Temp`, and one `Place` step does everything in the target's parent on
-open handles, as [`windows-push-staging-design.md`](windows-push-staging-design.md) describes; that design owns the
-Windows push from the unpack on.
+That was the design until the staging moved: those directories now live in `%SystemRoot%\Temp`, there is no
+separate inheritance step, and one `Place` step does everything in the target's parent on open handles, as
+[`windows-push-staging-design.md`](windows-push-staging-design.md) describes; that design owns the Windows push from
+the unpack on.
 
 A pull from a Windows guest packs into `%SystemRoot%\Temp` (`C:\Windows\Temp` on most guests), where only `SYSTEM`
 and `Administrators` can read the files that the agent creates. Any non-zero exit status of `tar.exe` fails the

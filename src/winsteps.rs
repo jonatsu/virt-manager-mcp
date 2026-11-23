@@ -105,7 +105,9 @@ exit $errors.Count"#;
         const CHECK: &str = r#"Add-Type -Path $env:VMM_CS_FILE
 $m = [VmmPush].GetMethod('Place')
 if ($null -eq $m) { 'no Place method'; exit 1 }
-($m.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ','"#;
+($m.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ','
+[VmmPush].GetFields() | Where-Object IsLiteral | Sort-Object { $_.GetValue($null) } |
+  ForEach-Object { '{0}={1}' -f $_.Name, $_.GetValue($null) }"#;
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/winsteps/push-helper.cs");
         let out = match Command::new("pwsh")
             .args(["-NoProfile", "-NonInteractive", "-Command", CHECK])
@@ -129,9 +131,37 @@ if ($null -eq $m) { 'no Place method'; exit 1 }
             "{stdout}{}",
             String::from_utf8_lossy(&out.stderr)
         );
+        let mut lines = stdout.lines();
         assert_eq!(
-            stdout.trim(),
-            "String,String,String,String,Boolean,TextWriter"
+            lines.next(),
+            Some("String,String,String,String,Boolean,TextWriter")
+        );
+        // Every exit status the helper returns is the one push.rs maps; 23 comes from the script and 14 to 16 share
+        // push.rs's fallback message.
+        use crate::push::place_status as s;
+        let expected = [
+            ("Done", 0),
+            ("Exists", s::EXISTS),
+            ("NotADirectory", s::NOT_A_DIRECTORY),
+            ("NoParents", s::NO_PARENTS),
+            ("OldStuck", 14),
+            ("NewStuckOldBack", 15),
+            ("NewStuck", 16),
+            ("BothStuck", s::BOTH_STUCK),
+            ("Busy", s::BUSY),
+            ("Redirected", s::REDIRECTED),
+            ("NotInherited", s::NOT_INHERITED),
+            ("ReservedName", s::RESERVED_NAME),
+            ("NotCopied", s::NOT_COPIED),
+            ("InheritStuck", s::INHERIT_STUCK),
+            ("OldLeft", s::OLD_LEFT),
+        ]
+        .map(|(name, code)| format!("{name}={code}"));
+        assert_eq!(lines.collect::<Vec<_>>(), expected);
+        assert!(
+            !expected
+                .iter()
+                .any(|e| e.ends_with(&format!("={}", s::NOT_COMPILED)))
         );
         assert!(PUSH_PLACE.contains(
             "[VmmPush]::Place($target, $staging, $copy, $old, $replace -eq '1', $stderr)"

@@ -1,4 +1,4 @@
-# Creates the directory $argv[0], a new .vmm- name beside a push's target, for the push's archive or for tar.exe to
+# Creates the directory $argv[0], a new .vmm- name in %SystemRoot%\Temp, for the push's archive or for tar.exe to
 # unpack into. Its access list is protected from inheritance and grants full control, inherited by everything inside,
 # only to SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544), so no other guest user can rewrite the archive or plant
 # a junction in the directory while tar.exe unpacks. SIDs, not

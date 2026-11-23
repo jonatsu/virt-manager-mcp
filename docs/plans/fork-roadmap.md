@@ -139,17 +139,16 @@ Reviews of earlier work found these. None blocks the server's use.
     the same way, with `program` and with `command` alike. `exec` now refuses all three on Windows, before any
     `guest-exec`, and suggests `command`, which passes any text. `win-exec.json` checks both refusals and an `echo été`
     through `command`.
-23. **A Windows push into a parent where a guest user may delete or rename entries is not protected.** Such a user,
-    the owner of `C:\Users\alice` for example, or any interactive user in a directory that a push created below
-    `C:\Users\Public`, can replace the staging directory with a junction between two guest calls, and so make the
-    push write elsewhere as `SYSTEM`; since follow-up 25 they could swap the archive directory the same way. Decided:
-    the push writes its archive and unpacks it in `%SystemRoot%\Temp`, where no other user may delete or rename
-    entries, then moves the tree into place, and copies it instead when the target is on another drive, which is
-    slower and not atomic. Refusing such parents would block pushes into a user's own folders, and accepting the risk
-    does not fit opted-in VMs with real users. The final steps in the user's parent (the move into place, the access
-    list inheritance, the move-aside of a replaced entry and the cleanup) open each directory without following
-    reparse points and act on the open handles, through a C# helper that PowerShell compiles with `Add-Type`. It lands
-    before 0.3.0, after a `t-win11` probe and a short design.
+23. **Done: a guest user who may delete or rename entries in a Windows push's parent can no longer redirect it.**
+    Such a user, the owner of `C:\Users\alice` for example, could replace the staging directory or the archive
+    directory with a junction between two guest calls, and so make the push write elsewhere as `SYSTEM`. A push now
+    writes its archive and unpacks it in `%SystemRoot%\Temp`, where no other user may delete or rename its entries.
+    One `Place` step then runs a C# helper that PowerShell compiles with `Add-Type`: it opens each directory of the
+    target's path without following reparse points, moves the tree into place, or copies it when the target is on
+    another drive, gives it the parent's access list, and deletes a replaced tree, all on open handles
+    ([design](windows-push-staging-design.md), [plan and run record](windows-push-staging-implementation-plan.md)).
+    Refusing such parents would have blocked pushes into a user's own folders. `win-push-place.json` and
+    `win-push-volume.json` cover user-owned parents, junctions and a second volume.
 24. **Done: the Windows transfer scripts write their error text as UTF-8.** Every script in `src/winsteps/` that
     writes to stderr does so through a UTF-8 writer with `AutoFlush`, as `pull-pack.ps1` did, so a non-ASCII path in
     a message arrives intact. `pull-prepare.ps1` writes no error text. `win-transfer.json` checks one such message

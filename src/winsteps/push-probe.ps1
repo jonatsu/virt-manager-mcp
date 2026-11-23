@@ -7,7 +7,7 @@
 
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
-$target, $parent, $replace = $argv
+$target, $null, $replace = $argv
 $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) { exit 10 }
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { exit 15 }

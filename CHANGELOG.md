@@ -132,19 +132,16 @@ Each release's section lists what changed for people who run the server and for 
 
 ### Security
 
-- A guest user who can add entries to a Windows push's target parent, as any user can in `C:\Users\Public` and
-  `C:\Windows\Temp`, can no longer plant a junction in the push's staging directory, through which `tar.exe` would
-  have written outside the target. The staging directory now grants access only to
-  `SYSTEM` and `Administrators` while `tar.exe` unpacks, and the pushed tree then gets the access list its parent
-  passes on. A user who may delete or rename entries in the parent, such as its owner, can still redirect the push.
-  The archive goes into a second directory beside the target with the same protected access list, so no other user
-  can rewrite it before `tar.exe` reads it.
-- A guest user who may rename or delete entries in a Windows push's target parent, such as the owner of
-  `C:\Users\alice`, can no longer redirect the push. A Windows push now stages in `%SystemRoot%\Temp`, and a helper
-  it compiles in the guest does every step in the target's parent on open handles. Such a push now refuses a target
-  whose path passes through a junction, a symbolic link or a mount point, and a reserved device name such as `CON`.
-  A target on another drive than `%SystemRoot%` is copied instead of moved, and a guest whose PowerShell runs in
-  Constrained Language Mode can no longer push directories.
+- Another guest user can no longer redirect a Windows push, or rewrite its archive before `tar.exe` reads it. Before,
+  a user who could add entries to the target's parent, as any user can in `C:\Users\Public`, could plant a junction
+  through which `tar.exe` wrote outside the target, and the parent's owner, such as the owner of `C:\Users\alice`,
+  could swap entries between the push's steps. A Windows push now writes its archive and unpacks it in
+  `%SystemRoot%\Temp`, in directories that only `SYSTEM` and `Administrators` can write. A helper it compiles in the
+  guest then does every step in the target's parent on open handles, and the pushed tree gets the access list its
+  parent passes on.
+- A Windows push now refuses a target whose path passes through a junction, a symbolic link or a mount point, and a
+  reserved device name such as `CON`. A target on another drive than `%SystemRoot%` is copied instead of moved. A
+  guest whose PowerShell runs in Constrained Language Mode can no longer push directories.
 
 ## 0.2.0
 

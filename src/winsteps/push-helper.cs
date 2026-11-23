@@ -24,7 +24,7 @@ public static class VmmPush
     // Exit statuses; push.rs maps each to its message.
     public const int Done = 0, Exists = 11, NotADirectory = 12, NoParents = 13, OldStuck = 14, NewStuckOldBack = 15,
       NewStuck = 16, BothStuck = 18, Busy = 20, Redirected = 21, NotInherited = 22, ReservedName = 24,
-      NotCopied = 25, OldLeft = 30;
+      NotCopied = 25, InheritStuck = 26, OldLeft = 30;
 
     [StructLayout(LayoutKind.Sequential)]
     struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
@@ -55,6 +55,9 @@ public static class VmmPush
     static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, IntPtr buffer, uint size);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandle(SafeFileHandle handle, IntPtr info);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, IntPtr buffer, uint size);
 
     [DllImport("kernel32.dll")]
@@ -81,13 +84,15 @@ public static class VmmPush
     const uint CaseInsensitive = 0x40, DontReparse = 0x1000;
 
     const uint AttrReadOnly = 0x1, AttrHidden = 0x2, AttrSystem = 0x4, AttrDirectory = 0x10, AttrArchive = 0x20,
-      AttrReparsePoint = 0x400, AttrNotIndexed = 0x2000;
+      AttrNormal = 0x80, AttrReparsePoint = 0x400, AttrNotIndexed = 0x2000;
     // Junctions, symbolic links and mount points carry this bit in their reparse tag; cloud-file placeholders do not.
     const uint NameSurrogate = 0x20000000;
 
     const int StatusNotFound = unchecked((int)0xC0000034), StatusPathNotFound = unchecked((int)0xC000003A),
       StatusCollision = unchecked((int)0xC0000035), StatusAccessDenied = unchecked((int)0xC0000022),
-      StatusSharingViolation = unchecked((int)0xC0000043), StatusNotADirectory = unchecked((int)0xC0000103);
+      StatusSharingViolation = unchecked((int)0xC0000043), StatusNotADirectory = unchecked((int)0xC0000103),
+      StatusNotSupported = unchecked((int)0xC00000BB), StatusInvalidParameter = unchecked((int)0xC000000D),
+      StatusInvalidInfoClass = unchecked((int)0xC0000003), StatusNotSameDevice = unchecked((int)0xC00000D4);
 
     // Only SYSTEM and Administrators, inherited by everything inside, as push-mkdir.ps1 sets.
     const string Protected = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
@@ -111,8 +116,10 @@ public static class VmmPush
         public bool IsBusy { get { return Status == StatusSharingViolation || Status == StatusAccessDenied; } }
     }
 
+    // The device names push.rs refuses inside a pushed tree, also with an extension and with spaces before it, which
+    // Windows drops: CON.txt and CON .txt both name the device.
     static readonly Regex Reserved = new Regex(
-      @"^(CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])(\..*)?$",
+      @"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9\u00B9\u00B2\u00B3]|LPT[0-9\u00B9\u00B2\u00B3]) *(\..*)?$",
       RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     // Opens `name` relative to `root`, or as a full NT path when `root` is null, never following a reparse point at the
@@ -184,30 +191,35 @@ public static class VmmPush
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
-    static long VolumeSerial(SafeFileHandle handle)
+    // The serial number of the volume that holds `handle`, from BY_HANDLE_FILE_INFORMATION, which every file system
+    // fills in, FAT and exFAT included.
+    static int VolumeSerial(SafeFileHandle handle)
     {
-        var buffer = Marshal.AllocHGlobal(24);
+        var buffer = Marshal.AllocHGlobal(52);
         try
         {
-            if (!GetFileInformationByHandleEx(handle, 18, buffer, 24)) throw new Win32Exception();
-            return Marshal.ReadInt64(buffer, 0);
+            if (!GetFileInformationByHandle(handle, buffer)) throw new Win32Exception();
+            return Marshal.ReadInt32(buffer, 28);
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
     // Renames the entry open as `handle` to `name` in the directory open as `root`, never replacing an entry there.
+    // FILE_RENAME_INFORMATION holds a 4-byte flag, the root handle aligned to a pointer, the name's length in bytes,
+    // and the name, so its offsets depend on the pointer size of the PowerShell that runs this.
     static void Rename(SafeFileHandle handle, SafeFileHandle root, string name)
     {
-        int length = 20 + name.Length * 2;
+        int rootAt = IntPtr.Size, lengthAt = 2 * IntPtr.Size, nameAt = 2 * IntPtr.Size + 4;
+        int length = nameAt + name.Length * 2;
         var info = Marshal.AllocHGlobal(length);
         bool added = false;
         try
         {
             for (int i = 0; i < length; i++) Marshal.WriteByte(info, i, 0);
             root.DangerousAddRef(ref added);
-            Marshal.WriteIntPtr(info, 8, root.DangerousGetHandle());
-            Marshal.WriteInt32(info, 16, name.Length * 2);
-            Marshal.Copy(name.ToCharArray(), 0, info + 20, name.Length);
+            Marshal.WriteIntPtr(info, rootAt, root.DangerousGetHandle());
+            Marshal.WriteInt32(info, lengthAt, name.Length * 2);
+            Marshal.Copy(name.ToCharArray(), 0, info + nameAt, name.Length);
             IO_STATUS_BLOCK status;
             int result = NtSetInformationFile(handle, out status, info, (uint)length, 10);
             if (result != 0) throw new NtFailure("renaming to " + name, result);
@@ -219,7 +231,9 @@ public static class VmmPush
         }
     }
 
-    // Deletes the entry open as `handle` at once, read-only or not; a reparse point goes as a link.
+    // Deletes the entry open as `handle`, read-only or not; a reparse point goes as a link. The deletion uses POSIX
+    // semantics, so the name goes at once. Windows before 10 1809 lacks the read-only flag, and FAT lacks POSIX
+    // deletion; there the read-only attribute is cleared and the entry goes when its last handle closes.
     static void Remove(SafeFileHandle handle)
     {
         var info = Marshal.AllocHGlobal(4);
@@ -229,7 +243,32 @@ public static class VmmPush
             Marshal.WriteInt32(info, 0, 0x1 | 0x2 | 0x10);
             IO_STATUS_BLOCK status;
             int result = NtSetInformationFile(handle, out status, info, 4, 64);
+            if (result == StatusNotSupported || result == StatusInvalidParameter || result == StatusInvalidInfoClass)
+            {
+                ClearReadOnly(handle);
+                // FileDispositionInformation: a BOOLEAN DeleteFile.
+                Marshal.WriteInt32(info, 0, 1);
+                result = NtSetInformationFile(handle, out status, info, 1, 13);
+            }
             if (result != 0) throw new NtFailure("deleting", result);
+        }
+        finally { Marshal.FreeHGlobal(info); }
+    }
+
+    // Clears the read-only attribute of the entry open as `handle`, when it has one and the handle may.
+    static void ClearReadOnly(SafeFileHandle handle)
+    {
+        var info = Marshal.AllocHGlobal(40);
+        try
+        {
+            if (!GetFileInformationByHandleEx(handle, 0, info, 40)) return;
+            uint attributes = (uint)Marshal.ReadInt32(info, 32);
+            if ((attributes & AttrReadOnly) == 0) return;
+            // Zero times stay unchanged; FILE_ATTRIBUTE_NORMAL stands for no attribute at all.
+            for (int i = 0; i < 32; i++) Marshal.WriteByte(info, i, 0);
+            uint rest = attributes & (AttrHidden | AttrSystem | AttrArchive | AttrNotIndexed);
+            Marshal.WriteInt32(info, 32, (int)(rest == 0 ? AttrNormal : rest));
+            SetFileInformationByHandle(handle, 0, info, 40);
         }
         finally { Marshal.FreeHGlobal(info); }
     }
@@ -284,8 +323,8 @@ public static class VmmPush
     {
         foreach (var entry in List(directory))
         {
-            using (var handle = Open(directory, entry.Name, Delete | ListDir, ShareAll, 0, DispOpen, false,
-              IntPtr.Zero))
+            using (var handle = Open(directory, entry.Name, Delete | ListDir | WriteAttributes, ShareAll, 0, DispOpen,
+              false, IntPtr.Zero))
             {
                 if (entry.IsDirectory && !IsReparsePoint(handle)) Empty(handle);
                 Remove(handle);
@@ -314,6 +353,20 @@ public static class VmmPush
         finally { Marshal.FreeHGlobal(acl); }
     }
 
+    // Inherit, tried once more on the same handle after a failure. The tree is never listed again, because a directory
+    // that already inherits may let its parent's owner swap the entries in it.
+    static void InheritRetried(SafeFileHandle handle)
+    {
+        try
+        {
+            Inherit(handle);
+        }
+        catch (Win32Exception)
+        {
+            Inherit(handle);
+        }
+    }
+
     // Gives the directory open as `directory` and everything in it the access list its parent passes on. Each entry is
     // opened while its directory is still protected, so it can only be one the push made, and held without delete
     // sharing until it is done. Reparse points, and files with more than one link, are left alone.
@@ -337,10 +390,10 @@ public static class VmmPush
                 children.Add(handle);
                 directories.Add(entry.IsDirectory);
             }
-            Inherit(directory);
+            InheritRetried(directory);
             for (int i = 0; i < children.Count; i++)
             {
-                if (directories[i]) InheritTree(children[i]); else Inherit(children[i]);
+                if (directories[i]) InheritTree(children[i]); else InheritRetried(children[i]);
             }
         }
         finally
@@ -509,6 +562,39 @@ public static class VmmPush
             parent = next;
         }
 
+        // An existing target, checked and held before anything moves, so a refusal costs no copy.
+        SafeFileHandle old = null;
+        try
+        {
+            old = Open(parent, name, Delete | ListDir | WriteAttributes, ShareReadWrite, 0, DispOpen, false,
+              IntPtr.Zero);
+            held.Add(old);
+        }
+        catch (NtFailure e)
+        {
+            if (e.Status != StatusNotFound && e.Status != StatusPathNotFound)
+            {
+                throw new Failure(e.IsBusy ? Busy : OldStuck, "cannot open " + target + ": " + e.Message);
+            }
+        }
+        if (old != null)
+        {
+            if (!replace) throw new Failure(Exists, target + " exists");
+            uint[] info;
+            try
+            {
+                info = AttributesAndTag(old);
+            }
+            catch (Win32Exception e)
+            {
+                throw new Failure(OldStuck, "cannot read " + target + ": " + e.Message);
+            }
+            if ((info[0] & AttrDirectory) == 0 || (info[0] & AttrReparsePoint) != 0)
+            {
+                throw new Failure(NotADirectory, target + " is not a directory, or is a link");
+            }
+        }
+
         // The staged tree, in the parent under its own name, or copied into a protected directory there. The staging
         // root stays open, so a failure before the inheritance can move the tree back for a retry.
         SafeFileHandle staged, home;
@@ -518,8 +604,8 @@ public static class VmmPush
             home = Open(null, @"\??\" + Path.GetDirectoryName(staging), ListDir | AddSubdir, ShareReadWrite, 1,
               DispOpen, true, IntPtr.Zero);
             held.Add(home);
-            staged = Open(null, @"\??\" + staging, Delete | WriteDac | ReadControl | ListDir, ShareReadWrite, 1,
-              DispOpen, true, IntPtr.Zero);
+            staged = Open(null, @"\??\" + staging, Delete | WriteDac | ReadControl | WriteAttributes | ListDir,
+              ShareReadWrite, 1, DispOpen, true, IntPtr.Zero);
             held.Add(staged);
         }
         catch (Win32Exception e)
@@ -535,28 +621,32 @@ public static class VmmPush
         {
             throw new Failure(NewStuck, "cannot tell which volume " + reached + " is on: " + e.Message);
         }
-        SafeFileHandle fresh;
-        string freshName;
+        SafeFileHandle fresh = null;
+        string freshName = stagingName;
         if (sameVolume)
         {
-            freshName = Path.GetFileName(staging);
             try
             {
                 Rename(staged, parent, freshName);
+                fresh = staged;
             }
             catch (NtFailure e)
             {
-                throw new Failure(e.IsBusy ? Busy : NewStuck,
-                  "cannot move the unpacked tree into " + reached + ": " + e.Message);
+                // Two volumes can share a serial number, as cloned disks do; the refused rename tells them apart.
+                if (e.Status != StatusNotSameDevice)
+                {
+                    throw new Failure(e.IsBusy ? Busy : NewStuck,
+                      "cannot move the unpacked tree into " + reached + ": " + e.Message);
+                }
+                sameVolume = false;
             }
-            fresh = staged;
         }
-        else
+        if (!sameVolume)
         {
             freshName = copyName;
             try
             {
-                uint access = Delete | WriteDac | ReadControl | ListDir | AddFile | AddSubdir;
+                uint access = Delete | WriteDac | ReadControl | WriteAttributes | ListDir | AddFile | AddSubdir;
                 fresh = CreateProtected(parent, copyName, access);
                 held.Add(fresh);
             }
@@ -584,47 +674,20 @@ public static class VmmPush
             return Discard(fresh) ? "" : "; undoing the new tree failed too, so it stays at " + freshPath;
         };
 
-        // An existing target moves aside.
-        SafeFileHandle old = null;
-        try
-        {
-            old = Open(parent, name, Delete | ListDir, ShareReadWrite, 0, DispOpen, false, IntPtr.Zero);
-            held.Add(old);
-        }
-        catch (NtFailure e)
-        {
-            if (e.Status != StatusNotFound && e.Status != StatusPathNotFound)
-            {
-                throw new Failure(e.IsBusy ? Busy : OldStuck, "cannot open " + target + ": " + e.Message +
-                  abandon());
-            }
-        }
+        // An existing target moves aside. A busy refusal is retried only when the new tree went back to the staging
+        // root, where the retry looks for it.
         string oldPath = Path.Combine(reached, oldName);
         if (old != null)
         {
-            if (!replace) throw new Failure(Exists, target + " exists" + abandon());
-            uint[] info;
-            try
-            {
-                info = AttributesAndTag(old);
-            }
-            catch (Win32Exception e)
-            {
-                throw new Failure(OldStuck, "cannot read " + target + ": " + e.Message + abandon());
-            }
-            if ((info[0] & AttrDirectory) == 0 || (info[0] & AttrReparsePoint) != 0)
-            {
-                throw new Failure(NotADirectory,
-                  target + " is not a directory, or is a link" + abandon());
-            }
             try
             {
                 Rename(old, parent, oldName);
             }
             catch (NtFailure e)
             {
-                throw new Failure(e.IsBusy ? Busy : OldStuck, "cannot move " + target + " aside: " + e.Message +
-                  abandon());
+                string undo = abandon();
+                throw new Failure(e.IsBusy && undo == "" ? Busy : OldStuck,
+                  "cannot move " + target + " aside: " + e.Message + undo);
             }
         }
 
@@ -635,42 +698,36 @@ public static class VmmPush
         }
         catch (NtFailure e)
         {
-            int code = e.Status == StatusCollision ? Exists
-              : e.IsBusy ? Busy
-              : old != null ? NewStuckOldBack
-              : NewStuck;
+            int stuck = old != null ? NewStuckOldBack : NewStuck;
             if (old != null && !PutBack(old, parent, name))
             {
                 throw new Failure(BothStuck, "cannot move the new tree into " + target + " (" + e.Message +
                   "), nor the old tree back; the old tree is at " + oldPath + " and the new one at " + freshPath);
             }
-            throw new Failure(code,
-              "cannot move the new tree into " + target + ": " + e.Message + abandon());
+            string undo = abandon();
+            int code = e.Status == StatusCollision ? Exists
+              : e.IsBusy && undo == "" ? Busy
+              : stuck;
+            throw new Failure(code, "cannot move the new tree into " + target + ": " + e.Message + undo);
         }
 
-        // The new tree gets its parent's access list; one failure is retried.
+        // The new tree gets its parent's access list. Each entry's change is retried once on its own handle.
         try
         {
-            try
-            {
-                InheritTree(fresh);
-            }
-            catch (Win32Exception)
-            {
-                InheritTree(fresh);
-            }
+            InheritTree(fresh);
         }
         catch (Win32Exception e)
         {
-            string reason = "giving " + target + " its parent's access list failed twice: " + e.Message;
+            string reason = "giving " + target + " its parent's access list failed: " + e.Message;
             if (!Discard(fresh))
             {
-                throw new Failure(BothStuck, reason + "; deleting the new tree failed too, so it stays at " + target +
-                  (old != null ? ", and the old tree is at " + oldPath : ""));
+                throw new Failure(InheritStuck, reason + "; deleting the new tree failed too, so it stays at " +
+                  target + (old != null ? ", and the old tree is at " + oldPath : ""));
             }
             if (old != null && !PutBack(old, parent, name))
             {
-                throw new Failure(BothStuck, reason + "; the old tree could not move back and is at " + oldPath);
+                throw new Failure(InheritStuck, reason + "; the new tree is deleted, and the old tree could not " +
+                  "move back and is at " + oldPath);
             }
             throw new Failure(NotInherited, reason);
         }
@@ -690,12 +747,14 @@ public static class VmmPush
         return Done;
     }
 
-    // Deletes the new tree after a failure, and tells whether that worked.
+    // Deletes the new tree after a failure, and tells whether that worked. Nothing uses the handle afterwards; closing
+    // it finishes a deletion without POSIX semantics, which frees the name.
     static bool Discard(SafeFileHandle fresh)
     {
         try
         {
             DeleteTree(fresh);
+            fresh.Dispose();
             return true;
         }
         catch (Win32Exception)
