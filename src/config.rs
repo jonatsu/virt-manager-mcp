@@ -81,6 +81,8 @@ pub struct Manage {
     pub max_lifetime_minutes: u32,
     /// Templates VMs can be made from, by name. Empty hides the template tools.
     pub templates: BTreeMap<String, Template>,
+    /// Crash action written into every VM the server creates.
+    pub on_crash: OnCrash,
 }
 
 /// A template volume that disposable VMs get a thin overlay on.
@@ -144,6 +146,29 @@ pub struct Limits {
     pub max_pull_entries: u64,
     /// Most copies one server process runs at once.
     pub max_transfers: usize,
+    /// Most events the server keeps for each VM; older ones are dropped and counted.
+    pub max_events: usize,
+}
+
+/// What libvirt does with a VM the server created when its guest crashes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnCrash {
+    /// Keep the crashed VM stopped in place, holding its memory, until it is stopped with `force`.
+    #[default]
+    Preserve,
+    /// Stop the VM and free its memory.
+    Destroy,
+}
+
+impl OnCrash {
+    /// The value of the domain's `<on_crash>` element.
+    pub fn as_xml(self) -> &'static str {
+        match self {
+            Self::Preserve => "preserve",
+            Self::Destroy => "destroy",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -191,6 +216,7 @@ impl Default for Manage {
             max_disk_gib: 32,
             max_lifetime_minutes: 1440,
             templates: BTreeMap::new(),
+            on_crash: OnCrash::default(),
         }
     }
 }
@@ -214,6 +240,7 @@ impl Default for Limits {
             max_pull_bytes: 1 << 30,
             max_pull_entries: 100_000,
             max_transfers: 4,
+            max_events: 256,
         }
     }
 }
@@ -283,6 +310,9 @@ impl Config {
         }
         if m.max_lifetime_minutes == 0 {
             bail!("manage.max_lifetime_minutes must be positive");
+        }
+        if self.limits.max_events == 0 {
+            bail!("limits.max_events must be positive");
         }
         for (name, t) in &m.templates {
             if !is_hostname(name) {
@@ -651,6 +681,27 @@ mod tests {
     fn config_without_templates_has_none() {
         let config = parse("[manage]\ncreate = false\n").unwrap();
         assert!(config.manage.templates.is_empty());
+    }
+
+    #[test]
+    fn crash_action_and_event_bound_have_defaults_and_refusals() {
+        let config = parse("").unwrap();
+        assert_eq!(config.manage.on_crash, OnCrash::Preserve);
+        assert_eq!(config.limits.max_events, 256);
+        let destroy = parse("[manage]\non_crash = \"destroy\"\n").unwrap();
+        assert_eq!(destroy.manage.on_crash.as_xml(), "destroy");
+
+        let err = format!(
+            "{:#}",
+            parse("[manage]\non_crash = \"restart\"\n").unwrap_err()
+        );
+        assert!(
+            err.contains("`preserve`") && err.contains("`destroy`"),
+            "{err}"
+        );
+        assert!(parse("[manage]\non_crash = \"coredump-destroy\"\n").is_err());
+        let err = parse("[limits]\nmax_events = 0\n").unwrap_err().to_string();
+        assert!(err.contains("limits.max_events must be positive"), "{err}");
     }
 
     #[test]

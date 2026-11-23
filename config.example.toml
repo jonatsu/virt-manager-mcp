@@ -51,6 +51,8 @@ max_vcpus = 2         # per VM
 max_memory_mib = 4096 # per VM
 max_disk_gib = 32     # per disk
 max_lifetime_minutes = 1440 # longest lifetime an agent may give a VM made from a template
+on_crash = "preserve"       # or "destroy": what a crashed VM made by this server does; preserve keeps
+                            # it stopped in place, holding its memory, until stopped with force
 
 # Templates disposable VMs are made from, one table each (see docs/templates.md). Each VM gets a
 # thin overlay on the template volume and a seed disk with its hostname. Needs create = true.
@@ -73,6 +75,7 @@ max_wait_secs = 50                  # longest a wait_for, paced console_write or
 max_pull_bytes = 1073741824         # largest file or archive one pull from a guest may write
 max_pull_entries = 100000           # most entries one directory pull may hold
 max_transfers = 4                   # copies running in the background at once
+max_events = 256                    # events kept per VM; older ones are dropped and counted
 
 # Screen text recognition for wait_for's screen_text condition. Unset (the default) turns it off;
 # screen_settled, screenshots and the mouse work without it. Set it to the absolute directory that

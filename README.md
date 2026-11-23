@@ -324,7 +324,10 @@ max_disk_gib = 32
   a virtio disk (a new qcow2 volume `<name>.qcow2` in `disk_pool`), a SATA CD-ROM it boots from
   after the disk, a virtio NIC, the guest agent channel, a serial console, SPICE and spare PCIe
   ports for hot-plugging. Windows guests also get Hyper-V enlightenments and a local-time clock.
-  The VM is created shut off.
+  Every VM the server creates, here or from a template, also gets a panic device (`isa` for Linux, `hyperv` for
+  Windows), so a guest crash becomes libvirt's crashed event, a balloon that reports guest memory every 5 s, and
+  `manage.on_crash` as its crash action: `preserve` (the default) keeps a crashed VM stopped in place, holding its
+  memory, until `stop_vm` with `force: true`, and `destroy` stops it. The VM is created shut off.
 
 - **Disposable VMs from templates:** `create_vm_from_template` makes a VM in seconds from a template
   volume the operator prepared, such as a Debian 13 cloud image with the guest agent installed

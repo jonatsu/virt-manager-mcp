@@ -23,7 +23,7 @@ use virt::storage_vol::StorageVol;
 use virt::stream::Stream;
 use virt::sys;
 
-use crate::config::{Firmware, GuestOs, Manage, is_hostname};
+use crate::config::{Firmware, GuestOs, Manage, OnCrash, is_hostname};
 use crate::hypervisor::{self, Hypervisor};
 use crate::seed;
 
@@ -254,6 +254,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             uefi: vm.uefi,
             tpm: vm.tpm,
             secure_boot: vm.secure_boot,
+            on_crash: m.on_crash,
             disks,
             network: network.as_deref(),
             uuid: None,
@@ -538,6 +539,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                 uefi: t.firmware == Firmware::Uefi,
                 tpm: false,
                 secure_boot: t.secure_boot,
+                on_crash: m.on_crash,
                 disks: vec![Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
                 network: network.as_deref(),
                 uuid: Some(&uuid),
@@ -1760,6 +1762,8 @@ struct DomainSpec<'a> {
     tpm: bool,
     /// With `uefi`, false turns the firmware's Secure Boot and enrolled keys off.
     secure_boot: bool,
+    /// The domain's `<on_crash>` action.
+    on_crash: OnCrash,
     /// In order: the first writable disk boots first, the first CD-ROM second.
     disks: Vec<Disk<'a>>,
     network: Option<&'a str>,
@@ -1841,7 +1845,8 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
             "<console type='pty'><target type='serial'/></console>",
             "<graphics type='spice' autoport='yes'><listen type='address'/><image compression='off'/></graphics>",
             "<video><model type='virtio'/></video>",
-            "<memballoon model='virtio'/>",
+            // The stats period makes the balloon report the guest's own memory figures.
+            "<memballoon model='virtio'><stats period='5'/></memballoon>",
             "<rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>",
         ]
         .map(String::from),
@@ -1849,6 +1854,12 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
     if spec.tpm {
         devices.push("<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>".into());
     }
+    // A panic device turns a guest crash into libvirt's crashed event: Debian loads the pvpanic driver for `isa`, and
+    // Windows reports a stop error through the Hyper-V crash registers.
+    devices.push(format!(
+        "<panic model='{}'/>",
+        if spec.windows { "hyperv" } else { "isa" }
+    ));
     let features = if spec.windows {
         "<acpi/><apic/><hyperv mode='custom'><relaxed state='on'/><vapic state='on'/>\
          <spinlocks state='on' retries='8191'/><vpindex state='on'/><synic state='on'/>\
@@ -1873,6 +1884,7 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
          <features>{features}</features>\
          <cpu mode='host-passthrough'/>\
          {clock}\
+         <on_crash>{on_crash}</on_crash>\
          <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='no'/></pm>\
          <devices>{devices}</devices>\
          </domain>",
@@ -1884,6 +1896,7 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
         owner = spec.owner.element(),
         mem = spec.memory_mib,
         vcpus = spec.vcpus,
+        on_crash = spec.on_crash.as_xml(),
         firmware = if spec.uefi { " firmware='efi'" } else { "" },
         // Without features, libvirt picks the host's preferred descriptor, often one with Secure Boot on. With them
         // alone it may pick a stateless ROM build such as OVMF.amdsev.fd, which keeps no boot entries, so the loader
@@ -2007,6 +2020,7 @@ mod tests {
             uefi: false,
             tpm: false,
             secure_boot: true,
+            on_crash: OnCrash::Preserve,
             disks,
             network: Some("net"),
             uuid: None,
@@ -2095,6 +2109,70 @@ mod tests {
         assert!(check_secure_boot(false, true).is_ok());
         let err = check_secure_boot(false, false).unwrap_err().to_string();
         assert!(err.contains("needs firmware \"uefi\""), "{err}");
+    }
+
+    /// The crash action, the panic models and the balloon's stats period in a domain's XML.
+    fn crash_devices(xml: &str) -> (Option<String>, Vec<String>, Option<String>) {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let root = doc.root_element();
+        let on_crash = child(root, "on_crash")
+            .and_then(|n| n.text())
+            .map(String::from);
+        let panics = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("panic"))
+            .filter_map(|n| n.attribute("model").map(String::from))
+            .collect();
+        let period = doc
+            .descendants()
+            .find(|n| {
+                n.has_tag_name("stats") && n.parent().is_some_and(|p| p.has_tag_name("memballoon"))
+            })
+            .and_then(|n| n.attribute("period").map(String::from));
+        (on_crash, panics, period)
+    }
+
+    #[test]
+    fn created_vms_get_a_panic_device_stats_and_the_crash_action() {
+        for (windows, model) in [(false, "isa"), (true, "hyperv")] {
+            for secure_boot in [true, false] {
+                for on_crash in [OnCrash::Preserve, OnCrash::Destroy] {
+                    let xml = domain_xml(&DomainSpec {
+                        windows,
+                        uefi: true,
+                        secure_boot,
+                        on_crash,
+                        ..spec(vec![Disk::Qcow2("/pool/t.qcow2")])
+                    });
+                    assert_eq!(
+                        crash_devices(&xml),
+                        (
+                            Some(on_crash.as_xml().into()),
+                            vec![model.into()],
+                            Some("5".into())
+                        ),
+                        "windows {windows}, secure_boot {secure_boot}"
+                    );
+                    let off = firmware_features(&xml).iter().any(|(_, v)| v == "no");
+                    assert_eq!(off, !secure_boot);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_keeps_what_the_vm_has() {
+        // A VM made before this server wrote crash devices: no panic device, no stats period, libvirt's own action.
+        let old = format!(
+            "<domain type='kvm'><name>t</name><metadata>{}</metadata><on_crash>destroy</on_crash>\
+             <devices><disk type='file' device='disk'><driver name='qemu' type='qcow2'/>\
+             <source file='/pool/t-g1.qcow2'/><target dev='vda' bus='virtio'/></disk>\
+             <memballoon model='virtio'/></devices></domain>",
+            Owner::default().element()
+        );
+        let (xml, _) = replace_disks(&old, &[Disk::Qcow2("/pool/t-g2.qcow2")]).unwrap();
+        let xml = replace_owner(&xml, &Owner::default()).unwrap();
+        assert_eq!(crash_devices(&xml), (Some("destroy".into()), vec![], None));
     }
 
     #[test]
