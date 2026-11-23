@@ -1,0 +1,9 @@
+# cargo-deny policy. The build gate and CI run only `cargo deny check advisories`; licences and bans have no policy
+# yet. Every ignored advisory names its reason, and the roadmap tracks its removal.
+
+[advisories]
+ignore = [
+  # chrono is unmaintained, which is not a vulnerability. This crate does not use it: rmcp 3.9.0 and schemars 1.2.3
+  # pull it in. Remove this entry once neither depends on chrono (roadmap follow-up 27).
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained chrono comes only through rmcp and schemars" },
+]

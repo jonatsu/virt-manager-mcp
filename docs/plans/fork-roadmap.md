@@ -158,6 +158,9 @@ Reviews of earlier work found these. None blocks the server's use.
     `create_vm` takes an installer ISO, and `screen-installer.json` drives only the start of the Debian installer.
     Add a test-bed case or a recorded run that installs a distribution end to end through `create_vm`, and fix the
     gaps it finds.
+27. **`deny.toml` ignores the unmaintained-`chrono` advisory.** RUSTSEC-2026-0543 marks `chrono` unmaintained, and
+    `rmcp` 3.9.0 and `schemars` 1.2.3 depend on it; this crate does not use it. Once neither depends on `chrono`,
+    remove the entry, and `cargo deny check advisories` must still pass.
 
 ## Outcomes
 
@@ -233,5 +236,5 @@ Parked ideas, which no outcome includes yet:
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-up 22, its
-unit 1, is done, and follow-up 24 is its unit 2. Follow-ups 15, 16, 23, 25 and 26 can land at any time; 16 waits on
-a newer `virtio-win`, and 23 and 25 need a design decision.
+unit 1, is done, and follow-up 24 is its unit 2. Follow-ups 15, 16, 23, 25, 26 and 27 can land at any time; 16
+waits on a newer `virtio-win`, 23 and 25 need a design decision, and 27 waits on `rmcp` and `schemars`.
