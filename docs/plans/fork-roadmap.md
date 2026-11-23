@@ -157,11 +157,10 @@ Reviews of earlier work found these. None blocks the server's use.
     ([probe note](../research/2026-11-23-windows-archive-probe.md)). A rewritten archive can still change what the
     push delivers, and leave symbolic links that point anywhere in the pushed tree. Decide whether to write the
     archive into a directory only `SYSTEM` and `Administrators` can write, or to accept the risk.
-26. **No evidence shows an agent installing a VM from scratch.** One of the project's success signals is an agent
-    that sets up a new VM from an installer ISO with no template, such as CachyOS, and leaves it booted and usable.
-    `create_vm` takes an installer ISO, and `screen-installer.json` drives only the start of the Debian installer.
-    Add a test-bed case or a recorded run that installs a distribution end to end through `create_vm`, and fix the
-    gaps it finds.
+26. **Done: an agent installs a VM from scratch.** A recorded run installed CachyOS from its ISO through
+    `create_vm`, the screen, mouse, keyboard and wait tools, and `set_cdrom`, then logged in to the installed desktop
+    and ran a command there ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). It needed
+    `firmware: "bios"`; follow-ups 29 and 30 hold the gaps it found.
 27. **`deny.toml` ignores the unmaintained-`chrono` advisory.** RUSTSEC-2026-0543 marks `chrono` unmaintained, and
     `rmcp` 3.9.0 and `schemars` 1.2.3 depend on it; this crate does not use it. Once neither depends on `chrono`,
     remove the entry, and `cargo deny check advisories` must still pass.
@@ -169,6 +168,14 @@ Reviews of earlier work found these. None blocks the server's use.
     `win-jobs.json` failed this way on `t-win11`, stopping `ping.exe -n 300 127.0.0.1` with `force`. The job still
     ended, and `job_list` then read "ended without status". The next run passed. Find which `taskkill` exit statuses
     mean the tree is already gone, and repeat the case to measure how often it happens.
+29. **`create_vm` cannot make a UEFI VM without Secure Boot.** libvirt picks the `secure-enrolled` firmware descriptor,
+    so an unsigned installer such as CachyOS's is refused at boot, and an agent must fall back to `firmware: "bios"`
+    ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). Decide whether `create_vm` gains a
+    Secure Boot choice, for example a `secure_boot` flag that defaults to on and writes the `secure-boot` and
+    `enrolled-keys` firmware features off when false.
+30. **The tools ignore unknown arguments.** A `screenshot` given `x`, `y`, `width` and `height` instead of `region`
+    returned the whole screen without an error, so an agent does not learn its mistake. Decide whether every tool's
+    parameters refuse unknown fields, which would break a client that sends extra ones.
 
 ## Outcomes
 
@@ -244,5 +251,5 @@ Parked ideas, which no outcome includes yet:
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and
-24, its units 1 and 2, are done. Follow-ups 16, 23, 25, 26, 27 and 28 can land at any time; 16
-waits on a newer `virtio-win`, 23 and 25 need a design decision, and 27 waits on `rmcp` and `schemars`.
+24, its units 1 and 2, are done. Follow-ups 16, 23, 25, 27, 28, 29 and 30 can land at any time; 16
+waits on a newer `virtio-win`, 23, 25, 29 and 30 need a design decision, and 27 waits on `rmcp` and `schemars`.
