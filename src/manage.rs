@@ -982,7 +982,12 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
     let os = child(root, "os");
     let uefi =
         os.is_some_and(|o| o.attribute("firmware") == Some("efi") || child(o, "loader").is_some());
-    let secure_boot = uefi && !os.is_some_and(secure_boot_off);
+    // A BIOS VM has no Secure Boot; for a UEFI VM, null means its XML does not say.
+    let secure_boot = if uefi {
+        os.and_then(secure_boot_state)
+    } else {
+        Some(false)
+    };
     let devices = child(root, "devices");
     let has = |tag: &str| devices.is_some_and(|d| child(d, tag).is_some());
 
@@ -1425,16 +1430,21 @@ fn check_disk(m: &Manage, gib: u64) -> Result<()> {
     Ok(())
 }
 
-/// Whether a domain's `<os>` turns Secure Boot off, through its firmware features or a loader marked not secure.
-fn secure_boot_off(os: roxmltree::Node<'_, '_>) -> bool {
-    let feature_off = child(os, "firmware").is_some_and(|f| {
-        f.children().any(|n| {
-            n.has_tag_name("feature")
-                && n.attribute("name") == Some("secure-boot")
-                && n.attribute("enabled") == Some("no")
-        })
+/// Whether a UEFI domain's `<os>` has Secure Boot on, from its `secure-boot` firmware feature or its loader's `secure`
+/// attribute, which libvirt fills in when it picks the firmware. `None` when neither says, as for a loader named by
+/// path alone.
+fn secure_boot_state(os: roxmltree::Node<'_, '_>) -> Option<bool> {
+    let feature = child(os, "firmware").and_then(|f| {
+        f.children()
+            .find(|n| n.has_tag_name("feature") && n.attribute("name") == Some("secure-boot"))
+            .and_then(|n| n.attribute("enabled"))
     });
-    feature_off || child(os, "loader").and_then(|l| l.attribute("secure")) == Some("no")
+    let loader = child(os, "loader").and_then(|l| l.attribute("secure"));
+    match feature.or(loader)? {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
 }
 
 fn check_secure_boot(uefi: bool, secure_boot: bool) -> Result<()> {
@@ -2046,9 +2056,36 @@ mod tests {
             child(os, "loader").and_then(|l| l.attribute("type")),
             Some("pflash")
         );
-        assert!(secure_boot_off(os));
+        assert_eq!(secure_boot_state(os), Some(false));
 
         assert!(firmware_features(&domain_xml(&spec(vec![Disk::Qcow2("/p/t.qcow2")]))).is_empty());
+    }
+
+    #[test]
+    fn secure_boot_is_read_only_from_what_the_xml_says() {
+        let state = |os_inner: &str| {
+            let xml = format!("<domain><os firmware='efi'>{os_inner}</os></domain>");
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            secure_boot_state(child(doc.root_element(), "os").unwrap())
+        };
+        // What libvirt fills in after picking the secure-enrolled firmware.
+        assert_eq!(
+            state(
+                "<firmware><feature enabled='yes' name='secure-boot'/></firmware>\
+                 <loader secure='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            state("<loader secure='no' type='pflash'>/x.fd</loader>"),
+            Some(false)
+        );
+        // A loader named by path alone, as virt-manager writes, says nothing.
+        assert_eq!(
+            state("<loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>"),
+            None
+        );
+        assert_eq!(state(""), None);
     }
 
     #[test]

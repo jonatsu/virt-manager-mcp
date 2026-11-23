@@ -63,6 +63,10 @@ Each release's section lists what changed for people who run the server and for 
   `~/.local/share/virtmanager-mcp/ocr-models`, or under `$XDG_DATA_HOME`, while `display.ocr_models` is unset. The
   download runs in the background after startup and checks the same pinned sums as `scripts/fetch-ocr-models.sh`.
   Until it ends, `screen_text` replies that the models are still downloading, and after a failure it names the cause.
+- `create_vm` takes `secure_boot`, true by default. False gives a UEFI VM firmware without Secure Boot, so an
+  installer that is not signed boots; with `firmware: "bios"` it is refused. Template entries take the same
+  `secure_boot` key. `list_templates` reports it, and `describe_vm` reports it from the VM's firmware, or `null`
+  when the firmware does not say.
 
 ### Fixed
 
@@ -125,9 +129,6 @@ The first release of this fork. It covers every change since upstream's `v1.0`, 
 - Screen text recognition with the `ocrs` models, set with `display.ocr_models`. `scripts/fetch-ocr-models.sh`
   fetches them.
 - `max_vms` holds across every server process of one account, through a lock file.
-- `create_vm` takes `secure_boot`, true by default. False gives a UEFI VM firmware without Secure Boot, so an
-  installer that is not signed boots; with `firmware: "bios"` it is refused. Template entries take the same
-  `secure_boot` key. `describe_vm` and `list_templates` report it.
 
 ### Fixed
 
