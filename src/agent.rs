@@ -626,8 +626,18 @@ mod tests {
             assert!(!spec.args.last().unwrap().starts_with("$vmmInput"), "{cmd}");
             assert!(!command_script(&spec).contains("$vmmInput"), "{cmd}");
         }
-        for cmd in ["\"$input\"", "$INPUT", "@($input).Count", "$input"] {
+        for cmd in [
+            "\"$input\"",
+            "$INPUT",
+            "@($input).Count",
+            "$input",
+            "${INPUT}",
+            "$inputPath = 'a'; $input",
+        ] {
             assert!(names_input(cmd), "{cmd}");
+        }
+        for cmd in ["$input1", "$inputé", "$INPUTPATH", "${inputPath}"] {
+            assert!(!names_input(cmd), "{cmd}");
         }
 
         for cmd in ["$input | Sort-Object", "${Input} | Measure-Object"] {
