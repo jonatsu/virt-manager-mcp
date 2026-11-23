@@ -63,6 +63,10 @@ For an allowed VM it:
    in safe mode, never with the force flag, so it never takes the console from virt-manager;
 4. resumes the domain.
 
+The operation holds a per-VM "starting" claim for its whole length. While it runs, a second `start_vm` of the VM is
+refused with a message that the VM is starting, so nothing resumes the guest before its console opens. `reset_vm`
+takes the claim before it powers the VM off, so no start boots the VM while its disks are replaced.
+
 ```mermaid
 sequenceDiagram
     participant Agent
@@ -86,7 +90,7 @@ resume fails, the reply says so, and the VM stays paused for the agent to stop.
 the console in the same way, and then resumes, so a revert gets a capture too.
 
 `start_vm` refuses a VM that is crashed, or paused with reason `VIR_DOMAIN_PAUSED_CRASHED`, and tells the agent to stop
-it with `force: true` first. Today it refuses only the first and resumes the second.
+it with `force: true` first. A VM that the `destroy` crash action left shut off boots normally.
 
 ### Console sessions
 
@@ -278,7 +282,7 @@ screen tools for a Windows boot.
 - `manage.on_crash` accepts only `preserve` and `destroy`, and `limits.max_events` is positive.
 - Read-only mode keeps `vm_events` and `vm_stats`, sends no guest-agent query for `vm_stats`, and still hides every
   tool that starts or stops a VM.
-- `start_vm` never resumes a crashed VM.
+- `start_vm` never resumes a crashed VM, and never starts a VM whose start is under way.
 
 Each needs a test that shows the refusal or the bound still holds, as `CLAUDE.md` asks for guardrails.
 
@@ -289,15 +293,17 @@ Each needs a test that shows the refusal or the bound still holds, as `CLAUDE.md
   shared start operation; the expiry's destroys marked for attribution.
 - `src/events.rs` (new): the per-VM logs keyed by UUID, `seq`, the kind mapping, expectations, per-session cursors and
   the notice text, all without FFI and unit-tested on their own.
-- `src/events/ffi.rs` (new): registration and deregistration through `virt-sys`, the callbacks and their queue, the
-  close callback, and the event worker.
-- `src/hypervisor.rs`: the reconnect that the close callback triggers, and the start refusal for a crashed VM.
+- `src/events/ffi.rs` (new): registration and deregistration through `virt-sys`, the callbacks and their queue, and the
+  close callback. `src/events/worker.rs` (new): the event worker and the reconnect hook.
+- `src/hypervisor.rs`: one reconnect function, which runs the events hook under the connection's write lock.
+- `src/start.rs` (new): the shared start operation on the server's state, its "starting" claim, and the start decision
+  with the refusal for a crashed VM.
 - `src/console.rs`: replacing a local session separately from libvirt's force flag, the typed open result, the
   previous-run slot, attaching on `console_open`, and dropping a VM's sessions.
 - `src/stats.rs` (new): the two samples, the rates, and the reply's shape.
 - `src/agent.rs`: `guest-get-fsinfo`.
 - `src/wait.rs`: the `event` condition, evaluated before the stopped check.
-- `src/server.rs`: the shared start operation, `vm_events`, `vm_stats`, `console_read`'s `run` and lookup, the notice
+- `src/server.rs`: `vm_events`, `vm_stats`, `console_read`'s `run` and lookup, the notice
   block, the expectations around power actions, the read-only rules and the tool descriptions.
 - `README.md`, `CHANGELOG.md` and the `example-global-*.md` templates: the new tools and the agent guidance to read
   the previous run after a crash.

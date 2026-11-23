@@ -15,7 +15,7 @@
       "vm": "t-owrt"
     },
     "expect": {
-      "matches": "console for 't-owrt' opened \\(generation \\d+\\)"
+      "matches": "console for 't-owrt' is already open \\(device: default, generation \\d+\\); attached to it"
     }
   },
   {

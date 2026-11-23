@@ -12,6 +12,10 @@ Each release's section lists what changed for people who run the server and for 
   sending them.
 - `console_open` on a console this server already holds open attaches to it and replies with its generation, instead
   of reporting it open. `force: true` still replaces the session.
+- `start_vm`, `create_vm_from_template` and `reset_vm` boot a VM paused, open its serial console, then resume it, so
+  `console_read` from offset 0 holds the boot from its first byte, and a later `console_open` attaches to that
+  capture. The reply says when the console could not be captured, for example because virt-manager holds it; the VM
+  starts anyway. A second `start_vm` of a VM while its boot runs is refused.
 
 ### Added
 

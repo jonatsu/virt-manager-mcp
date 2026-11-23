@@ -17,7 +17,7 @@
       "vm": "t-w"
     },
     "expect": {
-      "matches": "console for 't-w' opened \\(generation \\d+\\)"
+      "matches": "console for 't-w' is already open \\(device: default, generation \\d+\\); attached to it"
     }
   },
   {
@@ -216,7 +216,7 @@
       "wait_for_agent_secs": 120
     },
     "expect": {
-      "contains": "VM 't-w': started; guest agent is responding"
+      "matches": "VM 't-w': started; console captured from boot \\(generation \\d+\\); guest agent is responding"
     }
   },
   {
@@ -270,7 +270,7 @@
       "wait_for_agent_secs": 120
     },
     "expect": {
-      "contains": "VM 't-w': started; guest agent is responding"
+      "matches": "VM 't-w': started; console captured from boot \\(generation \\d+\\); guest agent is responding"
     }
   },
   {

@@ -18,6 +18,7 @@ mod pulldir;
 mod push;
 mod seed;
 mod server;
+mod start;
 mod sweep;
 mod transfer;
 mod wait;
@@ -157,14 +158,16 @@ async fn run() -> Result<()> {
         ocr_download: ocr_download.clone(),
         pulls: Default::default(),
         transfers: Default::default(),
+        events: Arc::new(events::Events::new(config.limits.max_events)),
+        starting: Default::default(),
     });
 
     if let Some(Command::Sweep) = cli.command {
         return sweep::run_command(&state);
     }
     // The sweep command returned above: only a serving process listens for events.
-    let events = Arc::new(events::Events::new(config.limits.max_events));
-    events::worker::spawn(state.clone(), events).context("listening for libvirt events")?;
+    events::worker::spawn(state.clone(), state.events.clone())
+        .context("listening for libvirt events")?;
     if let Some(download) = &ocr_download {
         download.spawn();
     }

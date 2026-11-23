@@ -16,7 +16,7 @@
       "vm": "t-g"
     },
     "expect": {
-      "matches": "console for 't-g' opened \\(generation \\d+\\)"
+      "matches": "console for 't-g' is already open \\(device: default, generation \\d+\\); attached to it"
     }
   },
   {

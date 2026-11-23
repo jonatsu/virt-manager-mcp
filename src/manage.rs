@@ -715,8 +715,9 @@ pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Re
     })
 }
 
-/// Starts a VM after a reset. A UEFI VM's firmware variables return to the template's defaults.
-pub fn start_after_reset(hv: &Hypervisor, name: &str) -> Result<()> {
+/// The VM to start after a reset, and the libvirt start flags that return a UEFI VM's firmware variables to the
+/// template's defaults.
+pub fn reset_start(hv: &Hypervisor, name: &str) -> Result<(Domain, u32)> {
     let dom = hv.manage_domain(name)?;
     let uefi = roxmltree::Document::parse(&inactive_xml(&dom)?)?
         .root_element()
@@ -728,9 +729,7 @@ pub fn start_after_reset(hv: &Hypervisor, name: &str) -> Result<()> {
     } else {
         0
     };
-    dom.create_with_flags(flags)
-        .map_err(|e| anyhow!("cannot start '{name}': {}", e.message()))?;
-    Ok(())
+    Ok((dom, flags))
 }
 
 /// Replaces every `device='disk'` disk in a domain's XML with `disks`, keeping CD-ROMs and everything else.

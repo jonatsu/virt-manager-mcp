@@ -171,7 +171,7 @@ impl Hypervisor {
     }
 
     /// Looks up a VM the AI may power on/off.
-    fn power_domain(&self, name: &str) -> Result<Domain> {
+    pub fn power_domain(&self, name: &str) -> Result<Domain> {
         let dom = self.lookup(name)?;
         if !self.can_power(&dom) {
             bail!("VM '{name}' is not in power_vms");
@@ -193,32 +193,6 @@ impl Hypervisor {
             bail!("VM '{name}' was not created by this server and is not in manage.manage_vms");
         }
         Ok(dom)
-    }
-
-    /// Boots, resumes or wakes a VM. Returns a short description of what happened.
-    pub fn start(&self, name: &str) -> Result<String> {
-        let dom = self.power_domain(name)?;
-        if !dom.is_active()? {
-            dom.create()
-                .map_err(|e| anyhow!("cannot start '{name}': {}", e.message()))?;
-            return Ok("started".into());
-        }
-        Ok(match dom.get_state()?.0 {
-            sys::VIR_DOMAIN_PAUSED => {
-                dom.resume()
-                    .map_err(|e| anyhow!("cannot resume '{name}': {}", e.message()))?;
-                "resumed from pause".into()
-            }
-            sys::VIR_DOMAIN_PMSUSPENDED => {
-                dom.pm_wakeup(0)
-                    .map_err(|e| anyhow!("cannot wake '{name}': {}", e.message()))?;
-                "woken from suspend".into()
-            }
-            sys::VIR_DOMAIN_CRASHED => {
-                bail!("VM '{name}' has crashed; stop it with force: true, then start it")
-            }
-            _ => "already running".into(),
-        })
     }
 
     /// Requests a guest shutdown (ACPI or guest agent, whichever libvirt picks), or

@@ -29,7 +29,7 @@
       "vm": "t-u"
     },
     "expect": {
-      "matches": "console for 't-u' opened \\(generation \\d+\\)"
+      "matches": "console for 't-u' is already open \\(device: default, generation \\d+\\); attached to it"
     }
   },
   {
@@ -51,8 +51,10 @@
       "since": 0
     },
     "expect": {
-      "error": true,
-      "contains": "no console open for 't-u'"
+      "contains": [
+        "\"closed\":null",
+        "BdsDxe: starting"
+      ]
     }
   },
   {

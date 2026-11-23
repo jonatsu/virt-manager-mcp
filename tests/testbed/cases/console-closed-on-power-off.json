@@ -74,7 +74,7 @@
       "wait_for_agent_secs": 180
     },
     "expect": {
-      "contains": "VM 'trial-deb13': started; guest agent is responding"
+      "matches": "VM 'trial-deb13': started; console captured from boot \\(generation \\d+\\); guest agent is responding"
     }
   },
   {
@@ -134,7 +134,7 @@
       "wait_for_agent_secs": 180
     },
     "expect": {
-      "contains": "VM 'trial-deb13': started; guest agent is responding"
+      "matches": "VM 'trial-deb13': started; console captured from boot \\(generation \\d+\\); guest agent is responding"
     }
   },
   {

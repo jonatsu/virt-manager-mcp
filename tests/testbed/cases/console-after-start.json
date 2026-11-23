@@ -15,7 +15,7 @@
       "vm": "trial-deb13"
     },
     "expect": {
-      "matches": "console for 'trial-deb13' opened \\(generation \\d+\\)"
+      "matches": "console for 'trial-deb13' is already open \\(device: default, generation \\d+\\); attached to it"
     }
   },
   {

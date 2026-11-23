@@ -70,7 +70,7 @@ a goal or widen the scope.
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
 | `mouse` | QEMU monitor `input-send-event` (`virDomainQemuMonitorCommand`) | A graphics device and a USB tablet |
-| `start_vm`, `stop_vm` | libvirt (`virDomainCreate`, `virDomainShutdown`, `virDomainDestroy`) | none (graceful stop needs ACPI or the guest agent) |
+| `start_vm`, `stop_vm` | libvirt (`virDomainCreateWithFlags` paused, `virDomainOpenConsole`, `virDomainResume`, `virDomainShutdown`, `virDomainDestroy`) | none (graceful stop needs ACPI or the guest agent) |
 | VM management tools | libvirt domain, storage volume and snapshot APIs | none |
 
 `list_dir` and `stat_path` run fixed helper commands through `guest-exec`
@@ -499,9 +499,13 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 
 - `exec` is not interactive: output is returned when the process exits. On timeout the server tries
   to kill the process (`kill -KILL` / `taskkill /F /T`). On Linux, children of the shell may survive.
-- `console_read` returns output received since `console_open`. Earlier output (e.g. boot logs) is
-  not available. Only one client can hold a console: if virt-manager's serial console view
-  is open, `console_open` fails unless `force: true`, which disconnects the other client.
+- When this server boots a VM, through `start_vm`, `create_vm_from_template` or `reset_vm`, it starts the VM paused,
+  opens its console, then resumes it, so `console_read` from offset 0 holds the boot from its first byte. A Windows
+  guest writes nothing to its serial console, so its boot shows only through the screen tools. A console opened on a
+  VM the server did not boot holds output from the open on. While a boot runs, a second `start_vm` of the VM is
+  refused. Only one client can hold a console: if virt-manager's serial console view is open when the server boots
+  the VM, the reply says the console could not be captured, and `console_open` fails unless `force: true`, which
+  disconnects the other client.
 - `console_open` on a console this server holds open attaches to it and replies with its generation; `force: true`
   opens a new session and drops the old one's output. Every new session starts a new console generation, and every
   offset a console tool returns comes with its `generation`. A `console_read` or console wait from an offset above 0

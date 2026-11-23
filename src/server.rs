@@ -23,8 +23,10 @@ use crate::config::Config;
 use crate::console::{
     CLOSED_BY_CONSOLE_CLOSE, Consoles, LibvirtOpener, OpenRequest, Pacing, Run, VmId,
 };
+use crate::events::Events;
 use crate::guestpath::GuestPath;
 use crate::hypervisor::{self, Hypervisor};
+use crate::start::Starting;
 use crate::{
     addresses, ansi, dirpull, display, fsops, jobs, manage, mouse, ocrfetch, pull, push, transfer,
     wait,
@@ -90,6 +92,10 @@ pub struct State {
     pub pulls: pull::Destinations,
     /// Copies running in, or finished by, this process.
     pub transfers: transfer::Transfers,
+    /// Every visible VM's event log.
+    pub events: Arc<Events>,
+    /// The VMs whose start is under way.
+    pub starting: Starting,
 }
 
 #[derive(Clone)]
@@ -1147,14 +1153,16 @@ impl VirtServer {
             idempotent_hint = true
         ),
         description = "Start a VM that is shut off (or resume it if paused, wake it if suspended). \
-        Only VMs with power_control: true in list_vms can be started."
+        A boot captures the serial console from its first byte, so console_read from offset 0 shows the boot; a \
+        Windows guest writes nothing there, so watch its boot with the screen tools. A crashed VM is refused until \
+        stop_vm with force: true. Only VMs with power_control: true in list_vms can be started."
     )]
     async fn start_vm(
         &self,
         Parameters(p): Parameters<StartVmParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
-            let mut msg = format!("VM '{}': {}", p.vm, s.hv.start(&p.vm)?);
+            let mut msg = format!("VM '{}': {}", p.vm, s.start_vm(&p.vm)?);
             let wait = Duration::from_secs(p.wait_for_agent_secs.min(300));
             if !wait.is_zero() {
                 let dom = s.hv.domain(&p.vm)?;
@@ -1260,9 +1268,10 @@ impl VirtServer {
             destructive_hint = true,
             idempotent_hint = false
         ),
-        description = "Attach to the VM's serial/virtio text console (like `virsh console`). Output is buffered \
-        from this point on; read it with console_read. Needs a <console>/<serial> device in the VM and a getty or \
-        other program on it in the guest."
+        description = "Attach to the VM's serial/virtio text console (like `virsh console`). A VM this server \
+        started already has its console open from its first byte, and console_open attaches to that session; \
+        otherwise output is buffered from this point on. Read it with console_read. Needs a <console>/<serial> device \
+        in the VM and a getty or other program on it in the guest."
     )]
     async fn console_open(
         &self,
@@ -1307,7 +1316,8 @@ impl VirtServer {
         refused. With `wait_ms`, waits for output no earlier read returned, then until it pauses for half a \
         second; a closed console returns at once. Works on a stopped VM, so the output of a console that ended with \
         the VM stays readable. `run: \"previous\"` reads the run before the current one, which a restart, \
-        console_close, reset_vm or snapshot_revert moved aside, as closed with the reason it ended."
+        console_close, reset_vm or snapshot_revert moved aside, as closed with the reason it ended. After a start, \
+        reset or template create by this server, `since: 0` reads the boot from its first byte."
     )]
     async fn console_read(
         &self,
@@ -1866,8 +1876,12 @@ impl VirtServer {
                 return Ok(vec![ContentBlock::text(msg)]);
             }
             // The VM exists from here on: a failure to start or to reach the agent is reported, not undone.
-            match s.hv.start(&name) {
-                Ok(_) => msg.push_str("; started"),
+            let started = s
+                .hv
+                .power_domain(&name)
+                .and_then(|dom| s.boot(&dom, &name, 0, "create_vm_from_template"));
+            match started {
+                Ok(how) => msg.push_str(&format!("; {how}")),
                 Err(e) => {
                     msg.push_str(&format!(
                         "; the VM was created but could not be started ({e:#}); fix the cause and use start_vm, \
@@ -1899,18 +1913,24 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
+            // Claimed before the power-off, so no start can boot the VM while its disks are replaced.
+            let _starting = s.starting.claim(&uuid, &p.vm)?;
             // The session moves to the previous run, so the output from before the reset stays readable.
             let mut msg = manage::reset(&s.hv, &p.vm, || {
                 s.consoles.close(&uuid, "closed by reset_vm");
             })?;
-            if let Err(e) = manage::start_after_reset(&s.hv, &p.vm) {
-                msg.push_str(&format!(
-                    "; it could not be started ({e:#}); fix the cause, then use reset_vm again, which also \
-                     resets a UEFI VM's firmware variables, or delete_vm"
-                ));
-                return Ok(vec![ContentBlock::text(msg)]);
+            let started = manage::reset_start(&s.hv, &p.vm)
+                .and_then(|(dom, flags)| s.boot_claimed(&dom, &uuid, &p.vm, flags, "reset_vm"));
+            match started {
+                Ok(how) => msg.push_str(&format!("; {how}")),
+                Err(e) => {
+                    msg.push_str(&format!(
+                        "; it could not be started ({e:#}); fix the cause, then use reset_vm again, which also \
+                         resets a UEFI VM's firmware variables, or delete_vm"
+                    ));
+                    return Ok(vec![ContentBlock::text(msg)]);
+                }
             }
-            msg.push_str("; started");
             msg.push_str(&agent_wait_report(s, &p.vm, p.wait_for_agent_secs));
             Ok(vec![ContentBlock::text(msg)])
         })

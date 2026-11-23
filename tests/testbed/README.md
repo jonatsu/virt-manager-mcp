@@ -26,7 +26,7 @@ used the same setup.
 | `guest-agent-and-snapshots.json` | `exec` exit codes, stderr, stdin and timeout. Literal argument passing, files, and snapshot create, revert and delete. |
 | `lifecycle-guardrails.json` | `create_vm` refusals (bad name, vCPU cap, existing name, `max_vms`, ISO outside `iso_dirs`), then start, stop and delete. |
 | `console-stall.json` | Logs in as root on the serial console, rereading from offset 0 with `wait_ms`. |
-| `console-after-start.json` | Opens the console during boot and reads one byte at a time. |
+| `console-after-start.json` | Starts the VM, attaches to the console its start captured, and reads one byte at a time. |
 | `write-file-mode.json` | `write_file` modes: 644 by default, an explicit `600`, a kept `640` on append and overwrite, and a refused `4755`. |
 | `exec-args.json` | `exec` with `command` and `args` is refused with "`args` goes with `program`", and the command did not run. `program` with `args` still passes each argument literally. |
 | `start-vm-waits-for-agent.json` | Stops the guest agent, which restarts 20 s later. `start_vm` waits and reports the agent responding. |
@@ -57,7 +57,7 @@ The template cases run with `config-templates.toml`. They need the template volu
 | `templates-reset.json` | Resets a VM that holds a marker file, a snapshot and an attached disk. Refuses the unowned `t-listed`, a `create_vm` VM and `trial-deb13`. Leaves `t-s` running on the `scratch` template. |
 | `templates-reset-missing.json` | Run it after `virsh vol-delete --pool agent-vms tpl-scratch.qcow2`. The reset of `t-s` fails with its disks in place, then the case deletes its VMs. |
 | `firmware-secure-boot.json` | `create_vm` refuses `secure_boot: false` with BIOS, and creates, describes and starts `t-sb` under UEFI without Secure Boot. `t-sbt`, from `debian13-uefi-nosb`, boots under UEFI with no Secure Boot; `t-sbu`, from `debian13-uefi`, reports `SecureBoot` 1. All three are deleted. |
-| `templates-reset-uefi.json` | Creates `t-u` from `debian13-uefi` and resets it. The reset closes the console opened before it, and the VM boots under UEFI without its marker file. |
+| `templates-reset-uefi.json` | Creates `t-u` from `debian13-uefi` and resets it. The reset moves the console capture before it to the previous run, a read from offset 0 holds the new boot from the firmware's first line, and the VM boots under UEFI without its marker file. |
 | `templates-reset-saved.json` | Run it after `virsh managedsave t-u`. The reset discards the saved state and boots fresh. A `create_vm` VM named `t-u-g4` then holds the next disk name, so the next reset refuses and changes nothing. The console opened before that reset still reads output. Both VMs are then deleted. |
 | `templates-expiry.json` | Creates `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without a lifetime. After 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |
 | `templates-expiry-command.json` | Creates `t-exp2` with a 1-minute lifetime and an attached disk, and exits. Wait 70 s, then run `virtmanager-mcp --config tests/testbed/config-templates.toml sweep`. The command deletes `t-exp2` and its volumes and exits 0. |
@@ -252,9 +252,9 @@ virsh -c qemu:///system vol-upload --pool agent-vms t-owrt.img t-owrt.img
 virsh -c qemu:///system define "$REPO/tests/testbed/t-owrt.xml"
 ```
 
-`owrt-boot.json` starts the VM and opens the console during boot. After Enter, the boot log ends in a
-`root@OpenWrt:~#` prompt, and the case then powers the VM off. This ran with OpenWrt 25.12.6, which booted on the q35
-machine type.
+`owrt-boot.json` starts the VM, which captures its console from boot, and attaches to it. After Enter, the boot log
+ends in a `root@OpenWrt:~#` prompt, and the case then powers the VM off. This ran with OpenWrt 25.12.6, which booted
+on the q35 machine type.
 
 ## The installer guests
 
