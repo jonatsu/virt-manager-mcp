@@ -34,7 +34,7 @@ after the run of follow-ups 17 and 19 to 21.
 | Crash action | `manage.on_crash`, `preserve` by default or `destroy`, written into a VM's XML when it is created | `preserve` keeps a crashed VM stopped in place, so an agent can read the frozen state: the console up to the panic, and the screen as it was at the crash. A Windows guest stops before it paints a stop screen ([probe](../research/2026-11-23-crash-and-events-probe.md)). The operator, not the agent, chooses | resolved; if the probe shows that `preserve` lets the guest run on, the choice returns for a decision |
 | Other crash actions | Refused by the config check | `restart` hides a crash loop behind a guest that looks alive; the core-dump actions write guest memory to a host path | resolved |
 | Windows serial output | Not in this outcome | Windows writes nothing to the serial port unless its emergency console is switched on inside the guest; on Windows the screen tools show a boot | resolved |
-| Delivery | One run, tested on `trial-deb13`, the `t-*` Linux guests and `t-win11` | About eleven units, a little larger than outcome 3's first run | resolved |
+| Delivery | One run, tested on `trial-deb13`, the `t-*` Linux guests and `t-win11` | Planned as about eleven units; built as sixteen, with two follow-ups in the same run | resolved |
 
 ## Behaviour
 
@@ -152,7 +152,13 @@ in a `virt::Domain`, whose drop would release a reference libvirt owns.
 An event worker thread takes records from the queue. It checks that config lets the server see the VM, through a cache
 of known UUIDs and otherwise through the same lookup the tools use. It maps the record to a kind, matches it against
 expectations, assigns `seq`, a number that rises across the server process, and appends it to the VM's log. If the
-queue is full, the worker records a `gap` for the VMs it could not record.
+queue is full, the worker appends a `gap` record to every log it holds.
+
+A VM that libvirt reports as not found counts as gone. Any other lookup error leaves the answer open: the worker keeps
+the event, caches nothing, and asks again at the start of the next batch. Once one lookup in a pass goes unanswered,
+the pass makes no more lookups, and a VM's later events wait behind its waiting one, so each VM's events keep their
+order. The waiting events are held to the queue's capacity, and past it the oldest give way to a `gap`. An
+`undefined` event drops its VM's waiting events, so a VM defined again under the same UUID is not cached as hidden.
 
 A record holds `seq`, `time` in UTC, `kind`, `detail` and `cause`. The kinds map from libvirt's events as follows. The
 run's probe confirms the sequences and fills in any detail this table misses.
@@ -183,7 +189,8 @@ The server registers a close callback on the connection. When the connection dro
 wakes a worker, which reconnects through `with_conn` without waiting for a tool call. On the new connection, the
 server registers its callbacks again and appends a `gap` record to every log it holds, with both times. It then
 compares each visible VM's state with the last recorded event, and records a `stopped` or `started` with detail
-`during_gap` where they differ, so a crash and restart during the gap does not leave a VM looking unchanged.
+`during_gap` where they differ, so a crash and restart during the gap does not leave a VM looking unchanged. It skips
+each VM with events still queued, waiting or being recorded, because those events will record themselves.
 Deregistering on the old connection is best effort. Only libvirt's free callback releases the callback data, whatever
 the deregistration returns.
 

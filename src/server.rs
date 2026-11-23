@@ -2310,8 +2310,9 @@ impl VirtServer {
     }
 }
 
-/// The notice for a VM's records that have one and that no reply has announced yet, which marks them as shown. `lookup` gives the VM's UUID and whether it sits in libvirt's crashed state, or fails for a VM the server
-/// may not see, which then gets no notice.
+/// The notice for a VM's records that have one and that no reply has announced yet, which marks them as shown.
+/// `lookup` gives the VM's UUID and whether it sits in libvirt's crashed state, or fails for a VM the server may not
+/// see, which then gets no notice.
 fn take_notice(
     events: &Events,
     vm: &str,
