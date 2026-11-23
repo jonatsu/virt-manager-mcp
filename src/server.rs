@@ -99,12 +99,14 @@ pub struct VirtServer {
 // ---- parameter types ----------------------------------------------------------
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VmParam {
     /// Name of the VM (as shown in virt-manager).
     pub vm: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecParams {
     pub vm: String,
     /// Shell command line to run. Use either `command` or `program`.
@@ -190,6 +192,7 @@ pub enum ReadEncoding {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReadFileParams {
     pub vm: String,
     /// Absolute path inside the guest (e.g. /etc/os-release or C:\Windows\win.ini).
@@ -212,6 +215,7 @@ pub enum WriteEncoding {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteFileParams {
     pub vm: String,
     /// Absolute path inside the guest. Parent directory must exist.
@@ -228,6 +232,7 @@ pub struct WriteFileParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PathParams {
     pub vm: String,
     /// Absolute path inside the guest.
@@ -235,6 +240,7 @@ pub struct PathParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CopyToVmParams {
     pub vm: String,
     /// Absolute path of the file on the host. Must be inside one of the directories listed in the server instructions.
@@ -244,6 +250,7 @@ pub struct CopyToVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CopyFromVmParams {
     pub vm: String,
     /// Absolute path of the file inside the guest.
@@ -260,6 +267,7 @@ fn yes() -> bool {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CopyDirFromVmParams {
     pub vm: String,
     /// Absolute path of a directory inside the guest.
@@ -278,6 +286,7 @@ pub struct CopyDirFromVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CopyDirToVmParams {
     pub vm: String,
     /// Absolute path of a directory on the host, inside one of the shared directories named in the server
@@ -302,6 +311,7 @@ pub struct CopyDirToVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StartVmParams {
     pub vm: String,
     /// After starting, wait up to this many seconds for the guest agent to respond (default 0, max 300).
@@ -310,6 +320,7 @@ pub struct StartVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StopVmParams {
     pub vm: String,
     /// Power off immediately, like pulling the plug, instead of asking the guest to shut down.
@@ -320,6 +331,7 @@ pub struct StopVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConsoleOpenParams {
     pub vm: String,
     /// Console device alias (e.g. "serial0", "console1"); omit for the first console.
@@ -331,6 +343,7 @@ pub struct ConsoleOpenParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConsoleReadParams {
     pub vm: String,
     /// Absolute offset to read from (use `next` from the previous read). Omit to get the most recent output.
@@ -349,6 +362,7 @@ pub struct ConsoleReadParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobStartParams {
     pub vm: String,
     /// Command to run in the background: a `/bin/sh` command as root on Linux, a PowerShell script as SYSTEM on
@@ -360,6 +374,7 @@ pub struct JobStartParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobReadParams {
     pub vm: String,
     /// The job ID that job_start returned.
@@ -372,6 +387,7 @@ pub struct JobReadParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobStopParams {
     pub vm: String,
     /// The job ID that job_start returned.
@@ -383,6 +399,7 @@ pub struct JobStopParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WaitForParams {
     pub vm: String,
     /// Seconds to wait, at most limits.max_wait_secs (default 50), which is also the default. 0 checks console conditions once and is refused with agent, command, job and screen conditions.
@@ -405,6 +422,7 @@ fn attachment_wanted(config: &Config, screenshot: Option<bool>) -> Result<bool> 
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConsoleWriteParams {
     pub vm: String,
     /// Text to send. Control characters are sent as-is (e.g. "\u0003" for Ctrl+C, "\u0004" for Ctrl+D).
@@ -422,6 +440,7 @@ pub struct ConsoleWriteParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotParams {
     pub vm: String,
     /// Display head index (default 0).
@@ -435,6 +454,7 @@ pub struct ScreenshotParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SendKeysParams {
     pub vm: String,
     /// Key combos pressed one after another, e.g. ["ctrl+alt+delete"], ["enter"], ["win+r"], ["alt+f4"].
@@ -447,6 +467,7 @@ pub struct SendKeysParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TypeTextParams {
     pub vm: String,
     /// Text to type (printable ASCII; "\n" presses Enter, "\t" presses Tab). Uses a US keyboard layout.
@@ -472,6 +493,7 @@ pub enum Firmware {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateVmParams {
     /// Name of the new VM: 1-64 characters of A-Z, a-z, 0-9, '.', '_', '-'.
     pub name: String,
@@ -496,6 +518,7 @@ pub struct CreateVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateFromTemplateParams {
     /// Name of the new VM, also its hostname: lowercase letters, digits and hyphens, starting with a letter, not
     /// ending with a hyphen, at most 63 characters.
@@ -519,6 +542,7 @@ pub struct CreateFromTemplateParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResetVmParams {
     pub vm: String,
     /// After starting, wait up to this many seconds for the guest agent to respond (default 60, max 300).
@@ -526,6 +550,7 @@ pub struct ResetVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigureVmParams {
     pub vm: String,
     /// New number of vCPUs (takes effect at next boot).
@@ -535,6 +560,7 @@ pub struct ConfigureVmParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttachDiskParams {
     pub vm: String,
     /// Size of the new disk.
@@ -542,6 +568,7 @@ pub struct AttachDiskParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DetachDiskParams {
     pub vm: String,
     /// Disk target as shown by describe_vm, e.g. "vdb".
@@ -549,6 +576,7 @@ pub struct DetachDiskParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetCdromParams {
     pub vm: String,
     /// Absolute host path of an ISO (from list_isos). Omit to eject.
@@ -558,6 +586,7 @@ pub struct SetCdromParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttachNicParams {
     pub vm: String,
     /// libvirt network name (one of the allowed networks).
@@ -565,6 +594,7 @@ pub struct AttachNicParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DetachNicParams {
     pub vm: String,
     /// MAC address of the interface, as shown by describe_vm.
@@ -572,6 +602,7 @@ pub struct DetachNicParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotParams {
     pub vm: String,
     /// Snapshot name.
@@ -579,6 +610,7 @@ pub struct SnapshotParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotCreateParams {
     pub vm: String,
     /// Snapshot name: 1-64 characters of A-Z, a-z, 0-9, '.', '_', '-'.
@@ -2541,6 +2573,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["move", "click", "double_click", "drag", "scroll"]
         );
+    }
+
+    #[test]
+    fn every_tool_with_parameters_refuses_unknown_ones() {
+        let tools = VirtServer::tool_router().list_all();
+        let mut checked = 0;
+        for tool in &tools {
+            let schema = &tool.input_schema;
+            if schema.get("properties").is_none_or(|p| p == &json!({})) {
+                continue;
+            }
+            assert_eq!(
+                schema.get("additionalProperties"),
+                Some(&json!(false)),
+                "{} accepts unknown arguments",
+                tool.name
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 30,
+            "only {checked} of {} tools checked",
+            tools.len()
+        );
+
+        let err = serde_json::from_value::<ScreenshotParams>(json!({ "vm": "a", "width": 10 }))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("unknown field `width`"), "{err}");
     }
 
     #[test]

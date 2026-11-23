@@ -116,6 +116,7 @@ impl From<ScrollDirection> for QmpButton {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MouseParams {
     pub vm: String,
     pub action: Action,

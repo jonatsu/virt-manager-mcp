@@ -5,6 +5,12 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+### Changed
+
+- Every tool that takes arguments refuses one it does not know, with an error that names it, instead of ignoring it.
+  The tools' input schemas say so with `additionalProperties: false`. A client that sends extra fields must stop
+  sending them.
+
 ### Added
 
 - Background jobs on Windows guests: `job_start`, `job_read`, `job_stop` and `job_list` run a PowerShell command as
