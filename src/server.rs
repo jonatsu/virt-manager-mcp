@@ -2607,6 +2607,22 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("unknown field `width`"), "{err}");
+
+        // A field-less condition is a struct variant, because serde ignores extra fields on a unit variant.
+        let agent = |extra: Value| {
+            let mut condition = json!({ "kind": "agent" });
+            condition
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<WaitForParams>(json!({ "vm": "a", "conditions": [condition] }))
+        };
+        assert!(agent(json!({})).is_ok());
+        let err = agent(json!({ "timeout_secs": 5 })).err().unwrap();
+        assert!(
+            err.to_string().contains("unknown field `timeout_secs`"),
+            "{err}"
+        );
     }
 
     #[test]

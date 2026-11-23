@@ -74,7 +74,7 @@ pub enum Condition {
         strip_ansi: Option<bool>,
     },
     /// The QEMU guest agent answers.
-    Agent,
+    Agent {},
     /// A shell command run through the guest agent exits 0. It runs again after a non-zero exit, and may also run
     /// again when a slow agent's reply to the start is lost; it is never killed. It runs with exec's default shell:
     /// /bin/sh on Linux, PowerShell on Windows. On Windows, $false is not a failure, so test with
@@ -134,7 +134,7 @@ impl Condition {
     fn kind(&self) -> &'static str {
         match self {
             Condition::Console { .. } => "console",
-            Condition::Agent => "agent",
+            Condition::Agent {} => "agent",
             Condition::Command { .. } => "command",
             Condition::JobDone { .. } => "job_done",
             Condition::JobOutput { .. } => "job_output",
@@ -151,7 +151,7 @@ impl Condition {
                 Some(screen.unwrap_or(0))
             }
             Condition::Console { .. }
-            | Condition::Agent
+            | Condition::Agent {}
             | Condition::Command { .. }
             | Condition::JobDone { .. }
             | Condition::JobOutput { .. }
@@ -243,7 +243,7 @@ pub fn validate_conditions(
                         strip_ansi: strip_ansi.unwrap_or(true),
                     }
                 }
-                Condition::Agent => Check::Agent,
+                Condition::Agent {} => Check::Agent,
                 Condition::TransferDone { .. } => {
                     bail!("condition {i}: transfer_done must be the only condition of its wait")
                 }
@@ -3395,7 +3395,7 @@ mod tests {
         });
         let stopper = guest.clone();
         let checks =
-            validate_conditions(&Config::default(), ANY_TIMEOUT, &[Condition::Agent]).unwrap();
+            validate_conditions(&Config::default(), ANY_TIMEOUT, &[Condition::Agent {}]).unwrap();
         let waiter = std::thread::spawn(move || {
             let env = FakeEnv::new(vec![]);
             let o = run(&env, guest, checks, Duration::from_secs(30)).unwrap();
@@ -3672,7 +3672,7 @@ mod tests {
     fn a_zero_timeout_refuses_probe_conditions_and_checks_the_console_once() {
         let env = FakeEnv::new(vec![(ms(0), b"login: ")]);
         let checks =
-            validate_conditions(&Config::default(), ANY_TIMEOUT, &[Condition::Agent]).unwrap();
+            validate_conditions(&Config::default(), ANY_TIMEOUT, &[Condition::Agent {}]).unwrap();
         let err = run(&env, Arc::new(FakeGuest::new()), checks, Duration::ZERO)
             .unwrap_err()
             .to_string();
@@ -3730,7 +3730,7 @@ mod tests {
             ..FakeGuest::new()
         };
         let env = FakeEnv::new(vec![]);
-        let o = wait(&env, guest, &[Condition::Agent], 4);
+        let o = wait(&env, guest, &[Condition::Agent {}], 4);
         let Outcome::TimedOut {
             resume, commands, ..
         } = o
@@ -3750,7 +3750,7 @@ mod tests {
             ..FakeGuest::new()
         };
         let env = FakeEnv::new(vec![]);
-        let o = wait(&env, guest, &[Condition::Agent], 10);
+        let o = wait(&env, guest, &[Condition::Agent {}], 10);
         assert_eq!(matched(&o).0, 0);
         // Probes start about once a second: the third one answers.
         assert!(
@@ -3849,7 +3849,7 @@ mod tests {
         };
         assert!(refused(&read_only, cmd.clone()).contains("read-only"));
         assert!(validate_conditions(&config, ANY_TIMEOUT, &[cmd]).is_ok());
-        assert!(validate_conditions(&read_only, ANY_TIMEOUT, &[Condition::Agent]).is_ok());
+        assert!(validate_conditions(&read_only, ANY_TIMEOUT, &[Condition::Agent {}]).is_ok());
         assert!(validate_conditions(&config, ANY_TIMEOUT, &[]).is_err());
     }
 
