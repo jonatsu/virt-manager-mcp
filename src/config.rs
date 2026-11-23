@@ -93,6 +93,9 @@ pub struct Template {
     pub os: GuestOs,
     #[serde(default)]
     pub firmware: Firmware,
+    /// UEFI only. False turns Secure Boot off, for a template whose boot loader is not signed.
+    #[serde(default = "yes")]
+    pub secure_boot: bool,
     #[serde(default)]
     pub description: String,
     /// cloud-config file put into each new VM's seed. It must start with a `#cloud-config` line.
@@ -113,6 +116,10 @@ pub enum Firmware {
     #[default]
     Bios,
     Uefi,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,6 +295,9 @@ impl Config {
                 bail!(
                     "manage.templates.{name}.volume must name a volume in manage.disk_pool, not a path"
                 );
+            }
+            if t.firmware == Firmware::Bios && !t.secure_boot {
+                bail!("manage.templates.{name}: secure_boot = false needs firmware = \"uefi\"");
             }
         }
         if self.share_project_dir {
@@ -603,6 +613,10 @@ mod tests {
             firmware = "uefi"
             description = "Debian 13"
             user_data = "/etc/virtmanager-mcp/debian13.yaml"
+            [manage.templates.cachyos]
+            volume = "tpl-cachyos.qcow2"
+            firmware = "uefi"
+            secure_boot = false
             "#,
         )
         .unwrap();
@@ -610,11 +624,17 @@ mod tests {
         assert_eq!(m.max_lifetime_minutes, 1440);
         let plain = &m.templates["debian13"];
         assert_eq!(
-            (plain.os, plain.firmware, plain.user_data.as_ref()),
-            (GuestOs::Linux, Firmware::Bios, None)
+            (
+                plain.os,
+                plain.firmware,
+                plain.secure_boot,
+                plain.user_data.as_ref()
+            ),
+            (GuestOs::Linux, Firmware::Bios, true, None)
         );
         let uefi = &m.templates["debian13-uefi"];
-        assert_eq!(uefi.firmware, Firmware::Uefi);
+        assert_eq!((uefi.firmware, uefi.secure_boot), (Firmware::Uefi, true));
+        assert!(!m.templates["cachyos"].secure_boot);
         assert_eq!(
             uefi.user_data.as_deref(),
             Some(Path::new("/etc/virtmanager-mcp/debian13.yaml"))
@@ -644,6 +664,7 @@ mod tests {
             (table("firmware = \"coreboot\""), "unknown firmware"),
             (table("os = \"bsd\""), "unknown os"),
             (table("colour = \"blue\""), "unknown key"),
+            (table("secure_boot = false"), "Secure Boot off on BIOS"),
             (
                 "[manage.templates.Debian]\nvolume = \"t.qcow2\"".into(),
                 "uppercase name",

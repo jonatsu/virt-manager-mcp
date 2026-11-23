@@ -197,6 +197,8 @@ pub struct NewVm {
     pub disk_gib: u64,
     pub uefi: bool,
     pub tpm: bool,
+    /// False turns Secure Boot off; only a UEFI VM may have it false.
+    pub secure_boot: bool,
     pub iso: Option<String>,
     pub driver_iso: Option<String>,
     pub network: Option<String>,
@@ -208,6 +210,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
     check_vcpus(m, vm.vcpus)?;
     check_memory(m, vm.memory_mib)?;
     check_disk(m, vm.disk_gib)?;
+    check_secure_boot(vm.uefi, vm.secure_boot)?;
     let iso = vm
         .iso
         .as_deref()
@@ -250,6 +253,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             memory_mib: vm.memory_mib,
             uefi: vm.uefi,
             tpm: vm.tpm,
+            secure_boot: vm.secure_boot,
             disks,
             network: network.as_deref(),
             uuid: None,
@@ -268,7 +272,11 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             vm.disk_gib,
             m.disk_pool,
             vol_name,
-            if vm.uefi { "UEFI" } else { "BIOS" },
+            match (vm.uefi, vm.secure_boot) {
+                (false, _) => "BIOS",
+                (true, true) => "UEFI",
+                (true, false) => "UEFI without Secure Boot",
+            },
             if vm.tpm { ", TPM" } else { "" },
         );
         if let Some(n) = &network {
@@ -325,6 +333,7 @@ pub fn list_templates(hv: &Hypervisor) -> Result<Vec<Value>> {
                 "description": t.description,
                 "os": match t.os { GuestOs::Linux => "linux", GuestOs::Windows => "windows" },
                 "firmware": match t.firmware { Firmware::Bios => "bios", Firmware::Uefi => "uefi" },
+                "secure_boot": t.firmware == Firmware::Uefi && t.secure_boot,
                 "vms_using_it": used_by,
             }));
         }
@@ -528,6 +537,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                 memory_mib,
                 uefi: t.firmware == Firmware::Uefi,
                 tpm: false,
+                secure_boot: t.secure_boot,
                 disks: vec![Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
                 network: network.as_deref(),
                 uuid: Some(&uuid),
@@ -972,6 +982,7 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
     let os = child(root, "os");
     let uefi =
         os.is_some_and(|o| o.attribute("firmware") == Some("efi") || child(o, "loader").is_some());
+    let secure_boot = uefi && !os.is_some_and(secure_boot_off);
     let devices = child(root, "devices");
     let has = |tag: &str| devices.is_some_and(|d| child(d, tag).is_some());
 
@@ -998,6 +1009,7 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
         "max_vcpus": text("vcpu"),
         "memory_mib": kib_text(&xml, "currentMemory").or_else(|| kib_text(&xml, "memory")).map(|k| k / 1024),
         "firmware": if uefi { "uefi" } else { "bios" },
+        "secure_boot": secure_boot,
         "tpm": has("tpm"),
         "disks": disks,
         "interfaces": parse_nics(&xml)?,
@@ -1413,6 +1425,27 @@ fn check_disk(m: &Manage, gib: u64) -> Result<()> {
     Ok(())
 }
 
+/// Whether a domain's `<os>` turns Secure Boot off, through its firmware features or a loader marked not secure.
+fn secure_boot_off(os: roxmltree::Node<'_, '_>) -> bool {
+    let feature_off = child(os, "firmware").is_some_and(|f| {
+        f.children().any(|n| {
+            n.has_tag_name("feature")
+                && n.attribute("name") == Some("secure-boot")
+                && n.attribute("enabled") == Some("no")
+        })
+    });
+    feature_off || child(os, "loader").and_then(|l| l.attribute("secure")) == Some("no")
+}
+
+fn check_secure_boot(uefi: bool, secure_boot: bool) -> Result<()> {
+    if !uefi && !secure_boot {
+        bail!(
+            "secure_boot: false needs firmware \"uefi\"; a BIOS VM has no Secure Boot to turn off"
+        );
+    }
+    Ok(())
+}
+
 fn check_network(conn: &Connect, m: &Manage, network: &str) -> Result<()> {
     if !m.networks.iter().any(|n| n == network) {
         bail!(
@@ -1715,6 +1748,8 @@ struct DomainSpec<'a> {
     memory_mib: u64,
     uefi: bool,
     tpm: bool,
+    /// With `uefi`, false turns the firmware's Secure Boot and enrolled keys off.
+    secure_boot: bool,
     /// In order: the first writable disk boots first, the first CD-ROM second.
     disks: Vec<Disk<'a>>,
     network: Option<&'a str>,
@@ -1824,7 +1859,7 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
          <metadata>{owner}</metadata>\
          <memory unit='MiB'>{mem}</memory><currentMemory unit='MiB'>{mem}</currentMemory>\
          <vcpu>{vcpus}</vcpu>\
-         <os{firmware}><type arch='x86_64' machine='q35'>hvm</type></os>\
+         <os{firmware}><type arch='x86_64' machine='q35'>hvm</type>{firmware_features}</os>\
          <features>{features}</features>\
          <cpu mode='host-passthrough'/>\
          {clock}\
@@ -1840,6 +1875,15 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
         mem = spec.memory_mib,
         vcpus = spec.vcpus,
         firmware = if spec.uefi { " firmware='efi'" } else { "" },
+        // Without features, libvirt picks the host's preferred descriptor, often one with Secure Boot on. With them
+        // alone it may pick a stateless ROM build such as OVMF.amdsev.fd, which keeps no boot entries, so the loader
+        // type asks for flash with its own variables.
+        firmware_features = if spec.uefi && !spec.secure_boot {
+            "<firmware><feature enabled='no' name='secure-boot'/><feature enabled='no' name='enrolled-keys'/></firmware>\
+             <loader type='pflash'/>"
+        } else {
+            ""
+        },
         devices = devices.concat(),
     )
 }
@@ -1952,12 +1996,68 @@ mod tests {
             memory_mib: 2048,
             uefi: false,
             tpm: false,
+            secure_boot: true,
             disks,
             network: Some("net"),
             uuid: None,
             mac: None,
             owner: Owner::default(),
         }
+    }
+
+    /// The `enabled` value of each firmware feature in a domain's `<os>`, by name.
+    fn firmware_features(xml: &str) -> Vec<(String, String)> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        doc.descendants()
+            .filter(|n| {
+                n.has_tag_name("feature") && n.parent().is_some_and(|p| p.has_tag_name("firmware"))
+            })
+            .map(|n| {
+                (
+                    n.attribute("name").unwrap().into(),
+                    n.attribute("enabled").unwrap().into(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn domain_xml_turns_secure_boot_off_only_when_asked() {
+        let uefi = |secure_boot| {
+            domain_xml(&DomainSpec {
+                uefi: true,
+                secure_boot,
+                ..spec(vec![Disk::Qcow2("/pool/t.qcow2")])
+            })
+        };
+        assert!(firmware_features(&uefi(true)).is_empty());
+        let off = uefi(false);
+        assert_eq!(
+            firmware_features(&off),
+            [
+                ("secure-boot".into(), "no".into()),
+                ("enrolled-keys".into(), "no".into())
+            ]
+        );
+        let doc = roxmltree::Document::parse(&off).unwrap();
+        let os = child(doc.root_element(), "os").unwrap();
+        assert_eq!(os.attribute("firmware"), Some("efi"));
+        assert_eq!(
+            child(os, "loader").and_then(|l| l.attribute("type")),
+            Some("pflash")
+        );
+        assert!(secure_boot_off(os));
+
+        assert!(firmware_features(&domain_xml(&spec(vec![Disk::Qcow2("/p/t.qcow2")]))).is_empty());
+    }
+
+    #[test]
+    fn secure_boot_off_needs_uefi() {
+        assert!(check_secure_boot(true, false).is_ok());
+        assert!(check_secure_boot(true, true).is_ok());
+        assert!(check_secure_boot(false, true).is_ok());
+        let err = check_secure_boot(false, false).unwrap_err().to_string();
+        assert!(err.contains("needs firmware \"uefi\""), "{err}");
     }
 
     #[test]

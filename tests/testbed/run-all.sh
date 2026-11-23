@@ -38,7 +38,8 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
   transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  screen-no-models templates-create templates-reset templates-reset-uefi templates-expiry templates-expiry-command
+  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot templates-expiry
+  templates-expiry-command
   templates-outside-disk manage-lock console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   screen-installer screen-windows win-exec win-screen
 )

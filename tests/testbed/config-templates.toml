@@ -32,6 +32,12 @@ volume = "tpl-debian13.qcow2"
 firmware = "uefi"
 description = "Debian 13, UEFI boot"
 
+[manage.templates.debian13-uefi-nosb]
+volume = "tpl-debian13.qcow2"
+firmware = "uefi"
+secure_boot = false
+description = "Debian 13, UEFI boot without Secure Boot"
+
 # A virsh vol-clone of tpl-debian13.qcow2 that failure cases may delete.
 [manage.templates.scratch]
 volume = "tpl-scratch.qcow2"

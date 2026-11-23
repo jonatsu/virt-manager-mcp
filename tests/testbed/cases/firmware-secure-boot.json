@@ -1,0 +1,174 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-sb",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "secure_boot": false
+    },
+    "expect": {
+      "error": true,
+      "contains": "secure_boot: false needs firmware \"uefi\""
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-sb",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi",
+      "secure_boot": false
+    },
+    "expect": {
+      "contains": "created VM 't-sb' (1 vCPUs, 512 MiB, 1 GiB disk agent-vms/t-sb.qcow2, UEFI without Secure Boot"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-sb"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"uefi\"",
+        "\"secure_boot\": false"
+      ]
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-sb",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-sb': started"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-sb",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-sb' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-sb"
+    },
+    "expect": {
+      "contains": "deleted VM 't-sb'"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-sbt",
+      "template": "debian13-uefi-nosb"
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-sbt' from template 'debian13-uefi-nosb'",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-sbt",
+      "command": "test -d /sys/firmware/efi && echo uefi-booted; v=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c; if [ -e \"$v\" ]; then echo \"sb=$(od -An -tu1 \"$v\" | awk \"{print \\$NF}\")\"; else echo sb=absent; fi"
+    },
+    "expect": {
+      "contains": "uefi-booted",
+      "matches": "sb=(absent|0)\\b"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-sbu",
+      "template": "debian13-uefi"
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-sbu' from template 'debian13-uefi'",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-sbu"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"uefi\"",
+        "\"secure_boot\": true"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-sbu",
+      "command": "test -d /sys/firmware/efi && echo uefi-booted; v=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c; if [ -e \"$v\" ]; then echo \"sb=$(od -An -tu1 \"$v\" | awk \"{print \\$NF}\")\"; else echo sb=absent; fi"
+    },
+    "expect": {
+      "contains": [
+        "uefi-booted",
+        "sb=1"
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-sbt",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-sbt' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-sbt"
+    },
+    "expect": {
+      "contains": "deleted VM 't-sbt'"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-sbu",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-sbu' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-sbu"
+    },
+    "expect": {
+      "contains": "deleted VM 't-sbu'"
+    }
+  }
+]

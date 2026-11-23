@@ -171,13 +171,12 @@ Reviews of earlier work found these. None blocks the server's use.
     `win-jobs.json` failed this way on `t-win11`, stopping `ping.exe -n 300 127.0.0.1` with `force`. The job still
     ended, and `job_list` then read "ended without status". The next run passed. Find which `taskkill` exit statuses
     mean the tree is already gone, and repeat the case to measure how often it happens.
-29. **`create_vm` cannot make a UEFI VM without Secure Boot.** libvirt picks the `secure-enrolled` firmware descriptor,
-    so an unsigned installer such as CachyOS's is refused at boot, and an agent must fall back to `firmware: "bios"`
-    ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). Decided: `create_vm` gains a
-    `secure_boot` flag beside `tpm`, defaulting to true; false writes the `secure-boot` and `enrolled-keys` firmware
-    features off. `create_vm` refuses `firmware: "bios"` with `secure_boot: false`. Template entries in the config
-    gain the same `secure_boot` key, because a template built from an unsigned install needs it to boot. Unit tests
-    cover the domain XML for each setting and the refusal; a test-bed case boots a UEFI VM with Secure Boot off.
+29. **Done: `create_vm` can make a UEFI VM without Secure Boot.** libvirt picks the `secure-enrolled` firmware
+    descriptor, so an unsigned installer such as CachyOS's was refused at boot
+    ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). `create_vm` and template entries take a
+    `secure_boot` flag, true by default; false writes the `secure-boot` and `enrolled-keys` firmware features off
+    and asks for a flash loader, because with the features alone libvirt picked the stateless `OVMF.amdsev.fd`.
+    `create_vm` and the config refuse `secure_boot: false` with BIOS. `firmware-secure-boot.json` boots both kinds.
 30. **Done: the tools refuse unknown arguments.** A `screenshot` given `x`, `y`, `width` and `height` instead of
     `region` returned the whole screen without an error, so an agent did not learn its mistake. Every tool's
     parameters now use `deny_unknown_fields`, so the error names the field and the published schemas declare
@@ -262,6 +261,6 @@ Parked ideas, which no outcome includes yet:
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and
-24, its units 1 and 2, are done, and so is 30. Follow-ups 16, 23, 25, 27 to 29 and 31 can land at any time; 16
-waits on a newer `virtio-win`, 23 needs a design decision, 25 and 29 have their designs decided, and 27 waits
+24, its units 1 and 2, are done, and so are 29 and 30. Follow-ups 16, 23, 25, 27, 28 and 31 can land at any time;
+16 waits on a newer `virtio-win`, 23 needs a design decision, 25 has its design decided, and 27 waits
 on `rmcp` and `schemars`.

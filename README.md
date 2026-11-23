@@ -319,7 +319,8 @@ max_disk_gib = 32
 
 - **Creating:** `create_vm` takes a name, `os` (`linux`/`windows`), vCPUs, memory, disk size,
   `firmware` (`uefi`, the default, or `bios`), an optional TPM 2.0, an install ISO, a second
-  "driver" ISO (e.g. `virtio-win.iso` for Windows) and a network. The VM gets a q35 machine,
+  "driver" ISO (e.g. `virtio-win.iso` for Windows) and a network. A UEFI VM uses the host's firmware with Secure
+  Boot, which refuses an installer that is not signed; `secure_boot: false` turns it off. The VM gets a q35 machine,
   a virtio disk (a new qcow2 volume `<name>.qcow2` in `disk_pool`), a SATA CD-ROM it boots from
   after the disk, a virtio NIC, the guest agent channel, a serial console, SPICE and spare PCIe
   ports for hot-plugging. Windows guests also get Hyper-V enlightenments and a local-time clock.
@@ -347,8 +348,9 @@ max_disk_gib = 32
   max_lifetime_minutes = 1440
 
   [manage.templates.debian13]
-  volume = "tpl-debian13.qcow2"                   # qcow2 volume in disk_pool
-  firmware = "bios"                               # or "uefi"; os = "linux" (default) or "windows"
+  volume = "tpl-debian13.qcow2" # qcow2 volume in disk_pool
+  firmware = "bios"             # or "uefi"; os = "linux" (default) or "windows"
+  # secure_boot = false                           # UEFI only: for a boot loader that is not signed
   description = "Debian 13 with qemu-guest-agent"
   # user_data = "/etc/virtmanager-mcp/debian13.yaml"   # optional cloud-config for every new VM
   ```

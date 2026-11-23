@@ -508,6 +508,10 @@ pub struct CreateVmParams {
     /// Add an emulated TPM 2.0 (needed by Windows 11).
     #[serde(default)]
     pub tpm: bool,
+    /// UEFI only. Default true: the host's firmware with Secure Boot and enrolled keys, which refuses an unsigned
+    /// boot loader. False turns Secure Boot off, for installers that are not signed.
+    #[serde(default = "yes")]
+    pub secure_boot: bool,
     /// Install ISO (absolute host path from list_isos), attached as a bootable CD-ROM.
     pub iso: Option<String>,
     /// Second ISO attached as another CD-ROM, e.g. virtio-win.iso so a Windows installer can load
@@ -1753,6 +1757,7 @@ impl VirtServer {
                     disk_gib: p.disk_gib,
                     uefi: p.firmware == Firmware::Uefi,
                     tpm: p.tpm,
+                    secure_boot: p.secure_boot,
                     iso: p.iso,
                     driver_iso: p.driver_iso,
                     network: p.network,
