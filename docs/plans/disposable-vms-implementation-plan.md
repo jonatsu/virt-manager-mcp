@@ -58,7 +58,7 @@ These apply to every unit, which names only its additions.
 
 ### 1. Seed image (reviewed)
 
-**Outcome.** A function builds a 2 MiB FAT image labelled `CIDATA` holding `meta-data` and `user-data`, and
+**Result.** A function builds a 2 MiB FAT image labelled `CIDATA` holding `meta-data` and `user-data`, and
 cloud-init in Debian 13 applies it. This settles the design's open assumption.
 
 **Changes.** Add `fatfs` 0.3.6. Try default features off with `std` and `alloc`, which keeps its `chrono` and
@@ -79,7 +79,7 @@ a design change that needs approval.
 
 ### 2. Template script (self-reviewed)
 
-**Outcome.** `scripts/make-template.sh` builds a template volume in a pool, and a short how-to explains it.
+**Result.** `scripts/make-template.sh` builds a template volume in a pool, and a short how-to explains it.
 
 **Changes.** The script takes the pool and volume name, and refuses an existing volume, so it never rebuilds a template
 in use. It downloads the Debian 13 `genericcloud` image, verifies it against `SHA512SUMS`, uploads it, boots it once
@@ -97,7 +97,7 @@ enough: the script runs only operator-side, and unit 5 boots the result.
 
 ### 3. Template config (reviewed with unit 4)
 
-**Outcome.** The config accepts `[manage.templates.<name>]` and `manage.max_lifetime_minutes`, and rejects bad input
+**Result.** The config accepts `[manage.templates.<name>]` and `manage.max_lifetime_minutes`, and rejects bad input
 at load.
 
 **Changes.** In `src/config.rs`, add a `Template` struct (`volume`, `os`, `firmware`, `description`, `user_data`) and
@@ -107,7 +107,7 @@ config without templates.
 
 ### 4. Volumes and domain XML (reviewed, Opus)
 
-**Outcome.** `src/manage.rs` can create an overlay and a seed volume, upload the seed, and write a domain with several
+**Result.** `src/manage.rs` can create an overlay and a seed volume, upload the seed, and write a domain with several
 disks, the chosen firmware, a given UUID and MAC address, and the new owner attributes. `create_vm` behaves as before.
 
 **Changes.** `domain_xml` takes a list of disks, the firmware, the owner attributes and an optional UUID and MAC;
@@ -127,7 +127,7 @@ the owner attributes round trip, and that a domain without the owner element sti
 
 ### 5. Create from template (reviewed)
 
-**Outcome.** `list_templates` and `create_vm_from_template` work as the design's "Templates" and "Creating a VM"
+**Result.** `list_templates` and `create_vm_from_template` work as the design's "Templates" and "Creating a VM"
 sections describe, including the lifetime, and an agent gets a responding guest agent in about 10 s.
 
 **Changes.** Template checks run on every use: the volume is present and qcow2, no domain uses it, and the user-data
@@ -153,7 +153,7 @@ config shows the tools are not advertised. The template's checksum matches unit 
 
 ### 6. Reset (reviewed, Opus)
 
-**Outcome.** `reset_vm` follows the design's six steps and keeps the name, UUID, MAC address, hardware and expiry.
+**Result.** `reset_vm` follows the design's six steps and keeps the name, UUID, MAC address, hardware and expiry.
 
 **Changes.** The reset in `src/manage.rs` takes `LOCK` for steps 1 to 5. It checks for itself that the VM is owned and
 has a `template` attribute, because `can_manage` also passes VMs listed in `manage_vms`. It edits the domain's
@@ -174,7 +174,7 @@ disks in place. A run with `delete = false` does not advertise `reset_vm`.
 
 ### 7. Expiry (reviewed, Opus)
 
-**Outcome.** Expired owned VMs are deleted by one sweep thread per server process and by `virtmanager-mcp sweep`, as
+**Result.** Expired owned VMs are deleted by one sweep thread per server process and by `virtmanager-mcp sweep`, as
 the design's "Expiry" section describes.
 
 **Changes.** A `sweep` module with the selection, pure and unit-tested on owner attributes and the clock, and the
@@ -196,7 +196,7 @@ reviewed in code, and the unit tests cover the logic that does not need libvirt.
 
 ### 8. Docs and final gate
 
-**Outcome.** The README documents the three tools and the template config, the design matches the code, and the
+**Result.** The README documents the three tools and the template config, the design matches the code, and the
 roadmap marks outcome 1 done.
 
 **Verification.** The full build gate and `cargo +1.89 test --locked` pass at the final commit. Every test-bed case,

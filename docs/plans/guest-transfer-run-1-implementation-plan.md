@@ -81,7 +81,7 @@ These apply to every unit, which names only its additions.
 
 ### 1. Pull configuration (reviewed, Opus)
 
-**Outcome.** The server accepts `host_pull_dirs`, and refuses to start on a pull directory that overlaps anything a
+**Result.** The server accepts `host_pull_dirs`, and refuses to start on a pull directory that overlaps anything a
 guest must not write. Every pull directory has a usable staging directory, and leftovers of a
 dead server are gone at start. This realizes the design's "Configuration" section and the staging cleanup under "Host
 rules for every pull".
@@ -110,7 +110,7 @@ reading every pool rather than only `manage.disk_pool`.
 
 ### 2. Host writer and `copy_from_vm` (reviewed, Opus)
 
-**Outcome.** `copy_from_vm` pulls one guest file into a pull directory, under every host rule in the design: the
+**Result.** `copy_from_vm` pulls one guest file into a pull directory, under every host rule in the design: the
 handle walk without symlinks, staging, fixed modes, `renameat2`, the type rule, the per-process destination conflict,
 and `max_pull_bytes`. The call still blocks until the copy ends; unit 3 adds the time limit.
 
@@ -151,7 +151,7 @@ On `trial-deb13`, a pull of `/etc/os-release` matches `sha256sum` in the guest.
 
 ### 3. Background transfers (reviewed, Opus)
 
-**Outcome.** Every copy tool returns within `limits.max_wait_secs`. A copy that runs longer continues in the server,
+**Result.** Every copy tool returns within `limits.max_wait_secs`. A copy that runs longer continues in the server,
 and `wait_for` with a `transfer_done` condition returns its result. This realizes the design's "Long transfers"
 section.
 
@@ -191,7 +191,7 @@ afterwards.
 
 ### 4. Directory push (reviewed, Opus)
 
-**Outcome.** `copy_dir_to_vm` pushes a directory from a share directory into a new or replaced guest directory, as the
+**Result.** `copy_dir_to_vm` pushes a directory from a share directory into a new or replaced guest directory, as the
 design's "Pushing a directory" and "Paths" sections describe, through a transfer.
 
 **Changes.**
@@ -227,7 +227,7 @@ an ignored file is absent, and a second push with `replace` after deleting a hos
 
 ### 5. Directory pull (reviewed, Opus)
 
-**Outcome.** `copy_dir_from_vm` pulls a guest directory into a pull directory, as the design's "Pulling a directory"
+**Result.** `copy_dir_from_vm` pulls a guest directory into a pull directory, as the design's "Pulling a directory"
 section describes, through a transfer.
 
 **Changes.**
@@ -266,7 +266,7 @@ The same commit adds the plan's design amendment to the design's unpacker list.
 
 ### 6. `vm_addresses` (reviewed)
 
-**Outcome.** `vm_addresses` returns each interface's addresses and their source, as the design's "Addresses" section
+**Result.** `vm_addresses` returns each interface's addresses and their source, as the design's "Addresses" section
 describes.
 
 **Changes.**
@@ -285,7 +285,7 @@ interface with only an agent answer keeps it; loopback and `fe80::` go; read-onl
 
 ### 7. Test-bed cases (self-reviewed)
 
-**Outcome.** `run-all.sh` covers the run's tools on `trial-deb13` and the file tools and `vm_addresses` on `t-win11`,
+**Result.** `run-all.sh` covers the run's tools on `trial-deb13` and the file tools and `vm_addresses` on `t-win11`,
 with every call checked.
 
 **Changes.**
@@ -316,7 +316,7 @@ no file over 1 MiB once the run ends.
 
 ### 8. Docs and final gate
 
-**Outcome.** The README, the design and the probe note describe what was built, the roadmap marks run 1 done, and the
+**Result.** The README, the design and the probe note describe what was built, the roadmap marks run 1 done, and the
 final reviews close.
 
 **Changes.** The README gains a section on moving files: the four tools, `host_pull_dirs` and its overlap rules, the

@@ -121,7 +121,7 @@ These apply to every unit, which names only its additions.
 
 ### 1. Rust 1.94 (self-reviewed)
 
-**Outcome.** The crate declares `rust-version = "1.94"`, CI's minimum-version job uses 1.94, and the gate passes on
+**Result.** The crate declares `rust-version = "1.94"`, CI's minimum-version job uses 1.94, and the gate passes on
 both toolchains.
 
 **Changes.** Install the toolchain with `rustup toolchain install 1.94`. Set `rust-version` in `Cargo.toml`, and drop
@@ -135,7 +135,7 @@ toolchain of the minimum-version job in `.github/workflows/ci.yml` to 1.94. `AGE
 
 ### 2. OCR engine and models (reviewed)
 
-**Outcome.** A recogniser built from the ONNX models reads text lines from an image with `ocrs` 0.14, at least as well
+**Result.** A recogniser built from the ONNX models reads text lines from an image with `ocrs` 0.14, at least as well
 as `ocrs` 0.12 did in the probe, and reads every string a test-bed case will wait for.
 
 **Changes.**
@@ -173,7 +173,7 @@ screen.
 
 ### 3. Frames and regions (reviewed)
 
-**Outcome.** One function captures a display head at full resolution from a domain, and `screenshot` takes an optional
+**Result.** One function captures a display head at full resolution from a domain, and `screenshot` takes an optional
 `region`, cropped at full resolution before any downscaling.
 
 **Changes.** Split `display::screenshot` into a capture that returns the full-resolution frame, taking its
@@ -188,7 +188,7 @@ regions at the right and bottom edges, rounding, and the refusals. On the test b
 
 ### 4. Frames in waits and `screen_settled` (reviewed, Opus)
 
-**Outcome.** `wait_for` accepts `screen_settled` and the `screenshot` attachment, as the overview fixes them.
+**Result.** `wait_for` accepts `screen_settled` and the `screenshot` attachment, as the overview fixes them.
 
 **Changes.**
 
@@ -214,7 +214,7 @@ regions at the right and bottom edges, rounding, and the refusals. On the test b
 
 ### 5. `screen_text` (reviewed, Opus)
 
-**Outcome.** `wait_for` accepts `screen_text`, as the overview fixes it.
+**Result.** `wait_for` accepts `screen_text`, as the overview fixes it.
 
 **Changes.**
 
@@ -240,7 +240,7 @@ regions at the right and bottom edges, rounding, and the refusals. On the test b
 
 ### 6. `mouse` (reviewed, Opus)
 
-**Outcome.** A `mouse` tool moves, clicks (left, right, middle), double-clicks, drags and scrolls on a VM's USB
+**Result.** A `mouse` tool moves, clicks (left, right, middle), double-clicks, drags and scrolls on a VM's USB
 tablet, refuses a VM without one, and is hidden in read-only mode.
 
 **Changes.**
@@ -273,7 +273,7 @@ the keyboard still works.
 
 ### 7. Test-bed guests and cases (self-reviewed)
 
-**Outcome.** Cases with expectations show the new conditions and the mouse on real guests, and `run-all.sh` runs
+**Result.** Cases with expectations show the new conditions and the mouse on real guests, and `run-all.sh` runs
 them, skipping the OCR cases when no models are given.
 
 **Changes.**
@@ -317,7 +317,7 @@ setup screen then shows the mouse instead.
 
 ### 8. Docs and final gate
 
-**Outcome.** The README and the design describe what was built, the roadmap records run 2, and the final reviews
+**Result.** The README and the design describe what was built, the roadmap records run 2, and the final reviews
 close.
 
 **Changes.** The README's tools table and its screen section gain `mouse`, regions, the screen conditions, the

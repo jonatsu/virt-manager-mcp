@@ -108,7 +108,7 @@ These apply to every unit, which names only its additions.
 
 ### 1. Windows test guest (reviewed)
 
-**Outcome.** `t-win11` installs unattended from `tpl-win11-26h2.iso` and then boots from its disk with every ISO
+**Result.** `t-win11` installs unattended from `tpl-win11-26h2.iso` and then boots from its disk with every ISO
 ejected. Its guest agent runs as `SYSTEM` and answers `guest-ping`, `guest-get-osinfo` and the file calls. This settles
 the design's open question on how the agent gets its driver, and its "Test guests" decision.
 
@@ -151,7 +151,7 @@ possible design change (risk 3).
 
 ### 2. Probe and design commit (self-reviewed)
 
-**Outcome.** A dated note, `docs/research/<date>-windows-jobs-probe.md` named for the day it runs, records on `t-win11`
+**Result.** A dated note, `docs/research/<date>-windows-jobs-probe.md` named for the day it runs, records on `t-win11`
 the mechanism for each amendment, with the commands and their output. The design then takes the six amendments in one
 commit, before unit 3 starts.
 
@@ -182,7 +182,7 @@ calls (amendment 5); the command file or the log cannot keep UTF-8 (amendment 1)
 
 ### 3. Windows jobs (reviewed, Opus)
 
-**Outcome.** `job_start`, `job_read`, `job_stop` and `job_list` work on Windows guests as the amended design describes,
+**Result.** `job_start`, `job_read`, `job_stop` and `job_list` work on Windows guests as the amended design describes,
 and refuse what they refuse on Linux: a malformed job ID, a VM outside `allowed_vms`, and any mutating call in
 read-only mode.
 
@@ -205,7 +205,7 @@ The existing refusal tests still pass for both systems. Live evidence is unit 5'
 
 ### 4. Wait conditions on Windows (reviewed, Opus)
 
-**Outcome.** `command`, `job_done` and `job_output` hold on Windows guests as on Linux, within the call's bound.
+**Result.** `command`, `job_done` and `job_output` hold on Windows guests as on Linux, within the call's bound.
 
 **Changes.** The `Guest` seam's `start` takes the guest's system and builds the command with the same shell choice as
 `exec`'s default, through `shell_spec`, moved from `src/server.rs` to `src/agent.rs` where both can reach it. The
@@ -217,7 +217,7 @@ condition starting the PowerShell form on a Windows fake guest.
 
 ### 5. Test-bed cases (self-reviewed)
 
-**Outcome.** Cases with expectations show the Windows jobs, their refusals, the wait conditions, and screen waits and
+**Result.** Cases with expectations show the Windows jobs, their refusals, the wait conditions, and screen waits and
 the mouse on `t-win11`, and `run-all.sh` runs them when `t-win11` exists.
 
 **Changes.**
@@ -249,7 +249,7 @@ the mouse on `t-win11`, and `run-all.sh` runs them when `t-win11` exists.
 
 ### 6. Docs and final gate
 
-**Outcome.** The README and the design describe what was built, the roadmap marks outcome 2 done, and the final reviews
+**Result.** The README and the design describe what was built, the roadmap marks outcome 2 done, and the final reviews
 close.
 
 **Changes.** The README's job and wait sections drop "Linux only" and describe the Windows shell, the `$false` rule,

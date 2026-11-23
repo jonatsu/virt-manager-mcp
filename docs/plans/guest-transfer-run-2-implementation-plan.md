@@ -106,7 +106,7 @@ These apply to every unit, which names only its additions.
 
 ### 1. Windows paths and the step seam (reviewed, Opus)
 
-**Outcome.** Both directory tools parse a Windows guest path under the design's rules, and both modules have one
+**Result.** Both directory tools parse a Windows guest path under the design's rules, and both modules have one
 place where a guest step is built for the guest's OS. This realizes the path paragraph of the design's "Windows
 guests" section, and gives units 3 and 4 their seam.
 
@@ -140,7 +140,7 @@ and for a behaviour change on Linux.
 
 ### 2. Push archive for Windows (reviewed, Opus)
 
-**Outcome.** A push to a Windows guest sends an archive with fixed modes, without symlinks, and without the entries
+**Result.** A push to a Windows guest sends an archive with fixed modes, without symlinks, and without the entries
 Windows cannot hold, each named in the reply. This realizes the design's mode and name rules for Windows pushes, with
 amendments 1 and 2.
 
@@ -167,7 +167,7 @@ superscript forms.
 
 ### 3. Push guest steps on Windows (reviewed, Opus)
 
-**Outcome.** `copy_dir_to_vm` pushes a tree into a Windows guest with the same guarantees as on Linux: nothing is
+**Result.** `copy_dir_to_vm` pushes a tree into a Windows guest with the same guarantees as on Linux: nothing is
 sent when the target exists without `replace`, `replace` swaps a complete tree in, and a failure leaves the old tree
 and no `.vmm-*` entry. This realizes the design's push steps for Windows and the "tree in use" part of risk 3.
 
@@ -198,7 +198,7 @@ leftovers.
 
 ### 4. Pull guest steps on Windows (reviewed, Opus)
 
-**Outcome.** `copy_dir_from_vm` pulls a Windows directory into a pull directory under every host rule of run 1,
+**Result.** `copy_dir_from_vm` pulls a Windows directory into a pull directory under every host rule of run 1,
 including the size cap while `tar.exe` runs. This realizes the design's pull steps for Windows, its exit-status rule,
 and amendments 3 and 4.
 
@@ -234,7 +234,7 @@ Afterwards the temporary directory holds no `.vmm-*` entry, no `tar.exe` runs, a
 
 ### 5. Test-bed cases (self-reviewed)
 
-**Outcome.** `run-all.sh` covers both directory tools on `t-win11`, with every call checked.
+**Result.** `run-all.sh` covers both directory tools on `t-win11`, with every call checked.
 
 **Changes.**
 
@@ -257,7 +257,7 @@ Afterwards the temporary directory holds no `.vmm-*` entry, no `tar.exe` runs, a
 
 ### 6. Docs and final gate
 
-**Outcome.** The README, the design and the CHANGELOG describe Windows directory transfers, the roadmap marks outcome 3
+**Result.** The README, the design and the CHANGELOG describe Windows directory transfers, the roadmap marks outcome 3
 done, and the final reviews close.
 
 **Changes.** The README's "Moving files" section covers Windows: `tar.exe`, the path rules, the skipped names and

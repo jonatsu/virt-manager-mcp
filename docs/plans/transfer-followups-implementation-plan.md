@@ -88,7 +88,7 @@ These apply to every unit, which names only its additions.
 
 ### 1. `exec` refuses `args` with `command` (self-reviewed)
 
-**Outcome.** `exec` with `command` and a non-empty `args` fails with a message saying that `args` goes with `program`,
+**Result.** `exec` with `command` and a non-empty `args` fails with a message saying that `args` goes with `program`,
 and runs nothing.
 
 **Changes.** The `exec` handler in `src/server.rs` builds its spec from `(command, program)`. The `command` arm refuses
@@ -101,7 +101,7 @@ test covers it without libvirt. The `args` field's description says it is for `p
 
 ### 2. Protected push staging on Windows (reviewed, Opus)
 
-**Outcome.** While `tar.exe` unpacks a push, only `SYSTEM` and `Administrators` can create entries in the staging
+**Result.** While `tar.exe` unpacks a push, only `SYSTEM` and `Administrators` can create entries in the staging
 directory. The pushed tree ends with the access list its destination's parent passes on, on every directory and file.
 
 **Changes.**
@@ -146,7 +146,7 @@ directory. The pushed tree ends with the access list its destination's parent pa
 
 ### 3. Windows pulls from non-ASCII paths (reviewed, Opus)
 
-**Outcome.** `copy_dir_from_vm` pulls `C:\Windows\Temp\vmm-été` on `t-win11`. A pull of a tree holding a name outside
+**Result.** `copy_dir_from_vm` pulls `C:\Windows\Temp\vmm-été` on `t-win11`. A pull of a tree holding a name outside
 the guest's ANSI code page fails with a message that names the cause. ASCII pulls run exactly as today.
 
 **Changes.**
@@ -183,7 +183,7 @@ the guest's ANSI code page fails with a message that names the cause. ASCII pull
 
 ### 4. Push cleanup retry after a timeout (self-reviewed)
 
-**Outcome.** After a Windows unpack that ran out of time, the push's cleanup tries again for up to 10 s before it
+**Result.** After a Windows unpack that ran out of time, the push's cleanup tries again for up to 10 s before it
 reports the entries it could not delete.
 
 **Changes.**
@@ -204,7 +204,7 @@ once.
 
 ### 5. Test-bed cases, docs and final gate
 
-**Outcome.** `run-all.sh` covers the four changes, the docs describe them, and the final reviews close.
+**Result.** `run-all.sh` covers the four changes, the docs describe them, and the final reviews close.
 
 **Changes.**
 

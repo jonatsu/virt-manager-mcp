@@ -140,7 +140,7 @@ The design asks for a test of each invariant. Each row names its owning unit.
 
 ### 1. `exec`: non-ASCII program arguments on Windows (self-reviewed)
 
-**Outcome.** On a Windows guest, `exec` with `program` whose program path, arguments or `env` entries are not ASCII is
+**Result.** On a Windows guest, `exec` with `program` whose program path, arguments or `env` entries are not ASCII is
 refused before any `guest-exec`, with a message that the Windows guest agent cannot pass them and that `command` can.
 Follow-up 22.
 
@@ -155,7 +155,7 @@ message, and `command: "echo été"` prints `été`.
 
 ### 2. Windows scripts: UTF-8 errors (self-reviewed)
 
-**Outcome.** Every script in `src/winsteps/` that writes error text writes it through a UTF-8 writer on standard
+**Result.** Every script in `src/winsteps/` that writes error text writes it through a UTF-8 writer on standard
 error, so a non-ASCII path in a message arrives intact. Follow-up 24.
 
 **Changes.** `push-probe.ps1`, `push-mkdir.ps1`, `push-inherit.ps1`, `push-swap.ps1`, `push-cleanup.ps1`,
@@ -169,7 +169,7 @@ path intact. `win-transfer.json` and `win-transfer-caps.json` still pass.
 
 ### 3. Probe: panics, devices and event sequences
 
-**Outcome.** A dated note, `docs/research/<date>-crash-and-events-probe.md`, records the facts later units depend on,
+**Result.** A dated note, `docs/research/<date>-crash-and-events-probe.md`, records the facts later units depend on,
 before any of them is written.
 
 **Changes.** `virsh event --all --loop --timestamp` records events throughout. On a VM from
@@ -203,7 +203,7 @@ the event with `isa`, or that Windows does not raise it with `hyperv`, revert `t
 
 ### 4. Config and devices on created VMs (self-reviewed)
 
-**Outcome.** `manage.on_crash` (`preserve` by default, or `destroy`) and `limits.max_events` (default 256, refused
+**Result.** `manage.on_crash` (`preserve` by default, or `destroy`) and `limits.max_events` (default 256, refused
 when 0) are read and checked, and both create tools write the panic device, `<stats period='5'/>` in the balloon, and
 `<on_crash>`.
 
@@ -218,7 +218,7 @@ device when the original lacked one. A VM made by `create_vm_from_template` show
 
 ### 5. Event log core (self-reviewed; unit 12's review covers it)
 
-**Outcome.** `src/events.rs` holds the per-VM logs keyed by UUID, the process-wide `seq`, the kind mapping from the
+**Result.** `src/events.rs` holds the per-VM logs keyed by UUID, the process-wide `seq`, the kind mapping from the
 probe's table, the merged crash record, the `max_events` bound with its dropped count, expectations with their
 5 s window, one seen-cursor per VM (amendment 1), and the notice text. It makes no libvirt call.
 
@@ -236,7 +236,7 @@ formatter.
 
 ### 6. Console sessions by UUID, with a previous run (reviewed, Opus)
 
-**Outcome.** Console sessions are keyed by domain UUID, each VM has one previous-run slot, `console_open` attaches to
+**Result.** Console sessions are keyed by domain UUID, each VM has one previous-run slot, `console_open` attaches to
 a live session, `console_close` moves a session to the previous run, `console_read` takes `run`, and every console
 tool looks the VM up first.
 
@@ -270,7 +270,7 @@ answers "not found".
 
 ### 7. Shared start operation (reviewed, Opus)
 
-**Outcome.** `start_vm`, `create_vm_from_template` and `reset_vm` start a VM through one operation that records an
+**Result.** `start_vm`, `create_vm_from_template` and `reset_vm` start a VM through one operation that records an
 expectation, starts the domain paused, opens the console in safe mode, and resumes. A console read from offset 0
 holds the guest's first boot output. `start_vm` refuses a crashed VM in either crashed state, and a second start
 during the operation is refused (amendment 3).
@@ -291,7 +291,7 @@ call; the refusal for whichever crashed state unit 3 found. The full `run-all.sh
 
 ### 8. Snapshot revert with a capture (self-reviewed; unit 10's review covers it)
 
-**Outcome.** `snapshot_revert` to a running snapshot reverts with `VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED`, opens the
+**Result.** `snapshot_revert` to a running snapshot reverts with `VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED`, opens the
 console as the start operation does, and resumes, whether the VM was running or shut off (amendment 4).
 
 **Changes.** `manage::snapshot_revert` reads the snapshot's `<state>` and chooses the flag; the server runs it inside
@@ -303,7 +303,7 @@ revert to a shut-off snapshot opens nothing.
 
 ### 9. Event callbacks (reviewed with unit 10, Opus)
 
-**Outcome.** The server registers its four event callbacks and a close callback, and each callback copies plain data
+**Result.** The server registers its four event callbacks and a close callback, and each callback copies plain data
 into a bounded queue without calling libvirt or unwinding.
 
 **Changes.** `src/events/ffi.rs`: registration through `virConnectDomainEventRegisterAny` for lifecycle, reboot,
@@ -316,7 +316,7 @@ mark. On a `t-*` VM, a start and stop reach the queue (logged at debug level).
 
 ### 10. Event worker and reconnect (reviewed, Opus, with unit 9)
 
-**Outcome.** A worker thread turns queued records into log entries for visible VMs only. One reconnect function, used
+**Result.** A worker thread turns queued records into log entries for visible VMs only. One reconnect function, used
 by `Hypervisor::with_conn` and by the worker after a close callback, opens the new connection, registers the
 callbacks on it under the same write lock as the swap, appends a `gap` record to every log, and records `stopped` or
 `started` with detail `during_gap` for each visible VM whose state differs from its last record.
@@ -333,7 +333,7 @@ VM: a guest panic produces one `crashed` record; a guest reboot a `rebooted`; th
 
 ### 11. Attribution and `vm_events` (self-reviewed; unit 12's review covers it)
 
-**Outcome.** Power tools record what they expect, records carry their cause, and `vm_events` lists a VM's log.
+**Result.** Power tools record what they expect, records carry their cause, and `vm_events` lists a VM's log.
 
 **Changes.** `stop_vm`, `reset_vm`, `delete_vm` and `snapshot_revert` record expectations; the start operation
 already does. `manage::expire` and `manage::reset` take a hook, as `reset`'s `before_power_off` already is, through
@@ -349,7 +349,7 @@ VM's `vm_events` answer "not found". On a `t-*` VM: `stop_vm` records `stopped` 
 
 ### 12. Notices in replies (reviewed, Opus, covering units 5, 11 and 12)
 
-**Outcome.** A reply to any tool call that names a VM gains a trailing text block for records with a notice that this
+**Result.** A reply to any tool call that names a VM gains a trailing text block for records with a notice that this
 server has not announced and no tool caused, once (amendment 1), never replacing a result or error.
 
 **Changes.** `VirtServer` implements `call_tool` itself instead of the one `#[tool_handler]` generates: it reads `vm`
@@ -366,7 +366,7 @@ after carries none; a `stop_vm` causes no notice.
 
 ### 13. `wait_for` event condition (reviewed, Opus)
 
-**Outcome.** `wait_for` gains an `event` condition with `kinds` and `since`, evaluated before the stopped check; a
+**Result.** `wait_for` gains an `event` condition with `kinds` and `since`, evaluated before the stopped check; a
 wait whose conditions are all events skips the running check and works on a stopped VM.
 
 **Changes.** `src/wait.rs` gains the condition, its check and an `Env` method that reads the log; the zero-timeout
@@ -381,7 +381,7 @@ condition returns the event when the guest panics.
 
 ### 14. `vm_stats` (reviewed, Opus)
 
-**Outcome.** `vm_stats` reports CPU, memory, disk, network and filesystem use for a running VM from two samples about
+**Result.** `vm_stats` reports CPU, memory, disk, network and filesystem use for a running VM from two samples about
 a second apart, replies with the state for any other VM, and names why figures are missing.
 
 **Changes.** `src/stats.rs` (new) samples through `virDomainListGetStats` with only this domain, read through
@@ -398,7 +398,7 @@ balloon device.
 
 ### 15. Test-bed cases and docs (self-reviewed; unit 16's reviews cover it)
 
-**Outcome.** `run-all.sh` covers each item in the design's "Test bed" list, and the docs describe the outcome.
+**Result.** `run-all.sh` covers each item in the design's "Test bed" list, and the docs describe the outcome.
 
 **Changes.** New cases, each with its own throwaway `t-*` VM made and deleted inside the case:
 
@@ -427,7 +427,7 @@ after a crash.
 
 ### 16. Final gate and reviews
 
-**Outcome.** The run is verified as a whole, the roadmap is closed, and the record is complete.
+**Result.** The run is verified as a whole, the roadmap is closed, and the record is complete.
 
 **Changes.** The roadmap marks outcome 4 done and rewrites its "Next" paragraph for outcome 5.
 

@@ -69,7 +69,7 @@ These apply to every unit, which names only its additions.
 
 ### 1. OpenWrt test guest (self-reviewed)
 
-**Outcome.** The test bed has an appliance whose only channel is the serial console: `t-owrt`, OpenWrt x86-64 on
+**Result.** The test bed has an appliance whose only channel is the serial console: `t-owrt`, OpenWrt x86-64 on
 `qemu:///system`, 256 MiB, booting to a shell on `ttyS0`.
 
 **Changes.** Add the steps to `tests/testbed/README.md`:
@@ -89,7 +89,7 @@ stop: the design's appliance check needs another serial-only guest, which is the
 
 ### 2. Console sessions (reviewed, Opus)
 
-**Outcome.** Console offsets can be trusted across reopens and between a write and a wait (design, Console).
+**Result.** Console offsets can be trusted across reopens and between a write and a wait (design, Console).
 
 **Changes.** In `src/console.rs`:
 
@@ -121,7 +121,7 @@ snapshot of a running VM and shows `console_read` answering "no console open".
 
 ### 3. Console pacing (reviewed)
 
-**Outcome.** A slow receiver gets every character: `console_write` paces by character or by chunk (design, Console).
+**Result.** A slow receiver gets every character: `console_write` paces by character or by chunk (design, Console).
 
 **Changes.**
 
@@ -141,7 +141,7 @@ cannot show loss, and the case does not use it.
 
 ### 4. `wait_for` (reviewed, Opus)
 
-**Outcome.** One call waits for the first of several conditions, returns within `max_wait_secs` plus 2 s, and never
+**Result.** One call waits for the first of several conditions, returns within `max_wait_secs` plus 2 s, and never
 loses or rematches console output (design, `wait_for`).
 
 **Changes.**
@@ -198,7 +198,7 @@ Test-bed cases, with each step's expected reply in the README:
 
 ### 5. Linux jobs (reviewed, Opus)
 
-**Outcome.** An agent runs a long command in a Linux guest and reads its output as it grows, and the job survives a
+**Result.** An agent runs a long command in a Linux guest and reads its output as it grows, and the job survives a
 server restart and a guest-agent restart (design, Jobs).
 
 **Changes.** A new `src/jobs.rs` holds the launcher and the file layout. `src/server.rs` holds `job_start`,
@@ -253,7 +253,7 @@ Test-bed cases on `t-w`, with each step's expected reply in the README:
 
 ### 6. Job conditions (reviewed, Opus)
 
-**Outcome.** `wait_for` stops when a job ends or its output matches (design, `wait_for`).
+**Result.** `wait_for` stops when a job ends or its output matches (design, `wait_for`).
 
 **Changes.** `src/wait.rs` gains `{kind: "job_done", job}` and `{kind: "job_output", job, pattern, since?}`. They read
 the job files once a second on the probe threads of unit 4, with the same one-in-flight rule and time bound, and
@@ -265,7 +265,7 @@ in read-only mode. On `t-w`, a wait for `[job_output "step 3", console "Kernel p
 
 ### 7. Docs and final gate
 
-**Outcome.** The run is documented, checked and pushed.
+**Result.** The run is documented, checked and pushed.
 
 **Changes.**
 
