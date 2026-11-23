@@ -77,3 +77,4 @@ needs 5 GiB of available host memory.
 
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
+| 1. Probe | `docs(research): record the Windows push staging probe for follow-up 23` | [Probe note](../research/2026-11-23-windows-push-staging-probe.md). A standard user cannot open a push's staging entry in `%SystemRoot%\Temp` for `DELETE`. A second volume has its own serial number, a rename onto it fails with `STATUS_NOT_SAME_DEVICE`, and a handle-based copy reached a 345-character path; the copy must set attributes and times itself. A sync root and two placeholders below it opened through the component walk, carry cloud tags without the name-surrogate bit, and took a moved tree and its inheritance. The design's provisional decision on reparse points is resolved. The extra disk is detached and deleted | Self-reviewed |
