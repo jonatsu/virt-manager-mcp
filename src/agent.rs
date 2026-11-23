@@ -505,17 +505,45 @@ pub enum Shell {
     Powershell,
 }
 
+/// Runs an agent's PowerShell command line, so that its errors reach stderr as the text a console shows.
+///
+/// Without a console, `powershell.exe` writes progress records to stderr as CLIXML, such as "Preparing modules for
+/// first use", so the script turns them off. It also writes error records as CLIXML whenever it runs
+/// `-EncodedCommand`, whatever `-OutputFormat` says. So the command runs through `-Command -OutputFormat Text`
+/// instead, as a dot-sourced script block decoded from base64, which keeps the command line ASCII. The last line
+/// keeps the exit status `-Command` gives: 1 when the last statement failed, unless the command exits itself.
+fn powershell_command(cmd: &str) -> ExecSpec {
+    let script = format!(
+        "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}\n\
+         if (-not $?) {{ exit 1 }}"
+    );
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let run = format!(
+        ". ([scriptblock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'))))",
+        B64.encode(utf16)
+    );
+    ExecSpec::new(
+        "powershell.exe",
+        [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-OutputFormat",
+            "Text",
+            "-Command",
+            &run,
+        ],
+    )
+}
+
 /// The program and arguments that run `cmd` with `shell` on a guest running `os`. `exec` and `wait_for`'s `command`
 /// condition both build their command here, so they interpret a command line alike.
 pub fn shell_spec(os: GuestOs, shell: Shell, cmd: &str) -> Result<ExecSpec> {
     Ok(match (os, shell) {
         (GuestOs::Linux, Shell::Default | Shell::Sh) => ExecSpec::new("/bin/sh", ["-c", cmd]),
         (GuestOs::Linux, Shell::Bash) => ExecSpec::new("bash", ["-c", cmd]),
-        // Without a console, PowerShell writes its progress records to stderr as CLIXML, such as "Preparing modules
-        // for first use", so they are turned off.
-        (GuestOs::Windows, Shell::Default | Shell::Powershell) => powershell(&format!(
-            "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{cmd}"
-        )),
+        (GuestOs::Windows, Shell::Default | Shell::Powershell) => powershell_command(cmd),
         (GuestOs::Windows, Shell::Cmd) => ExecSpec::new(
             "cmd.exe",
             ["/d", "/s", "/c", &format!("chcp 65001 >nul & {cmd}")],
@@ -533,9 +561,18 @@ pub fn shell_spec(os: GuestOs, shell: Shell, cmd: &str) -> Result<ExecSpec> {
 mod tests {
     use super::*;
 
-    /// The script a PowerShell `ExecSpec` carries in its `-EncodedCommand` argument.
-    pub(crate) fn encoded_script(spec: &ExecSpec) -> String {
-        let bytes = B64.decode(spec.args.last().unwrap()).unwrap();
+    /// The script an agent's PowerShell command carries in its `-Command` script block.
+    fn command_script(spec: &ExecSpec) -> String {
+        let run = spec.args.last().unwrap();
+        let b64 = run
+            .split_once("FromBase64String('")
+            .and_then(|(_, rest)| rest.split_once("')"))
+            .unwrap()
+            .0;
+        decode_utf16le(&B64.decode(b64).unwrap())
+    }
+
+    fn decode_utf16le(bytes: &[u8]) -> String {
         let utf16: Vec<u16> = bytes
             .chunks(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -544,14 +581,43 @@ mod tests {
     }
 
     #[test]
-    fn windows_powershell_turns_off_progress_and_writes_utf8() {
+    fn windows_powershell_turns_off_progress_writes_utf8_and_keeps_the_exit_status() {
         for shell in [Shell::Default, Shell::Powershell] {
-            let script = encoded_script(&shell_spec(GuestOs::Windows, shell, "Get-Date").unwrap());
+            let script = command_script(&shell_spec(GuestOs::Windows, shell, "Get-Date").unwrap());
             assert_eq!(
                 script,
-                "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\nGet-Date"
+                "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\nGet-Date\n\
+                 if (-not $?) { exit 1 }"
             );
         }
+    }
+
+    #[test]
+    fn windows_powershell_writes_errors_as_text() {
+        let spec = shell_spec(GuestOs::Windows, Shell::Default, "Write-Output 'été'").unwrap();
+        let n = spec.args.len();
+        assert_eq!(
+            spec.args[..n - 1],
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-OutputFormat",
+                "Text",
+                "-Command"
+            ]
+            .map(String::from)
+        );
+        // The guest agent cannot pass a command line that is not ASCII.
+        assert!(spec.args[n - 1].is_ascii());
+        assert!(command_script(&spec).contains("Write-Output 'été'"));
+        // The script helpers keep -EncodedCommand, which their own error handling expects.
+        assert!(
+            !powershell("Get-Date")
+                .args
+                .contains(&"-OutputFormat".to_string())
+        );
     }
 
     #[test]

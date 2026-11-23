@@ -74,7 +74,7 @@ commits finds no blocking defect, its findings fixed or recorded.
 | Item | Commits | Evidence | Review |
 | -- | -- | -- | -- |
 | 1. UTF-8 error text (24) | `fix(winsteps): write guest error text as UTF-8` | Parse test passes; under code page 437 on `t-win11`, a push below a file named `vmm-été-file` fails with `Cannot create "C:\Windows\Temp\vmm-été-file" because ...` intact; `run-all.sh win-transfer.json win-transfer-caps.json` passed all seven Windows cases | Self-reviewed; the closing review covers it |
-| 2. PowerShell errors as text (15) |  |  |  |
+| 2. PowerShell errors as text (15) | `fix(exec): report PowerShell errors on Windows as text` | Probe on `t-win11`: `-OutputFormat Text` works with `-Command` but not with `-EncodedCommand`; the decoded script block with a closing `$?` check matched today's exit code in all ten probe commands (1 1 0 0 3 1 0 0 0 1); `win-exec.json` passes with the new check, and a rerun passed all seven Windows cases after one intermittent `job_stop` failure, recorded as follow-up 28 | Self-reviewed; the closing review covers it |
 | 3. Archive access probe (25) |  |  |  |
 | 4. Install from scratch (26) |  |  |  |
 | Closing checks |  |  |  |

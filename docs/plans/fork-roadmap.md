@@ -98,9 +98,11 @@ Reviews of earlier work found these. None blocks the server's use.
     left raw, no-echo mode, and the server delivered every byte. The case now waits, and `console_write`'s
     description and the README tell agents to wait for the prompt. Evidence:
     [`2026-11-10-owrt-pacing-stall.md`](../research/2026-11-10-owrt-pacing-stall.md).
-15. **`exec` returns PowerShell errors on Windows as CLIXML.** An error reaches `exec`'s stderr as a `#< CLIXML`
-    block, which an agent has to decode. Probe whether `-OutputFormat Text`, or redirecting the error stream in the
-    script, gives plain text, then fix it with a test.
+15. **Done: `exec` returns PowerShell errors on Windows as plain text.** `powershell.exe` 5.1 writes error records
+    as CLIXML whenever it runs `-EncodedCommand`, whatever `-OutputFormat` says. An agent's command now runs through
+    `-Command -OutputFormat Text` as a script block decoded from base64, which keeps the command line ASCII, and a
+    last line keeps the exit status `-Command` gives. On `t-win11`, ten probe commands kept their exit codes, and
+    `win-exec.json` checks a failing command's text ([run record](followups-run-2-implementation-plan.md)).
 16. **A restart of `QEMU-GA` can leave a Windows guest's agent unreachable.** With `virtio-win` 0.1.302, 4 of about 22
     restarts left libvirt reporting the channel disconnected until a power cycle
     ([probe note](../research/2026-11-11-windows-jobs-probe.md)). Retry with a newer `virtio-win`, and report it
@@ -161,6 +163,10 @@ Reviews of earlier work found these. None blocks the server's use.
 27. **`deny.toml` ignores the unmaintained-`chrono` advisory.** RUSTSEC-2026-0543 marks `chrono` unmaintained, and
     `rmcp` 3.9.0 and `schemars` 1.2.3 depend on it; this crate does not use it. Once neither depends on `chrono`,
     remove the entry, and `cargo deny check advisories` must still pass.
+28. **`job_stop` on Windows failed once with `taskkill failed with 255`.** In follow-ups run 2, one of three runs of
+    `win-jobs.json` failed this way on `t-win11`, stopping `ping.exe -n 300 127.0.0.1` with `force`. The job still
+    ended, and `job_list` then read "ended without status". The next run passed. Find which `taskkill` exit statuses
+    mean the tree is already gone, and repeat the case to measure how often it happens.
 
 ## Outcomes
 
@@ -236,5 +242,5 @@ Parked ideas, which no outcome includes yet:
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and
-24, its units 1 and 2, are done. Follow-ups 15, 16, 23, 25, 26 and 27 can land at any time; 16
+24, its units 1 and 2, are done. Follow-ups 16, 23, 25, 26, 27 and 28 can land at any time; 16
 waits on a newer `virtio-win`, 23 and 25 need a design decision, and 27 waits on `rmcp` and `schemars`.

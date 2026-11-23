@@ -84,6 +84,22 @@
     }
   },
   {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "Write-Output before; Get-Item C:\\vmm-\u00e9t\u00e9-nope; Write-Output after; exit 3"
+    },
+    "expect": {
+      "contains": [
+        "\"exit_code\":3",
+        "before",
+        "after",
+        "Cannot find path 'C:\\vmm-\u00e9t\u00e9-nope'"
+      ],
+      "absent": "CLIXML"
+    }
+  },
+  {
     "tool": "write_file",
     "args": {
       "vm": "t-win11",

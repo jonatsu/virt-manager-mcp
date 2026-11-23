@@ -67,6 +67,8 @@ Each release's section lists what changed for people who run the server and for 
 - Windows directory pushes and pulls report a guest error that names a non-ASCII path, such as
   `C:\Windows\Temp\vmm-été`, with the path intact. The guest scripts wrote such errors in the console code page, and
   the path arrived with replacement characters.
+- `exec` with PowerShell on Windows, and `wait_for`'s `command` condition there, report a PowerShell error on stderr
+  as the text a console shows. It arrived as a `#< CLIXML` block.
 - `exec` on a Windows guest refuses a `program` path or argument that is not ASCII, and suggests `command`, which
   passes any text. It also refuses an `env` entry that is not ASCII, with either `program` or `command`. The guest
   agent failed such calls with only `failed to parse JSON: invalid utf-8 string`.
