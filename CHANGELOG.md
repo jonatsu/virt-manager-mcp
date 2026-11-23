@@ -5,6 +5,11 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+### Added
+
+- A how-to guide, `docs/how-to/agent-test-vms.md`, sets up a server whose agents create, install and delete VMs of
+  their own from installer ISOs, while every existing VM stays hidden from them.
+
 ## 0.3.0
 
 ### Changed

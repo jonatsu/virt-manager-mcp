@@ -24,6 +24,7 @@ max_disk_gib = 32
   `manage` operation is enabled, such VMs are also treated as if they were in `allowed_vms` and
   `power_vms`, so the AI can start them, use `exec` and so on. Other VMs stay off limits.
   `list_vms` shows `managed: true` for VMs the tools may act on.
+  [Give agents their own test VMs](how-to/agent-test-vms.md) sets up a server whose agents see only such VMs.
 
 - **Creating:** `create_vm` takes a name, `os` (`linux`/`windows`), vCPUs, memory, disk size,
   `firmware` (`uefi`, the default, or `bios`), an optional TPM 2.0, an install ISO, a second

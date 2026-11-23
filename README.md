@@ -181,6 +181,8 @@ Only `qemu:///system` is tested.
 - [File transfer](docs/file-transfer.md): host directories and the four copy tools, including Windows directories.
 - [Screen and mouse](docs/screen-and-input.md): screenshots, keyboard and mouse input, and screen text recognition.
 - [VM management](docs/vm-management.md): creating, reconfiguring, snapshotting and deleting VMs, and templates.
+- [Agents' own test VMs](docs/how-to/agent-test-vms.md): let agents install and run VMs of their own while yours stay
+  hidden.
 - [MCP clients](docs/mcp-clients.md): client setup for stdio and HTTP, and instructions to give your agents.
 - [Notes and limitations](docs/limitations.md): behaviour to know about, such as consoles, waits and jobs.
 
