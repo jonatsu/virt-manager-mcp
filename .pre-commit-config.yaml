@@ -217,6 +217,26 @@ repos:
         types_or: [rust, toml]
         pass_filenames: false
 
+  # C# gate for the Windows push helper, through the .NET SDK that mise.toml
+  # pins. Both hooks are report-only; fix the layout with
+  # `mise exec -- dotnet format tools/winsteps-helper/WinstepsHelper.csproj`.
+  # The build compiles the helper as C# 5, which Windows PowerShell 5.1 needs,
+  # and fails on any analyzer warning.
+  - repo: local
+    hooks:
+      - id: dotnet-format
+        name: dotnet format --verify-no-changes
+        language: system
+        entry: mise exec -- dotnet format tools/winsteps-helper/WinstepsHelper.csproj --verify-no-changes
+        files: ^(src/winsteps/.*\.cs|tools/winsteps-helper/.*|\.editorconfig|mise\.toml)$
+        pass_filenames: false
+      - id: dotnet-build
+        name: dotnet build (C# 5, analyzers)
+        language: system
+        entry: mise exec -- dotnet build tools/winsteps-helper/WinstepsHelper.csproj --nologo -v quiet
+        files: ^(src/winsteps/.*\.cs|tools/winsteps-helper/.*|\.editorconfig|mise\.toml)$
+        pass_filenames: false
+
   # Check shell scripts with ShellCheck (Python wrapper for cross-platform support):
   # https://www.shellcheck.net/
   # https://github.com/shellcheck-py/shellcheck-py

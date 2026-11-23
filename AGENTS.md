@@ -22,7 +22,9 @@ This repository is a Rust MCP server that gives AI agents guarded access to libv
 
 ## Build gate
 
-Building needs the libvirt development files (`libvirt-dev` on Debian and Ubuntu). Every commit passes:
+Building needs the libvirt development files (`libvirt-dev` on Debian and Ubuntu). The pre-commit hooks for the
+Windows push helper, `src/winsteps/push-helper.cs`, need [mise](https://mise.jdx.dev), which installs the .NET SDK
+that `mise.toml` pins with `mise install`. Every commit passes:
 
 ```sh
 cargo fmt --check
@@ -34,7 +36,9 @@ pre-commit run --all-files
 ```
 
 CI (`.github/workflows/ci.yml`) runs this gate, and the tests again on the `rust-version` toolchain; raise the two
-together. Formatting uses default rustfmt settings. The unit tests never touch libvirt. Run `pre-commit install` once
+together. Formatting uses default rustfmt settings, and for C#, `dotnet format` with the `[*.cs]` rules in
+`.editorconfig`. The helper must stay C# 5, because Windows PowerShell 5.1 compiles it; `tools/winsteps-helper/`
+builds it that way. The unit tests never touch libvirt. Run `pre-commit install` once
 per clone. Leave `docs/research/` and `example-global-*.md` out of the Markdown formatters: they hold dated records,
 some copied verbatim, and prompt templates.
 

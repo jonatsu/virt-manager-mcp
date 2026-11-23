@@ -1,0 +1,7 @@
+<!-- Keeps the helper's build output under target/, which Git ignores; it must be set before the SDK's props. -->
+<Project>
+  <PropertyGroup>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../../target/dotnet/bin/</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../target/dotnet/obj/</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>

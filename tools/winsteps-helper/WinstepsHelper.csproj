@@ -1,0 +1,22 @@
+<!--
+  Builds src/winsteps/push-helper.cs, the C# helper a Windows push compiles in the guest, so pre-commit can lint and
+  format it. Windows PowerShell 5.1 compiles the helper with a C# 5 compiler, so LangVersion 5 refuses any later syntax
+  here, where it would otherwise only fail in the guest. Directory.Build.props puts the build output under target/.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>5</LangVersion>
+    <OutputType>Library</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisMode>Recommended</AnalysisMode>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/winsteps/push-helper.cs" />
+  </ItemGroup>
+</Project>

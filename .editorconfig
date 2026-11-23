@@ -45,6 +45,17 @@ indent_size = 2
 indent_size = unset
 indent_style = space
 
+[*.cs]
+# dotnet format and the build of tools/winsteps-helper read these, and dotnet format owns the layout, which is .NET's
+# default of 4-space indentation. Its continuation lines need not be a multiple of 4, so editorconfig-checker does not
+# police the width.
+indent_size = unset
+indent_style = space
+max_line_length = 120
+# Formatting and unused usings fail the build and `dotnet format --verify-no-changes`.
+dotnet_diagnostic.IDE0055.severity = warning
+dotnet_diagnostic.IDE0005.severity = warning
+
 [*.py]
 indent_size = 4
 indent_style = space

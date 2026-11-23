@@ -1,0 +1,4 @@
+# Tools the repository's checks need beyond Rust. The .NET SDK runs `dotnet format` and the build of the Windows
+# push helper, `src/winsteps/push-helper.cs`, in pre-commit.
+[tools]
+dotnet = "10.0.404"
