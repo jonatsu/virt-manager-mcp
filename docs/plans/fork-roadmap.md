@@ -155,8 +155,11 @@ Reviews of earlier work found these. None blocks the server's use.
     A probe on `t-win11` confirmed that list, and found that `tar.exe -x -o` keeps crafted symbolic-link, hard-link,
     `..` and absolute entries inside the staging directory
     ([probe note](../research/2026-11-23-windows-archive-probe.md)). A rewritten archive can still change what the
-    push delivers, and leave symbolic links that point anywhere in the pushed tree. Decide whether to write the
-    archive into a directory only `SYSTEM` and `Administrators` can write, or to accept the risk.
+    push delivers, and leave symbolic links that point anywhere in the pushed tree. Decided: the push creates a
+    second `.vmm-` directory beside the target with `push-mkdir.ps1`, which grants access only to `SYSTEM` and
+    `Administrators` and checks the result, writes the archive inside it, and `push-cleanup.ps1` removes it. The
+    archive stays on the target's volume. `win-transfer.json` checks that the archive directory's access list is the
+    protected one while a push runs, and that a push leaves no `.vmm-` entry behind.
 26. **Done: an agent installs a VM from scratch.** A recorded run installed CachyOS from its ISO through
     `create_vm`, the screen, mouse, keyboard and wait tools, and `set_cdrom`, then logged in to the installed desktop
     and ran a command there ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). It needed
@@ -170,12 +173,16 @@ Reviews of earlier work found these. None blocks the server's use.
     mean the tree is already gone, and repeat the case to measure how often it happens.
 29. **`create_vm` cannot make a UEFI VM without Secure Boot.** libvirt picks the `secure-enrolled` firmware descriptor,
     so an unsigned installer such as CachyOS's is refused at boot, and an agent must fall back to `firmware: "bios"`
-    ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). Decide whether `create_vm` gains a
-    Secure Boot choice, for example a `secure_boot` flag that defaults to on and writes the `secure-boot` and
-    `enrolled-keys` firmware features off when false.
+    ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). Decided: `create_vm` gains a
+    `secure_boot` flag beside `tpm`, defaulting to true; false writes the `secure-boot` and `enrolled-keys` firmware
+    features off. `create_vm` refuses `firmware: "bios"` with `secure_boot: false`. Template entries in the config
+    gain the same `secure_boot` key, because a template built from an unsigned install needs it to boot. Unit tests
+    cover the domain XML for each setting and the refusal; a test-bed case boots a UEFI VM with Secure Boot off.
 30. **The tools ignore unknown arguments.** A `screenshot` given `x`, `y`, `width` and `height` instead of `region`
-    returned the whole screen without an error, so an agent does not learn its mistake. Decide whether every tool's
-    parameters refuse unknown fields, which would break a client that sends extra ones.
+    returned the whole screen without an error, so an agent does not learn its mistake. Decided: every tool's
+    parameters refuse unknown fields with `deny_unknown_fields`, so the error names the field and the published
+    schemas declare `additionalProperties: false`. A unit test checks that each tool's parameters refuse an unknown
+    field, and the CHANGELOG records the change under Changed.
 31. **`templates-reset-saved.json` failed once on a slow console answer.** In the last full run of follow-ups run 2,
     the Enter sent to `t-u`'s serial console just after a refused reset got no answer within the case's 3 s
     `console_read` wait; the case passed alone straight afterwards, and in three earlier full runs. Wait for the
@@ -256,4 +263,5 @@ Parked ideas, which no outcome includes yet:
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and
 24, its units 1 and 2, are done. Follow-ups 16, 23, 25 and 27 to 31 can land at any time; 16
-waits on a newer `virtio-win`, 23, 25, 29 and 30 need a design decision, and 27 waits on `rmcp` and `schemars`.
+waits on a newer `virtio-win`, 23 needs a design decision, 25, 29 and 30 have their designs decided, and 27 waits
+on `rmcp` and `schemars`.
