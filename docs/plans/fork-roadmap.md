@@ -259,8 +259,8 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
-approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and 24,
+Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) is approved;
+its run is armed with the `/goal` command in the plan's execution record. Follow-ups 22 and 24,
 its units 1 and 2, are done, and its run also builds follow-ups 28 and 31, as units 17 and 18. Follow-ups 25, 29 and
 30 are done. Of the rest, 23 has its approach decided and needs a short design, 16 waits on a newer `virtio-win`, and
 27 waits on `rmcp` and `schemars`.

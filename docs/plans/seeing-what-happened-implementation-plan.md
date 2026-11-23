@@ -1,10 +1,9 @@
 # Seeing what happened: implementation plan
 
-Status: draft, revised after a plan-critic review, refreshed after follow-ups 25, 29 and 30, and revised after a
-second plan-critic review; for approval. Built from [`seeing-what-happened-design.md`](seeing-what-happened-design.md)
-at `d41fa1c`, which owns the behaviour, and from roadmap follow-ups 22, 24, 28 and 31 in
-[`fork-roadmap.md`](fork-roadmap.md) at `deaf2b3`. This plan owns order
-and checks. Progress goes in the execution record at the end.
+Status: approved, after two plan-critic reviews and a refresh after follow-ups 25, 29 and 30. Built from
+[`seeing-what-happened-design.md`](seeing-what-happened-design.md) at `d41fa1c`, which owns the behaviour, and from
+roadmap follow-ups 22, 24, 28 and 31 in [`fork-roadmap.md`](fork-roadmap.md) at `deaf2b3`. This plan owns order and
+checks. Progress goes in the execution record at the end.
 
 ## Overview
 
