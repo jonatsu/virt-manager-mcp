@@ -25,7 +25,7 @@ use virt::domain::Domain;
 use crate::agent::{Agent, GuestOs, Shell, shell_spec};
 use crate::ansi;
 use crate::config::Config;
-use crate::console::{Consoles, SessionScan};
+use crate::console::{Consoles, SessionScan, VmId};
 use crate::display::{self, CheckedRegion, Region};
 use crate::jobs;
 use uuid::Uuid;
@@ -475,6 +475,8 @@ impl Guest for LiveGuest {
 /// The real environment of a wait on `vm`.
 pub struct LiveEnv<'a> {
     pub consoles: &'a Consoles,
+    /// The VM's domain UUID, which keys its console sessions.
+    pub uuid: &'a str,
     pub vm: &'a str,
     pub cancelled: Box<dyn Fn() -> bool + 'a>,
     pub progress: Box<dyn Fn(Duration) + 'a>,
@@ -491,11 +493,18 @@ impl Env for LiveEnv<'_> {
     }
 
     fn scan(&self, since: Option<u64>, generation: Option<u64>) -> Result<SessionScan> {
-        self.consoles.scan(self.vm, since, generation)
+        self.consoles.scan(
+            VmId {
+                uuid: self.uuid,
+                name: self.vm,
+            },
+            since,
+            generation,
+        )
     }
 
     fn advance_cursor(&self, generation: u64, to: u64) {
-        self.consoles.advance_cursor(self.vm, generation, to);
+        self.consoles.advance_cursor(self.uuid, generation, to);
     }
 
     fn cancelled(&self) -> bool {

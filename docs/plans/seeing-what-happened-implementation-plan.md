@@ -527,6 +527,18 @@ Judgement calls:
   which holds the cursor; units 11 and 12 build on them.
 - Unit 3: `wininit` is protected even from `SYSTEM`, so the Windows stop error came from a process that marked itself
   critical with `RtlSetProcessIsCritical` and exited. The result is the same kind of stop error.
+- Unit 6: `delete_vm` drops the VM's session and previous run rather than moving the session, because the design
+  drops a deleted VM's diagnostics and nothing can read them afterwards. `reset_vm` and `snapshot_revert` record
+  "closed by reset_vm" and "closed by snapshot_revert" as the reason. Undo: call `close` instead of `forget` in
+  `delete_vm`.
+- Unit 6: a console tool on a VM outside `allowed_vms` answers with the lookup's "not in allowed_vms" text, the same
+  as every other tool, rather than "not found". Undo: map the lookup error in the console tools.
+- Units 9 and 10: the worker and the reconnect hook live in `src/events/worker.rs` rather than `src/events/ffi.rs`, so
+  the FFI file holds only the callbacks and their registration. Undo: move the file's contents into `ffi.rs`.
+- Unit 10: the worker checks visibility by UUID and caches only a definite answer, and the reconnect leaves out of the
+  `during_gap` comparison any VM whose events are still queued, so a stop just before the loss is recorded once. An
+  `agent_disconnected` record says nothing about whether the VM runs, because the probe saw it follow a stop. These
+  came from the review of units 9 and 10. Undo: revert the review-fix part of the units' commit.
 
 Parked questions: none yet.
 
@@ -556,7 +568,7 @@ The command that arms the run:
 | 3. Probe: panics, devices and event sequences | `docs(research): record the crash and event probe for outcome 4` | [Probe note](../research/2026-11-23-crash-and-events-probe.md). Debian loads pvpanic; both `isa` and `hyperv` raise `Crashed Panicked`; `preserve` leaves `crashed (panicked)` with the vCPUs stopped, and `destroy` adds `Stopped Crashed`; a console opened during a paused start holds the boot from GRUB on. `t-win11` booted after the crash and the clone was deleted. None of the stop outcomes held; design amendment 7 records the missing stop screen | Self-reviewed |
 | 4. Config and devices on created VMs | `feat(manage): give created VMs a panic device, balloon stats and a crash action` | Unit tests: `on_crash` defaults to `preserve`, refuses `restart` and `coredump-destroy` naming both values, and `max_events = 0` is refused; the XML holds `<on_crash>`, the panic model per OS and `<stats period='5'/>` for both OSes, both `secure_boot` values and both actions; a reset of a VM without them keeps it that way. `virsh dumpxml` of a VM from `create_vm_from_template` shows all three; `firmware-secure-boot.json` passes | Self-reviewed |
 | 5. Event log core | `feat(events): add the per-VM event log` | `src/events.rs`, 14 unit tests: every row of the probe's kind table; the crash stop merged into its crash and standing alone; the `max_events` bound and dropped count; an outside crash leaving a `stop_vm` expectation unused; an expectation claiming each kind once and lapsing 5 s after the tool returns; the `expiry` cause and its notice; one notice per record and none for a tool's record; a filtered read advancing nothing; a wait match advancing the cursor; a repeated reboot as one record; two threads taking 200 notices with each once; a gap in every log; a dropped or undefined VM keeping nothing; the UTC formatter | Unit 12's review |
-| 6. Console sessions by UUID, with a previous run |  |  |  |
+| 6. Console sessions by UUID, with a previous run | `feat(console): key sessions by VM and keep the previous run` | 13 unit tests through a fake stream and opener: a new domain ID moves the old run; a force or a reopen over a closed session of the same run drops it; an open over a live session attaches, and one naming another device is refused; libvirt's force flag apart from replacing; close moves and keeps the stream's reason; a second move drops the older slot; the slot keeps its generation and offsets; a failed open still moves the earlier run; sessions keyed by UUID and forgotten with their VM. On the test bed the 12 cases that call `console_open` pass, and the new `console-refusals.json` shows the console tools refusing `trial-deb13` under a config that leaves it out. On `trial-deb13`: a second open attaches; after a forced stop and a start, `run: "previous"` reads the earlier output with its old generation | Sonnet code review: a committed refusal test was missing (added), a named device attached to a default-device session (now refused), and a close racing an open could put an older run in the slot (close and forget now take the open lock) |
 | 7. Shared start operation |  |  |  |
 | 8. Snapshot revert with a capture |  |  |  |
 | 9. Event callbacks |  |  |  |

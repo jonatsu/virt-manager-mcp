@@ -1,0 +1,43 @@
+[
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "run": "previous"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  },
+  {
+    "tool": "console_close",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
+  }
+]

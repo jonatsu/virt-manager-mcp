@@ -502,9 +502,14 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 - `console_read` returns output received since `console_open`. Earlier output (e.g. boot logs) is
   not available. Only one client can hold a console: if virt-manager's serial console view
   is open, `console_open` fails unless `force: true`, which disconnects the other client.
-- Every `console_open` starts a new console generation, and every offset a console tool returns comes with its
-  `generation`. A `console_read` or console wait from an offset above 0 must pass that generation back, so an offset
-  from an earlier session is refused instead of misread. `reset_vm` and `snapshot_revert` close the session.
+- `console_open` on a console this server holds open attaches to it and replies with its generation; `force: true`
+  opens a new session and drops the old one's output. Every new session starts a new console generation, and every
+  offset a console tool returns comes with its `generation`. A `console_read` or console wait from an offset above 0
+  must pass that generation back, so an offset from an earlier session is refused instead of misread.
+- Each VM keeps the console output of one earlier run. When a new run replaces a session, or `console_close`,
+  `reset_vm` or `snapshot_revert` ends one, its output moves to the previous run, and `console_read` with
+  `run: "previous"` reads it as closed with the reason it ended. The previous run has its own generation and offsets,
+  and a second move drops the first. `console_read` also works on a stopped VM.
 - `wait_for` returns within `limits.max_wait_secs` (default 50 s, below the 60 s at which some clients cut a call)
   plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
   between. A console condition without `since` starts where the last `console_write` began, and a match moves that

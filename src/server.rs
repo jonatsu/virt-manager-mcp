@@ -20,7 +20,9 @@ use serde_json::{Value, json};
 
 use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
 use crate::config::Config;
-use crate::console::{Consoles, Pacing};
+use crate::console::{
+    CLOSED_BY_CONSOLE_CLOSE, Consoles, LibvirtOpener, OpenRequest, Pacing, Run, VmId,
+};
 use crate::guestpath::GuestPath;
 use crate::hypervisor::{self, Hypervisor};
 use crate::{
@@ -337,7 +339,8 @@ pub struct ConsoleOpenParams {
     /// Console device alias (e.g. "serial0", "console1"); omit for the first console.
     pub device: Option<String>,
     /// Take over the console even if another client (e.g. virt-manager) has it open. Also replaces this
-    /// server's own session for the VM, discarding its buffered output.
+    /// server's own live session for the VM, discarding its buffered output; without it, a live session is
+    /// attached to.
     #[serde(default)]
     pub force: bool,
 }
@@ -346,6 +349,11 @@ pub struct ConsoleOpenParams {
 #[serde(deny_unknown_fields)]
 pub struct ConsoleReadParams {
     pub vm: String,
+    /// "current" (default) reads the open session, or the one that ended last in this run of the VM; "previous"
+    /// reads the run before it, which a restart or console_close moved aside, as closed with the reason it ended.
+    /// A previous run has its own generation and offsets.
+    #[serde(default)]
+    pub run: Run,
     /// Absolute offset to read from (use `next` from the previous read). Omit to get the most recent output.
     pub since: Option<u64>,
     /// The `generation` returned with `since`. Needed whenever `since` is above 0, so an offset from an earlier
@@ -719,7 +727,9 @@ impl VirtServer {
                             "managed": s.hv.can_manage(d) && !s.hv.config.read_only,
                             "guest_agent": ok,
                             "os": if ok { agent.os().ok() } else { None },
-                            "console_open": s.consoles_has(&name),
+                            "console_open": d
+                                .get_uuid_string()
+                                .is_ok_and(|uuid| s.consoles.is_open(&uuid)),
                         })
                     })
                     .collect();
@@ -1178,12 +1188,17 @@ impl VirtServer {
         self.blocking(move |s| {
             let wait = Duration::from_secs(p.wait_secs.unwrap_or(60).min(300));
             // Only the session open before the stop is marked, not one a concurrent start and open made meanwhile.
-            let generation = s.consoles.generation(&p.vm);
+            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
+            let vm = VmId {
+                uuid: &uuid,
+                name: &p.vm,
+            };
+            let generation = s.consoles.generation(vm);
             let off = s.hv.stop(&p.vm, p.force, wait)?;
             let msg = if off {
                 // Keep any console session, so a later console_read reports the console closed instead of "no
                 // console open"; wait for it to record the end first, so even a read with wait_ms 0 sees it.
-                s.consoles.note_shut_off(&p.vm, generation, CONSOLE_END_WAIT);
+                s.consoles.note_shut_off(vm, generation, CONSOLE_END_WAIT);
                 format!("VM '{}' is shut off", p.vm)
             } else {
                 format!(
@@ -1255,10 +1270,27 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let dom = s.hv.domain(&p.vm)?;
-            let msg = s
-                .consoles
-                .open(&s.hv, &p.vm, &dom, p.device.as_deref(), p.force)?;
-            Ok(vec![ContentBlock::text(msg)])
+            let uuid = dom.get_uuid_string()?;
+            let opener = LibvirtOpener {
+                hv: &s.hv,
+                dom: &dom,
+            };
+            let result = s.consoles.open(
+                &opener,
+                OpenRequest {
+                    vm: VmId {
+                        uuid: &uuid,
+                        name: &p.vm,
+                    },
+                    domain_id: dom.get_id(),
+                    device: p.device.as_deref(),
+                    force: p.force,
+                    // A live session of this server is attached to, unless the caller asks for a new one.
+                    replace: p.force,
+                    buffer_bytes: s.hv.config.limits.console_buffer_bytes,
+                },
+            )?;
+            Ok(vec![ContentBlock::text(result.into_message(&p.vm)?)])
         })
         .await
     }
@@ -1270,9 +1302,12 @@ impl VirtServer {
             idempotent_hint = true
         ),
         description = "Read buffered output from an open serial console. Returns `next` and `generation`; pass both \
-        as `since` and `generation` on the following call to get only new output. Each console_open starts a new \
-        generation, and an offset from an earlier one is refused. With `wait_ms`, waits for output no earlier read \
-        returned, then until it pauses for half a second; a closed console returns at once."
+        as `since` and `generation` on the following call to get only new output. Each new session starts a new \
+        generation (console_open on a live session attaches to it instead), and an offset from an earlier one is \
+        refused. With `wait_ms`, waits for output no earlier read returned, then until it pauses for half a \
+        second; a closed console returns at once. Works on a stopped VM, so the output of a console that ended with \
+        the VM stays readable. `run: \"previous\"` reads the run before the current one, which a restart, \
+        console_close, reset_vm or snapshot_revert moved aside, as closed with the reason it ended."
     )]
     async fn console_read(
         &self,
@@ -1280,8 +1315,15 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let wait = Duration::from_millis(p.wait_ms.min(30_000));
+            // Looked up like every other tool's VM, so a hidden or deleted VM answers as they do, and a stopped
+            // VM still has its output.
+            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
             let r = s.consoles.read(
-                &p.vm,
+                VmId {
+                    uuid: &uuid,
+                    name: &p.vm,
+                },
+                p.run,
                 p.since,
                 p.generation,
                 p.max_bytes.unwrap_or(64 * 1024),
@@ -1326,7 +1368,7 @@ impl VirtServer {
         Parameters(p): Parameters<ConsoleWriteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
-            s.hv.domain(&p.vm)?;
+            let uuid = s.hv.domain(&p.vm)?.get_uuid_string()?;
             let mut data = p.text.into_bytes();
             if p.press_enter.unwrap_or(true) {
                 data.push(b'\r');
@@ -1341,7 +1383,11 @@ impl VirtServer {
             )?;
             // The pauses fit in max_wait; the margin leaves room for a slow guest to take the bytes.
             let budget = max_wait + WRITE_MARGIN;
-            let (offset, generation) = s.consoles.write(&p.vm, &data, pacing, budget)?;
+            let vm = VmId {
+                uuid: &uuid,
+                name: &p.vm,
+            };
+            let (offset, generation) = s.consoles.write(vm, &data, pacing, budget)?;
             Ok(vec![ContentBlock::text(format!(
                 "sent {} bytes; the answer starts at offset {offset} (generation {generation})",
                 data.len()
@@ -1356,14 +1402,16 @@ impl VirtServer {
             destructive_hint = false,
             idempotent_hint = true
         ),
-        description = "Detach from a VM's serial console."
+        description = "Detach from a VM's serial console. Its output stays readable with console_read `run: \
+        \"previous\"`."
     )]
     async fn console_close(
         &self,
         Parameters(p): Parameters<VmParam>,
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
-            let msg = if s.consoles.close(&p.vm) {
+            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
+            let msg = if s.consoles.close(&uuid, CLOSED_BY_CONSOLE_CLOSE) {
                 "console closed"
             } else {
                 "no console was open"
@@ -1453,8 +1501,10 @@ impl VirtServer {
             } else {
                 None
             };
+            let uuid = dom.get_uuid_string()?;
             let env = wait::LiveEnv {
                 consoles: &s.consoles,
+                uuid: &uuid,
                 vm: &p.vm,
                 cancelled: Box::new(|| ct.is_cancelled()),
                 progress: Box::new(notify),
@@ -1848,8 +1898,10 @@ impl VirtServer {
         Parameters(p): Parameters<ResetVmParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
+            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
+            // The session moves to the previous run, so the output from before the reset stays readable.
             let mut msg = manage::reset(&s.hv, &p.vm, || {
-                s.consoles.close(&p.vm);
+                s.consoles.close(&uuid, "closed by reset_vm");
             })?;
             if let Err(e) = manage::start_after_reset(&s.hv, &p.vm) {
                 msg.push_str(&format!(
@@ -1879,8 +1931,10 @@ impl VirtServer {
         Parameters(p): Parameters<VmParam>,
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
+            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
             let msg = manage::delete(&s.hv, &p.vm)?;
-            s.consoles.close(&p.vm);
+            // Nothing can read a deleted VM's output again, so none is kept.
+            s.consoles.forget(&uuid);
             Ok(vec![ContentBlock::text(msg)])
         })
         .await
@@ -2091,10 +2145,13 @@ impl VirtServer {
         Parameters(p): Parameters<SnapshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
+            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
             let msg = manage::snapshot_revert(&s.hv, &p.vm, &p.snapshot)?;
-            // A revert replaces the guest's state under the console, running or not, so the session ends here.
-            let closed = if s.consoles.close(&p.vm) {
-                "; its console session was closed, so open a new one"
+            // A revert replaces the guest's state under the console, running or not, so the session ends here and
+            // its output moves to the previous run.
+            let closed = if s.consoles.close(&uuid, "closed by snapshot_revert") {
+                "; its console session was closed (read its output with console_read run: \"previous\"), so open a \
+                 new one"
             } else {
                 ""
             };
@@ -2183,10 +2240,6 @@ impl ServerHandler for VirtServer {
 impl State {
     fn agent<'a>(&self, dom: &'a virt::domain::Domain) -> Agent<'a> {
         Agent::new(dom, self.hv.config.limits.agent_timeout_secs)
-    }
-
-    fn consoles_has(&self, vm: &str) -> bool {
-        self.consoles.is_open(vm)
     }
 
     /// Runs a copy of `dom` as a transfer and waits for it up to `limits.max_wait_secs`. The reply is the copy's
@@ -2607,6 +2660,22 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("unknown field `width`"), "{err}");
+
+        // console_read reads the current run unless told otherwise, and refuses any other run name.
+        let read = |extra: Value| {
+            let mut params = json!({ "vm": "a" });
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<ConsoleReadParams>(params)
+        };
+        assert_eq!(read(json!({})).unwrap().run, Run::Current);
+        assert_eq!(
+            read(json!({ "run": "previous" })).unwrap().run,
+            Run::Previous
+        );
+        assert!(read(json!({ "run": "older" })).is_err());
 
         // A field-less condition is a struct variant, because serde ignores extra fields on a unit variant.
         let agent = |extra: Value| {

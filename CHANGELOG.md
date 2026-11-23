@@ -10,6 +10,8 @@ Each release's section lists what changed for people who run the server and for 
 - Every tool that takes arguments refuses one it does not know, with an error that names it, instead of ignoring it.
   The tools' input schemas say so with `additionalProperties: false`. A client that sends extra fields must stop
   sending them.
+- `console_open` on a console this server already holds open attaches to it and replies with its generation, instead
+  of reporting it open. `force: true` still replaces the session.
 
 ### Added
 
@@ -71,6 +73,9 @@ Each release's section lists what changed for people who run the server and for 
   memory every 5 s, and the crash action `manage.on_crash`: `preserve`, the default, keeps a crashed VM stopped in
   place until `stop_vm` with `force: true`, and `destroy` stops it. Any other value stops the server at start.
   `limits.max_events` (default 256) bounds the events kept for each VM. Existing VMs keep their XML.
+- Each VM keeps the console output of one earlier run. When a new run replaces a session, or `console_close`,
+  `reset_vm` or `snapshot_revert` ends one, `console_read` with `run: "previous"` reads its output, closed, with the
+  reason it ended and its own generation. `console_read` and `console_close` work on a stopped VM.
 
 ### Fixed
 

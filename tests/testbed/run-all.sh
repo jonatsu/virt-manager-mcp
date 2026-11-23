@@ -40,7 +40,7 @@ readonly UNITS=(
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
   screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot templates-expiry
   templates-expiry-command
-  templates-outside-disk manage-lock console-generation job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
+  templates-outside-disk manage-lock console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   screen-installer screen-windows win-exec win-screen
 )
 # Memory the host must have available before an OCR case starts its VM, in MiB: the VM's own plus 1 GiB.

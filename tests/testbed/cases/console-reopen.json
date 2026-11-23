@@ -17,7 +17,7 @@
     "expect": {
       "contains": [
         "console for 'trial-deb13' is already open",
-        "pass force: true to reopen it"
+        "attached to it"
       ]
     }
   },
