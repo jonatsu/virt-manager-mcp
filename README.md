@@ -75,8 +75,8 @@ sha256sum -c $name.tar.gz.sha256
 tar -xzf $name.tar.gz
 ```
 
-The unpacked directory holds the `virtmanager-mcp` binary, `config.example.toml`, `scripts/`, `LICENSE` and
-`CHANGELOG.md`. Copy the binary to a directory on your `PATH`.
+The unpacked directory holds the `virtmanager-mcp` binary, `config.example.toml`, `scripts/`, `LICENSE`, `README.md`
+and `CHANGELOG.md`. Copy the binary to a directory on your `PATH`.
 
 ### From source
 

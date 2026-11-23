@@ -26,8 +26,9 @@ glibc of GitHub's `ubuntu-latest` runner. Nothing is published to crates.io.
 ### Make a release
 
 1. Move the entries under `## Unreleased` in `CHANGELOG.md` into a new `## X.Y.Z` section below it.
-2. Set `version = "X.Y.Z"` in `Cargo.toml`, and run `cargo build --locked` so `Cargo.lock` follows. Set the same
-   version in the install commands under `### From a release` in `README.md`.
+2. Set `version = "X.Y.Z"` in `Cargo.toml`, and run `cargo build` (without `--locked`, which refuses to change the
+   lock file) so `Cargo.lock` follows. Set the same version in the install commands under `### From a release` in
+   `README.md`.
 3. Commit these files as `chore(release): X.Y.Z`, and push `main`.
 4. Once CI passes on `main`, tag the commit with `git tag -a vX.Y.Z -m vX.Y.Z`.
 5. Push the tag with `git push origin vX.Y.Z`.
