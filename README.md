@@ -1,7 +1,8 @@
 # virtmanager-mcp
 
-This is a fork of [KubeRl/MCP-Server-For-VirtManager-AI](https://github.com/KubeRl/MCP-Server-For-VirtManager-AI),
-adapted for agents that create and destroy throwaway test VMs. Planned work is in
+This is a fork of [KubeRl/MCP-Server-For-VirtManager-AI](https://github.com/KubeRl/MCP-Server-For-VirtManager-AI)
+that gives coding agents access to deploy and manage virtual machines on a QEMU/KVM host managed by libvirt. Its
+[goals](#goals) set its purpose and scope, and planned work is in
 [docs/plans/fork-roadmap.md](docs/plans/fork-roadmap.md).
 
 An MCP server that gives an AI access to libvirt / virt-manager VMs:
@@ -11,6 +12,54 @@ reconfiguring VMs and snapshots are available too, but are off until you enable 
 [VM management](#vm-management)).
 
 Host: Linux. Guests: Linux and Windows.
+
+## Goals
+
+### Purpose
+
+virtmanager-mcp gives coding agents access to deploy and manage virtual machines on a QEMU/KVM host managed by libvirt.
+It gives agents tools to create, manage and fully control disposable test VMs, and also lets them control any other VM
+on that same host that the operator opts in, when asked to. It does both without putting the operator's other VMs at
+risk.
+
+Safety and usability both count. Guardrails default to deny, and each one stays proportionate to the risk it
+covers. A guardrail that makes an ordinary agent task impractical is a defect, just as a gap in one is. When the
+two truly conflict, safety wins, and the design that settles the conflict shows how safety still holds.
+
+### Success signals
+
+- An agent takes a VM from a template to a tested result and back without operator help.
+- Asked to do a task in an existing VM that the operator has opted in, an agent finishes it without operator
+  help.
+- Asked to set up a new VM from an installer ISO with no template, such as a CachyOS VM for a test, an agent
+  installs it and leaves it booted and usable.
+- `tests/testbed/run-all.sh` passes every case.
+- No tool reaches a VM or storage pool outside the operator's config, and the guardrail refusal tests prove it.
+
+### Scope
+
+In scope:
+
+- a Linux host running QEMU/KVM through libvirt, with Linux and Windows guests;
+- the outcomes in the [roadmap](docs/plans/fork-roadmap.md);
+- upstream changes, taken case by case.
+
+Out of scope:
+
+- other hypervisors and other libvirt drivers, such as Xen or LXC, and cloud providers;
+- a replacement for virt-manager's graphical interface;
+- keeping up with upstream as an aim of its own;
+- the roadmap's parked ideas, until an outcome takes them up.
+
+### Method
+
+`AGENTS.md` fixes the language, the build gate, the guardrails and the commit rules. Within those, agents choose
+the approach and the tools, as long as these goals hold.
+
+### Changing these goals
+
+A change to these goals needs the project owner's approval. Agents stop and ask before any work that would break
+a goal or widen the scope.
 
 ## How it talks to the guest
 

@@ -3,7 +3,8 @@
 This fork, `jonatsu/virt-manager-mcp`, adapts
 [`KubeRl/MCP-Server-For-VirtManager-AI`](https://github.com/KubeRl/MCP-Server-For-VirtManager-AI) so that coding
 agents can create, snapshot and destroy throwaway test VMs on a libvirt host. It branched from upstream commit
-`f47d3c3`, does not merge upstream regularly, and takes upstream changes case by case. The evidence behind the plan is
+`f47d3c3`, does not merge upstream regularly, and takes upstream changes case by case. The project's purpose, success
+signals and scope are in the [README's goals](../../README.md#goals). The evidence behind the plan is
 in [`2026-11-09-vm-management-mcp-evaluation.md`](../research/2026-11-09-vm-management-mcp-evaluation.md), and the
 test bed is in [`tests/testbed/`](../../tests/testbed/README.md).
 
@@ -150,6 +151,11 @@ Reviews of earlier work found these. None blocks the server's use.
     `tar.exe` refuses absolute paths and `..` by default, but whether a crafted hard-link or symbolic-link entry
     reaches outside the staging directory is untested. Check the archive's `icacls` list on `t-win11`, then probe
     such entries, or write the archive into a directory only `SYSTEM` and `Administrators` can write.
+26. **No evidence shows an agent installing a VM from scratch.** One of the project's success signals is an agent
+    that sets up a new VM from an installer ISO with no template, such as CachyOS, and leaves it booted and usable.
+    `create_vm` takes an installer ISO, and `screen-installer.json` drives only the start of the Debian installer.
+    Add a test-bed case or a recorded run that installs a distribution end to end through `create_vm`, and fix the
+    gaps it finds.
 
 ## Outcomes
 
@@ -225,5 +231,5 @@ Parked ideas, which no outcome includes yet:
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and 24 are
-its units 1 and 2. Follow-ups 15, 16, 23 and 25 can land at any time; 16 waits on a newer `virtio-win`, and 23 and 25
-need a design decision.
+its units 1 and 2. Follow-ups 15, 16, 23, 25 and 26 can land at any time; 16 waits on a newer `virtio-win`, and 23
+and 25 need a design decision.
