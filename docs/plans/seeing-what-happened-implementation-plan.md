@@ -283,7 +283,8 @@ from its first byte, and that a Windows guest writes nothing there, so its boot 
 A `console_open` after a start, reset or template create now attaches to the capture, so the cases that do that are
 updated here: at least `templates-reset-saved`, `templates-reset-uefi`, `console-after-start`,
 `console-closed-on-power-off`, `job-wait`, `wait-for`, `owrt-boot`, `owrt-pacing` and `owrt-wait`. Units 6 and 7
-each run every case that calls `console_open` and fix any other whose reply changed.
+each run every case that calls `console_open`, and unit 8 every case that calls `snapshot_revert`, such as
+`console-generation`, and each fixes any other case whose reply changed.
 
 **Verification.** Unit tests: the start decision for each state; the reply on each open result; the fake opener
 records one safe-mode open per start of an allowed VM and none with force; the guard refuses a concurrent start. On
@@ -450,15 +451,16 @@ reports the job ended instead of "taskkill failed". Follow-up 28.
 
 **Changes.** First, a probe on `t-win11`: a loop of at least 20 cycles that starts a job running
 `ping.exe -n 300 127.0.0.1` and stops it, with the root ended at varying moments around the `taskkill` call so the
-race happens, through `mcp_call.py` or a guest-side loop. The probe records a histogram of `taskkill` exit statuses
-and outputs, and whether any descendant of the tree survives a stop; its results go in a dated note in
-`docs/research/`. Then:
+race happens. A loop inside the guest is the main form, because a round trip from the host is far longer than the
+`taskkill` window. The probe records a histogram of `taskkill` exit statuses and outputs, and whether any descendant
+of the tree survives a stop; its results go in a dated note in `docs/research/`. It deletes the jobs it made under
+`C:\ProgramData\virtmanager-mcp\jobs\` when it ends. Then:
 
-- `src/jobs/stop.ps1` lists the tree's descendants by parent PID before `taskkill`. After a non-zero status, it
-  rechecks the recorded process (PID and start time) and those descendants, retrying for up to 2 s while one is still
-  terminating. When all are gone, it exits with a new status, 7, "ended; taskkill exited N after the tree had gone",
-  and it still exits 5 with the status while any of them runs. Its header lists the new status. Jobs scripts live in
-  `src/jobs/` and take `$id`, not `$argv`; the parse test covers them.
+- `src/jobs/stop.ps1` lists the tree's descendants by parent PID, each with its start time, before `taskkill`. After
+  a non-zero status, it rechecks the recorded process and those descendants by PID and start time, retrying for up
+  to 2 s while one is still terminating. When all are gone, it exits with a new status, 7, "ended; taskkill exited N
+  after the tree had gone", and it still exits 5 with the status while any of them runs. Its header lists the new
+  status. Jobs scripts live in `src/jobs/` and take `$id`, not `$argv`; the parse test covers them.
 - `jobs::stop` in `src/jobs.rs` maps exit 7 to the same success text as exit 0, followed by the script's line, so
   `win-jobs.json`'s `contains` strings still hold and the agent sees what happened.
 
