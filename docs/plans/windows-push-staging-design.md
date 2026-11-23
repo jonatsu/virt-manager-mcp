@@ -1,6 +1,6 @@
 # Windows pushes staged outside the target's parent: design
 
-Status: draft, for approval, revised after an architecture review.
+Status: accepted, after an architecture review.
 Once built, the code wins and this design follows it.
 Basis: roadmap follow-up 23 in [`fork-roadmap.md`](fork-roadmap.md), with evidence in
 [`2026-11-23-windows-handle-steps-probe.md`](../research/2026-11-23-windows-handle-steps-probe.md).
