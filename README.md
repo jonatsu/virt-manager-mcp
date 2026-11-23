@@ -522,7 +522,9 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 - Each VM keeps the console output of one earlier run. When a new run replaces a session, or `console_close`,
   `reset_vm` or `snapshot_revert` ends one, its output moves to the previous run, and `console_read` with
   `run: "previous"` reads it as closed with the reason it ended. The previous run has its own generation and offsets,
-  and a second move drops the first. `console_read` also works on a stopped VM.
+  and a second move drops the first. `console_read` also works on a stopped VM. After a guest panic, the panic text
+  is in the current run while a preserved crash keeps the VM in place, and in the previous run once the VM has
+  started again.
 - `vm_stats` reports one snapshot from two samples about a second apart and keeps no history, so a spike that ended
   before the call leaves no trace. Its filesystem figures come from the guest agent and are the guest's own claim.
 - `wait_for` returns within `limits.max_wait_secs` (default 50 s, below the 60 s at which some clients cut a call)

@@ -28,6 +28,12 @@ The host machine stays clean. The development VM is reached through the tools of
 - To work on a project inside the VM, copy files in with `copy_to_vm` (host files must be inside a
   configured share directory) or `write_file`, run the work with `exec`, and read results back with
   `read_file`.
+- **When the VM misbehaves, find out what happened before you retry.** A reply can end with a
+  notice that the VM crashed, stopped or rebooted outside your calls; `vm_events` lists the
+  details. After a crash, read the panic text with `console_read` (with `run: "previous"` once the
+  VM has started again), and stop a crashed VM with `stop_vm` (`force: true`) before starting it.
+  When the VM is slow or a build fails without a clear cause, `vm_stats` shows its CPU, memory,
+  disk and filesystem use.
 - **If running something in the VM does not make sense, ask before installing it on the host.**
   Examples: a tool that must touch host files directly, editor or IDE integrations, or something
   that needs the host's hardware or display. Say what you want to install, why the VM will not

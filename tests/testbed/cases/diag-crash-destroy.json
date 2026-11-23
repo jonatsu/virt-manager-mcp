@@ -1,0 +1,89 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-dd",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding",
+      "absent": "see vm_events"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-dd",
+      "command": "echo 1 > /proc/sys/kernel/sysrq; echo c > /proc/sysrq-trigger",
+      "timeout_secs": 10
+    },
+    "expect": {
+      "error": true,
+      "matches": "VM 't-dd' crashed \\(panicked\\) and stopped at \\d\\d:\\d\\d:\\d\\dZ; see vm_events since \\d+",
+      "absent": "holds its memory"
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-dd",
+      "kinds": [
+        "crashed"
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"kind\": \"crashed\"",
+        "\"cause\": \"outside\""
+      ]
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-dd",
+      "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": [
+        "console captured from boot",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-dd",
+      "run": "previous"
+    },
+    "expect": {
+      "contains": "Kernel panic - not syncing"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-dd"
+    },
+    "expect": {
+      "absent": "Kernel panic"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-dd",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-dd"
+    },
+    "expect": {
+      "contains": "deleted VM 't-dd'"
+    }
+  }
+]

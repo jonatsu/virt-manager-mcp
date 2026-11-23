@@ -10,6 +10,20 @@
     }
   },
   {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "t-win11"
+    },
+    "expect": {
+      "contains": [
+        "\"state\": \"running\"",
+        "\"type\": \"NTFS\"",
+        "they are the guest's own claim",
+        "the VM has no memory balloon device"
+      ]
+    }
+  },
+  {
     "tool": "exec",
     "args": {
       "vm": "t-win11",

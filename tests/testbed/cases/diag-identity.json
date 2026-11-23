@@ -1,0 +1,112 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-di",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-di"
+    },
+    "expect": {
+      "matches": "console for 't-di' is already open \\(device: default, generation \\d+\\); attached to it"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-di",
+      "command": "echo first-life-marker > /dev/ttyS0"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-di",
+      "wait_ms": 2000
+    },
+    "expect": {
+      "contains": "first-life-marker"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-di",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-di"
+    },
+    "expect": {
+      "contains": "deleted VM 't-di'"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-di",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-di"
+    },
+    "expect": {
+      "contains": "\"kind\": \"started\"",
+      "absent": "\"kind\": \"stopped\""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-di",
+      "since": 0
+    },
+    "expect": {
+      "absent": "first-life-marker"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-di",
+      "run": "previous"
+    },
+    "expect": {
+      "error": true,
+      "contains": "no previous console run",
+      "absent": "first-life-marker"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-di",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-di"
+    },
+    "expect": {
+      "contains": "deleted VM 't-di'"
+    }
+  }
+]

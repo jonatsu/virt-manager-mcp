@@ -41,6 +41,8 @@ readonly UNITS=(
   screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot templates-expiry
   templates-expiry-command
   templates-outside-disk manage-lock console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
+  diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
+  diag-hidden
   screen-installer screen-windows win-exec win-screen
 )
 # Memory the host must have available before an OCR case starts its VM, in MiB: the VM's own plus 1 GiB.
@@ -50,6 +52,7 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["jobs"]="jobs jobs-reopen"
+  ["diag-stats"]="diag-stats diag-stats-read-only diag-stats-after"
   ["transfer-pull"]="transfer-pull transfer-pull-caps"
   ["transfer-background"]="transfer-background transfer-background-after"
   ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer win-transfer-caps"
@@ -547,6 +550,53 @@ unit_win_screen() {
   win_shut_off || record win-screen failed "could not shut t-win11 off"
 }
 
+# Writes $WORK/config-<name>.toml: config-templates.toml with one more line after the line that matches $2.
+write_variant() { # name after-line line
+  local file=${WORK}/config-$1.toml
+  sed -e "/^$2\$/a $3" "${TESTBED}/config-templates.toml" > "${file}" || return 1
+  grep -qxF -- "$3" "${file}"
+}
+
+# The crash under on_crash = "destroy": libvirt stops the VM, and the next start moves the panic to the previous run.
+unit_diag_crash_destroy() {
+  if write_variant crash-destroy '\[manage\]' 'on_crash = "destroy"'; then
+    run_case diag-crash-destroy "${WORK}/config-crash-destroy.toml"
+  else
+    record diag-crash-destroy failed "could not write ${WORK}/config-crash-destroy.toml"
+  fi
+}
+
+# diag-stats leaves t-dst running for the read-only server, and diag-stats-after deletes it.
+unit_diag_stats() {
+  run_case diag-stats config-templates.toml
+  if sed -e 's/^read_only = false$/read_only = true/' "${TESTBED}/config-templates.toml" > "${WORK}/config-read-only.toml" \
+    && grep -qxF 'read_only = true' "${WORK}/config-read-only.toml"; then
+    run_case diag-stats-read-only "${WORK}/config-read-only.toml"
+  else
+    record diag-stats-read-only failed "could not write ${WORK}/config-read-only.toml"
+  fi
+  run_case diag-stats-after config-templates.toml
+}
+
+# trial-deb13 is outside config-templates.toml's allowed_vms. It starts from virsh while the case's server runs and
+# creates t-dh, whose start is the positive control: the worker records events in that run, and no reply names
+# trial-deb13.
+unit_diag_hidden() {
+  local starter
+  if ! trial_shut_off; then
+    record diag-hidden failed "could not shut trial-deb13 off"
+    return
+  fi
+  (
+    sleep 10
+    vsh start trial-deb13 > /dev/null
+  ) &
+  starter=$!
+  run_case diag-hidden config-templates.toml
+  wait "${starter}" || record diag-hidden failed "virsh could not start trial-deb13 during the case"
+  trial_ready || record diag-hidden failed "trial-deb13 agent did not answer afterwards"
+}
+
 avail_mib() { awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo; }
 
 # Defines VM $1 from its XML here unless it exists, with t-inst's empty 8 GiB disk, and leaves it shut off.
@@ -592,6 +642,9 @@ run_unit() {
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;
     jobs) unit_jobs ;;
+    diag-crash-destroy) unit_diag_crash_destroy ;;
+    diag-stats) unit_diag_stats ;;
+    diag-hidden) unit_diag_hidden ;;
     transfer-* | addresses) unit_transfer "$1" ;;
     manage-lock) unit_manage_lock ;;
     owrt-* | mouse-refusals) unit_owrt "$1" ;;

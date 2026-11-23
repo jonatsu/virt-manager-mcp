@@ -1,0 +1,102 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-da",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding",
+      "absent": "see vm_events"
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-da"
+    },
+    "expect": {
+      "matches": "\"cause\": \"create_vm_from_template\",\\s+\"detail\": \"booted\",\\s+\"kind\": \"started\"",
+      "absent": "see vm_events since"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-da",
+      "command": "systemd-run --on-active=1 systemctl reboot"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 30
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-da",
+      "timeout_secs": 90,
+      "conditions": [
+        {
+          "kind": "agent"
+        }
+      ]
+    },
+    "expect": {
+      "matches": "VM 't-da' rebooted at \\d\\d:\\d\\d:\\d\\dZ; see vm_events since \\d+"
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-da",
+      "kinds": [
+        "rebooted"
+      ]
+    },
+    "expect": {
+      "matches": "\"cause\": \"outside\",\\s+\"detail\": \"\",\\s+\"kind\": \"rebooted\"",
+      "absent": "see vm_events since"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-da"
+    },
+    "expect": {
+      "absent": "see vm_events since"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-da",
+      "kinds": [
+        "stopped"
+      ]
+    },
+    "expect": {
+      "matches": "\"cause\": \"stop_vm\",\\s+\"detail\": \"shutdown\",\\s+\"kind\": \"stopped\"",
+      "absent": "see vm_events since"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-da"
+    },
+    "expect": {
+      "contains": "deleted VM 't-da'",
+      "absent": "see vm_events since"
+    }
+  }
+]

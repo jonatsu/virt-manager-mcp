@@ -7,6 +7,9 @@ Each release's section lists what changed for people who run the server and for 
 
 ### Changed
 
+- The example global instructions, `example-global-CLAUDE.md` and `example-global-AGENTS.md`, tell an agent to find
+  out what happened before it retries: read a notice's records with `vm_events`, the panic text with `console_read`,
+  and the VM's resource use with `vm_stats`.
 - Every tool that takes arguments refuses one it does not know, with an error that names it, instead of ignoring it.
   The tools' input schemas say so with `additionalProperties: false`. A client that sends extra fields must stop
   sending them.

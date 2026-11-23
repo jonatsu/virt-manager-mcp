@@ -1,0 +1,115 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-dw",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-dw",
+      "command": "setsid nohup sh -c 'sleep 3; systemctl poweroff' > /dev/null 2>&1 < /dev/null &"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-dw",
+      "timeout_secs": 90,
+      "conditions": [
+        {
+          "kind": "event",
+          "kinds": [
+            "stopped"
+          ]
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"kind\":\"event\"",
+        "\"result\":\"matched\"",
+        "\"cause\":\"outside\""
+      ]
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-dw",
+      "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-dw",
+      "command": "setsid nohup sh -c 'sleep 3; systemctl poweroff' > /dev/null 2>&1 < /dev/null &"
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-dw",
+      "timeout_secs": 90,
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "never-printed-marker"
+        },
+        {
+          "kind": "event",
+          "kinds": [
+            "stopped"
+          ]
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"kind\":\"event\"",
+        "\"result\":\"matched\"",
+        "\"index\":1"
+      ]
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-dw",
+      "timeout_secs": 0,
+      "conditions": [
+        {
+          "kind": "event",
+          "kinds": [
+            "started"
+          ],
+          "since": 0
+        }
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"result\":\"matched\"",
+        "\"cause\":\"create_vm_from_template\""
+      ]
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-dw"
+    },
+    "expect": {
+      "contains": "deleted VM 't-dw'"
+    }
+  }
+]

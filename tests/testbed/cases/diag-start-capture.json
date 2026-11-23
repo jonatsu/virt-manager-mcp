@@ -1,0 +1,165 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-ds",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": [
+        "console captured from boot",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-ds",
+      "since": 0,
+      "max_bytes": 3000
+    },
+    "expect": {
+      "matches": "\"next\":\\d+\\}\\n\\s*Booting `Debian GNU/Linux'"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-ds",
+      "force": true
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-ds",
+      "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": [
+        "console captured from boot",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-ds",
+      "since": 0,
+      "max_bytes": 3000
+    },
+    "expect": {
+      "matches": "\"next\":\\d+\\}\\n\\s*Booting `Debian GNU/Linux'"
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-ds"
+    },
+    "expect": {
+      "contains": [
+        "console captured from boot",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-ds",
+      "since": 0,
+      "max_bytes": 3000
+    },
+    "expect": {
+      "matches": "\"next\":\\d+\\}\\n\\s*Booting `Debian GNU/Linux'"
+    }
+  },
+  {
+    "tool": "snapshot_create",
+    "args": {
+      "vm": "t-ds",
+      "snapshot": "run"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-ds",
+      "command": "echo before-revert-marker > /dev/ttyS0"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-ds",
+      "wait_ms": 2000
+    },
+    "expect": {
+      "contains": "before-revert-marker"
+    }
+  },
+  {
+    "tool": "snapshot_revert",
+    "args": {
+      "vm": "t-ds",
+      "snapshot": "run"
+    },
+    "expect": {
+      "contains": [
+        "now running; console captured from the snapshot on",
+        "moved to the previous run"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-ds",
+      "command": "echo after-revert-marker > /dev/ttyS0"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-ds",
+      "since": 0,
+      "wait_ms": 2000
+    },
+    "expect": {
+      "contains": "after-revert-marker",
+      "absent": "before-revert-marker"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-ds",
+      "run": "previous"
+    },
+    "expect": {
+      "contains": [
+        "before-revert-marker",
+        "closed by snapshot_revert"
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-ds",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-ds"
+    },
+    "expect": {
+      "contains": "deleted VM 't-ds'"
+    }
+  }
+]

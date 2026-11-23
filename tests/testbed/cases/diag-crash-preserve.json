@@ -1,0 +1,77 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-dp",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding",
+      "absent": "see vm_events"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-dp",
+      "command": "echo 1 > /proc/sys/kernel/sysrq; echo c > /proc/sysrq-trigger",
+      "timeout_secs": 10
+    },
+    "expect": {
+      "error": true,
+      "matches": "VM 't-dp' crashed \\(panicked\\) at \\d\\d:\\d\\d:\\d\\dZ; it holds its memory until stop_vm with force: true; see vm_events since \\d+"
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-dp",
+      "kinds": [
+        "crashed"
+      ]
+    },
+    "expect": {
+      "matches": "\"cause\": \"outside\",\\s+\"detail\": \"panicked\",\\s+\"kind\": \"crashed\"",
+      "absent": "see vm_events since"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-dp"
+    },
+    "expect": {
+      "error": true,
+      "contains": "has crashed; stop it with force: true",
+      "absent": "see vm_events since"
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-dp"
+    },
+    "expect": {
+      "contains": "Kernel panic - not syncing"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-dp",
+      "force": true
+    },
+    "expect": {
+      "absent": "see vm_events since"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-dp"
+    },
+    "expect": {
+      "contains": "deleted VM 't-dp'"
+    }
+  }
+]

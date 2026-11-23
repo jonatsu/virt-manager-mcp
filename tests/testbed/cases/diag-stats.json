@@ -1,0 +1,60 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-dst",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 8
+    }
+  },
+  {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "contains": [
+        "\"state\": \"running\"",
+        "\"vcpus\": 2",
+        "\"target\": \"vda\"",
+        "\"available_bytes\"",
+        "\"mountpoint\": \"/\"",
+        "they are the guest's own claim"
+      ],
+      "absent": [
+        "filesystems_missing",
+        "guest_missing"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-dst",
+      "command": "setsid nohup sh -c 'timeout 20 yes > /dev/null & timeout 20 yes > /dev/null & wait' > /dev/null 2>&1 < /dev/null &"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "matches": "\"percent\": (9\\d|100)\\.\\d"
+    }
+  }
+]

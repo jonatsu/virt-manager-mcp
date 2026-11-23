@@ -1,0 +1,66 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-dst",
+      "command": "setsid nohup sh -c 'sleep 2; systemctl stop qemu-guest-agent' > /dev/null 2>&1 < /dev/null &"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 5
+    }
+  },
+  {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "contains": [
+        "\"state\": \"running\"",
+        "\"filesystems_missing\": \"the guest agent did not answer",
+        "\"target\": \"vda\""
+      ],
+      "absent": "\"mountpoint\""
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-dst",
+      "force": true
+    }
+  },
+  {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "contains": "\"state\": \"shutoff\"",
+      "absent": "\"cpu\""
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "contains": "deleted VM 't-dst'"
+    }
+  },
+  {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not created by this server",
+      "absent": "\"state\""
+    }
+  }
+]

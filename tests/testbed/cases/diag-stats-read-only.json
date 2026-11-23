@@ -1,0 +1,16 @@
+[
+  {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "contains": [
+        "\"state\": \"running\"",
+        "\"filesystems_missing\": \"read-only mode disables guest-agent queries\"",
+        "\"target\": \"vda\""
+      ],
+      "absent": "\"mountpoint\""
+    }
+  }
+]

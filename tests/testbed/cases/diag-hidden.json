@@ -1,0 +1,110 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-dh",
+      "template": "debian13"
+    },
+    "expect": {
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 20
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-dh"
+    },
+    "expect": {
+      "contains": [
+        "\"kind\": \"started\"",
+        "\"cause\": \"create_vm_from_template\""
+      ],
+      "absent": "trial-deb13"
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not in allowed_vms",
+      "absent": "\"kind\""
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "trial-deb13",
+      "timeout_secs": 0,
+      "conditions": [
+        {
+          "kind": "event",
+          "since": 0
+        }
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "not in allowed_vms",
+      "absent": "\"kind\""
+    }
+  },
+  {
+    "tool": "vm_stats",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not in allowed_vms",
+      "absent": "\"cpu\""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "trial-deb13",
+      "run": "previous"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not in allowed_vms"
+    }
+  },
+  {
+    "tool": "list_vms",
+    "args": {},
+    "expect": {
+      "contains": "t-dh",
+      "absent": "trial-deb13"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-dh",
+      "force": true
+    },
+    "expect": {
+      "absent": "trial-deb13"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-dh"
+    },
+    "expect": {
+      "contains": "deleted VM 't-dh'",
+      "absent": "trial-deb13"
+    }
+  }
+]
