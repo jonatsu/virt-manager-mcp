@@ -55,7 +55,7 @@ declare -A MEMBERS=(
   ["diag-stats"]="diag-stats diag-stats-read-only diag-stats-after"
   ["transfer-pull"]="transfer-pull transfer-pull-caps"
   ["transfer-background"]="transfer-background transfer-background-after"
-  ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer win-transfer-caps"
+  ["win-exec"]="win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer win-transfer-caps win-push-place win-push-volume"
 )
 # The pattern of the 128 MiB file the background-transfer case moves both ways, and its SHA-256.
 readonly BIG_PATTERN='virtmanager-mcp test bed'
@@ -480,11 +480,51 @@ win_shut_off() {
   vsh destroy t-win11 > /dev/null && wait_until 30 is_state t-win11 "shut off"
 }
 
+# The blank disk that win-push-volume attaches to t-win11 as a second volume.
+readonly WIN_EXTRA_VOL=t-push-vol.qcow2
+readonly WIN_EXTRA_DEV=sde
+
+# Shuts t-win11 off, then detaches and deletes WIN_EXTRA_VOL wherever it is still attached or present.
+win_detach_volume() {
+  local status=0
+  win_shut_off || return 1
+  if vsh dumpxml --inactive t-win11 | grep -qF -- "${WIN_EXTRA_VOL}"; then
+    vsh detach-disk t-win11 "${WIN_EXTRA_DEV}" --config > /dev/null || status=1
+  fi
+  if vsh vol-info --pool "${POOL}" "${WIN_EXTRA_VOL}" > /dev/null 2>&1; then
+    vsh vol-delete --pool "${POOL}" "${WIN_EXTRA_VOL}" > /dev/null || status=1
+  fi
+  return "${status}"
+}
+
+# Runs win-push-volume under config $1, with a blank 1 GiB disk attached to t-win11, then removes the disk.
+win_push_volume() {
+  local config=$1 path reason=
+  if ! win_shut_off; then
+    reason="could not shut t-win11 off"
+  elif ! vsh vol-create-as "${POOL}" "${WIN_EXTRA_VOL}" 1G --format qcow2 > /dev/null; then
+    reason="could not create ${WIN_EXTRA_VOL}"
+  elif ! path=$(vsh vol-path --pool "${POOL}" "${WIN_EXTRA_VOL}") \
+    || ! vsh attach-disk t-win11 "${path}" "${WIN_EXTRA_DEV}" --targetbus sata --driver qemu --subdriver qcow2 \
+      --config > /dev/null; then
+    reason="could not attach ${WIN_EXTRA_VOL} to t-win11"
+  elif ! win_ready; then
+    reason="the t-win11 agent did not answer"
+  fi
+  if [[ -n ${reason} ]]; then
+    record win-push-volume failed "${reason}"
+  else
+    run_case win-push-volume "${config}"
+  fi
+  win_detach_volume || record win-push-volume failed "could not detach and delete ${WIN_EXTRA_VOL}"
+}
+
 # win-exec starts t-win11 and shuts it down; the job and wait cases then run on a fresh start, sharing vars.json, and
 # the transfer cases last, with vars.json rewritten for the transfer directories and the caps case under its own
-# config.
+# config. win-push-volume runs after a restart with a second disk attached.
 unit_windows() {
-  local cases=(win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer win-transfer-caps)
+  local cases=(win-exec win-jobs win-jobs-reopen win-jobs-refusals win-wait win-transfer win-transfer-caps
+    win-push-place win-push-volume)
   local config=${WORK}/config-windows.toml reason case
   reason=$(win_blocker)
   if [[ -n ${reason} ]]; then
@@ -506,6 +546,7 @@ unit_windows() {
   rm -f -- "${WORK:?}/vars.json"
   if win_ready; then
     for case in "${cases[@]:1}"; do
+      [[ ${case} == win-push-volume ]] && continue
       [[ ${case} == win-transfer ]] && transfer_vars
       if [[ ${case} == win-transfer-caps ]]; then
         run_case "${case}" "${WORK}/config-windows-caps.toml"
@@ -523,6 +564,7 @@ unit_windows() {
     [[ -z $(find "${WORK}/pull" -maxdepth 1 \( -name win-big -o -name win-loop \) -print) ]] \
       || record win-transfer-caps failed "a refused Windows pull left pull/win-big or pull/win-loop behind"
     check_pull_dir win-transfer-caps
+    win_push_volume "${config}"
   else
     for case in "${cases[@]:1}"; do record "${case}" failed "the t-win11 agent did not answer"; done
   fi
@@ -675,6 +717,10 @@ cleanup() {
     vsh undefine "${vm}" --nvram --managed-save --snapshots-metadata > /dev/null 2>&1 \
       || vsh undefine "${vm}" --managed-save --snapshots-metadata > /dev/null || echo "cleanup: could not undefine ${vm}"
   done < <(vsh list --all --name)
+  # An interrupted win-push-volume leaves its disk attached to t-win11.
+  if vsh dumpxml --inactive t-win11 2> /dev/null | grep -qF -- "${WIN_EXTRA_VOL}"; then
+    win_detach_volume > /dev/null 2>&1 || echo "cleanup: could not detach ${WIN_EXTRA_VOL} from t-win11"
+  fi
   while read -r vol; do
     [[ (${vol} == t-* && ${vol} != t-owrt.img) || ${vol} == tpl-scratch.qcow2 ]] || continue
     grep -qxF -- "${vol}" <<< "${PRE_VOLS}" && continue

@@ -272,6 +272,10 @@ on, and Windows propagates it to every entry, so the pushed tree ends with the p
 there would have. The step applies the same list each time, so a failed run is repeated once; a second failure fails
 the push and deletes the staging tree.
 
+Those directories now live in `%SystemRoot%\Temp`, and one `Place` step does everything in the target's parent on
+open handles, as [`windows-push-staging-design.md`](windows-push-staging-design.md) describes; that design owns the
+Windows push from the unpack on.
+
 A pull from a Windows guest packs into `%SystemRoot%\Temp` (`C:\Windows\Temp` on most guests), where only `SYSTEM`
 and `Administrators` can read the files that the agent creates. Any non-zero exit status of `tar.exe` fails the
 pull: Windows has no counterpart of GNU tar's changed-file warning, and its status 1 also covers a file that another
@@ -370,8 +374,8 @@ that meets a symlinked directory.
 8. A guest user who may delete or rename entries in a Windows push's target parent can replace the staging directory
    with a junction between its creation and the unpack, and so make the push write elsewhere as `SYSTEM`. That user
    might own the parent, as in `C:\Users\alice\app`. The parent might also be a directory that a push's probe created
-   below `C:\Users\Public`, which passes delete rights on to interactive users. Roadmap follow-up 23 records it. Such
-   a user could swap the archive directory the same way.
+   below `C:\Users\Public`, which passes delete rights on to interactive users. Such a user could swap the archive
+   directory the same way. Roadmap follow-up 23 closes this, as `windows-push-staging-design.md` describes.
 9. The Windows guest agent from `virtio-win` 0.1.302 fails any `guest-exec` whose arguments are not ASCII, and libvirt
    reports only `failed to parse JSON: invalid utf-8 string`. The pull works around it; `exec` with `program` meets it
    too, which roadmap follow-up 22 records.

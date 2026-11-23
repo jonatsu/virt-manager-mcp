@@ -82,10 +82,16 @@ The guest agent fails a command whose arguments are not ASCII, so a pull from su
   directory only in case. It also skips every symlink, because the archive cannot say whether a link points to a
   file or a directory. A name outside the guest's code page, such as a Japanese name on a Western guest, fails the
   push in `tar.exe`.
-- Every pushed file and directory arrives writable; host modes do not carry over. While `tar.exe` unpacks, only
-  `SYSTEM` and `Administrators` can write the push's staging directory, so no other guest user can plant a junction
-  in it. The pushed tree then gets the access list its parent passes on. A guest user who may delete or rename
-  entries in the target's parent, such as its owner, can still redirect a push.
+- Every pushed file and directory arrives writable; host modes do not carry over. A push writes its archive and
+  unpacks it in `%SystemRoot%\Temp`, in directories that only `SYSTEM` and `Administrators` can write, where no
+  other guest user may rename or delete them. A helper that the push compiles in the guest then does everything in
+  the target's parent in one step: it creates missing parents, moves the tree in, gives it the access list its
+  parent passes on, and deletes a replaced tree. It holds each directory on the way open and acts only on open
+  handles, so a guest user who may rename entries in the parent, such as its owner, cannot redirect the push.
+- A push refuses a target whose path passes through a junction, a symbolic link or a mount point, and a reserved
+  device name such as `CON` as the target or one of its parents. A folder of a cloud-file provider, such as OneDrive,
+  is no such link and works. A target on another drive than `%SystemRoot%` is copied there instead of moved, which
+  is slower. A guest whose PowerShell runs in Constrained Language Mode cannot load the helper, and its pushes fail.
 - Windows refuses to rename a directory while a file in it is open, so a `replace` of a tree in
   use fails after one retry and leaves the old tree in place.
 - The guest packs in `%SystemRoot%\Temp`, usually `C:\Windows\Temp`, where only `SYSTEM` and `Administrators` can

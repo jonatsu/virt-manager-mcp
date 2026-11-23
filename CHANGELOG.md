@@ -139,6 +139,12 @@ Each release's section lists what changed for people who run the server and for 
   passes on. A user who may delete or rename entries in the parent, such as its owner, can still redirect the push.
   The archive goes into a second directory beside the target with the same protected access list, so no other user
   can rewrite it before `tar.exe` reads it.
+- A guest user who may rename or delete entries in a Windows push's target parent, such as the owner of
+  `C:\Users\alice`, can no longer redirect the push. A Windows push now stages in `%SystemRoot%\Temp`, and a helper
+  it compiles in the guest does every step in the target's parent on open handles. Such a push now refuses a target
+  whose path passes through a junction, a symbolic link or a mount point, and a reserved device name such as `CON`.
+  A target on another drive than `%SystemRoot%` is copied instead of moved, and a guest whose PowerShell runs in
+  Constrained Language Mode can no longer push directories.
 
 ## 0.2.0
 

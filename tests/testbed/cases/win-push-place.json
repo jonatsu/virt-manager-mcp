@@ -1,0 +1,160 @@
+[
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "foreach ($j in 'C:\\vmm-own\\jl', 'C:\\vmm-own\\jtarget') { if (Test-Path -LiteralPath $j) { cmd /c rmdir $j } }\nforeach ($d in 'C:\\vmm-own', 'C:\\vmm-victim', 'C:\\vmm-rootpush', 'C:\\vmm-rootref') { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath \"\\\\?\\$d\" -Recurse -Force } }\n[void](New-Item -ItemType Directory 'C:\\vmm-own')\n[void](New-Item -ItemType Directory 'C:\\vmm-victim')\nSet-Content -LiteralPath 'C:\\vmm-victim\\keep.txt' -Value keep\n# A folder that ordinary users may change, as a user's own folder is: Users get full control, which lets them rename entries.\nicacls C:\\vmm-own /inheritance:r /grant:r '*S-1-5-32-545:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null\ncmd /c mklink /J C:\\vmm-own\\jl C:\\vmm-victim | Out-Null\ncmd /c mklink /J C:\\vmm-own\\jtarget C:\\vmm-victim | Out-Null\nSet-Content -LiteralPath (Join-Path $env:SystemRoot 'Temp\\vmm-victim.sddl') -Value (Get-Acl -LiteralPath 'C:\\vmm-victim').Sddl\n'ready'"
+    },
+    "expect": {
+      "contains": "ready"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-ete",
+      "guest_path": "C:\\vmm-own\\new\\deeper\\app"
+    },
+    "expect": {
+      "contains": "\"files\":2"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "# The rules of the pushed tree and its created parents against ones made in place, compared by value.\nfunction Rules($d, $files) { foreach ($r in @('') + $files) { $a = Get-Acl -LiteralPath \"$d$r\"; \"$r protected=$($a.AreAccessRulesProtected)\"; $a.Access | ForEach-Object { \"$r $($_.IdentityReference) $($_.FileSystemRights) $($_.InheritanceFlags) $($_.PropagationFlags) inherited=$($_.IsInherited)\" } } }\n$ref = 'C:\\vmm-own\\new\\deeper\\ref'\n[void](New-Item -ItemType Directory $ref)\nSet-Content -LiteralPath \"$ref\\a.txt\" -Value a\nSet-Content -LiteralPath \"$ref\\\u00e9t\u00e9.txt\" -Value e\n[void](New-Item -ItemType Directory 'C:\\vmm-own\\newref')\nforeach ($pair in @(@('C:\\vmm-own\\new\\deeper\\app', $ref, @('\\a.txt', '\\\u00e9t\u00e9.txt')), @('C:\\vmm-own\\new', 'C:\\vmm-own\\newref', @()))) {\n  $pushed = Rules $pair[0] $pair[2]\n  $made = Rules $pair[1] $pair[2]\n  if (Compare-Object $pushed $made) { \"$($pair[0]) acl=differs\"; $pushed; '--'; $made } else { \"$($pair[0]) acl=same\" }\n}\n(Rules 'C:\\vmm-own\\new\\deeper\\app' @()) -match 'S-1-5-32-545|BUILTIN\\\\Users'"
+    },
+    "expect": {
+      "contains": [
+        "C:\\vmm-own\\new\\deeper\\app acl=same",
+        "C:\\vmm-own\\new acl=same",
+        "FullControl"
+      ],
+      "absent": "acl=differs"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$app = 'C:\\vmm-own\\new\\deeper\\app'\ncmd /c mklink /J \"$app\\jl\" C:\\vmm-victim | Out-Null\ncmd /c mklink /D \"$app\\sl\" C:\\vmm-victim | Out-Null\n[void](New-Item -ItemType HardLink -Path \"$app\\hl.txt\" -Target 'C:\\vmm-victim\\keep.txt')\nSet-Content -LiteralPath \"$app\\ro.txt\" -Value ro\nSet-ItemProperty -LiteralPath \"$app\\ro.txt\" -Name IsReadOnly -Value $true\n(Get-ChildItem -Force -LiteralPath $app | Sort-Object Name | ForEach-Object Name) -join ','"
+    },
+    "expect": {
+      "contains": "a.txt,\u00e9t\u00e9.txt,hl.txt,jl,ro.txt,sl"
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-ete",
+      "guest_path": "C:\\vmm-own\\new\\deeper\\app",
+      "replace": true
+    },
+    "expect": {
+      "contains": "\"files\":2",
+      "absent": "note"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\n'app=' + ((Get-ChildItem -Force -LiteralPath 'C:\\vmm-own\\new\\deeper\\app' | Sort-Object Name | ForEach-Object Name) -join ',')\n'keep=' + (Get-Content -LiteralPath 'C:\\vmm-victim\\keep.txt')\n'victim=' + ((Get-ChildItem -Force -LiteralPath 'C:\\vmm-victim' | ForEach-Object Name) -join ',')\nif ((Get-Acl -LiteralPath 'C:\\vmm-victim').Sddl -eq (Get-Content -LiteralPath \"$t\\vmm-victim.sddl\")) { 'victim-acl=same' } else { 'victim-acl=changed' }\n'vmm=' + (Get-ChildItem -Force -LiteralPath 'C:\\vmm-own\\new\\deeper', $t -Filter '.vmm-*' | Measure-Object).Count"
+    },
+    "expect": {
+      "contains": [
+        "app=a.txt,\u00e9t\u00e9.txt",
+        "keep=keep",
+        "victim=keep.txt",
+        "victim-acl=same",
+        "vmm=0"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-ete",
+      "guest_path": "C:\\vmm-own\\jl\\x"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "C:\\vmm-own\\jl is a junction, a symbolic link or a mount point",
+        "push to a path without one"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-ete",
+      "guest_path": "C:\\vmm-own\\jtarget",
+      "replace": true
+    },
+    "expect": {
+      "error": true,
+      "contains": "is not a directory"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$t = Join-Path $env:SystemRoot 'Temp'\n'victim=' + ((Get-ChildItem -Force -LiteralPath 'C:\\vmm-victim' | ForEach-Object Name) -join ',')\nif ((Get-Acl -LiteralPath 'C:\\vmm-victim').Sddl -eq (Get-Content -LiteralPath \"$t\\vmm-victim.sddl\")) { 'victim-acl=same' } else { 'victim-acl=changed' }\n'vmm=' + (Get-ChildItem -Force -LiteralPath 'C:\\vmm-own', $t -Filter '.vmm-*' | Measure-Object).Count"
+    },
+    "expect": {
+      "contains": [
+        "victim=keep.txt",
+        "victim-acl=same",
+        "vmm=0"
+      ]
+    }
+  },
+  {
+    "tool": "copy_dir_to_vm",
+    "args": {
+      "vm": "t-win11",
+      "host_path": "${share}/win-ete",
+      "guest_path": "C:\\vmm-rootpush"
+    },
+    "expect": {
+      "contains": "\"files\":2"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "function Rules($d) { foreach ($r in '', '\\a.txt', '\\\u00e9t\u00e9.txt') { $a = Get-Acl -LiteralPath \"$d$r\"; \"$r protected=$($a.AreAccessRulesProtected)\"; $a.Access | ForEach-Object { \"$r $($_.IdentityReference) $($_.FileSystemRights) $($_.InheritanceFlags) $($_.PropagationFlags) inherited=$($_.IsInherited)\" } } }\n$ref = 'C:\\vmm-rootref'\n[void](New-Item -ItemType Directory $ref)\nSet-Content -LiteralPath \"$ref\\a.txt\" -Value a\nSet-Content -LiteralPath \"$ref\\\u00e9t\u00e9.txt\" -Value e\n$pushed = Rules 'C:\\vmm-rootpush'\n$made = Rules $ref\nif (Compare-Object $pushed $made) { 'acl=differs'; $pushed; '--'; $made } else { 'acl=same' }"
+    },
+    "expect": {
+      "contains": "acl=same"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "# Who other than SYSTEM, Administrators and CREATOR OWNER may delete or rename entries in %SystemRoot%\\Temp, where pushes stage.\n$trusted = 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0'\n$risky = [Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'\n$found = @((Get-Acl -LiteralPath (Join-Path $env:SystemRoot 'Temp')).Access | Where-Object { $_.AccessControlType -eq 'Allow' -and ($trusted -notcontains $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value) -and ($_.FileSystemRights -band $risky) } | ForEach-Object { \"$($_.IdentityReference) $($_.FileSystemRights)\" })\nif ($found.Count) { 'temp-delete-rights=' + ($found -join '; ') } else { 'temp-delete-rights=none' }"
+    },
+    "expect": {
+      "contains": "temp-delete-rights=none"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "foreach ($j in 'C:\\vmm-own\\jl', 'C:\\vmm-own\\jtarget') { if (Test-Path -LiteralPath $j) { cmd /c rmdir $j } }\nforeach ($d in 'C:\\vmm-own', 'C:\\vmm-victim', 'C:\\vmm-rootpush', 'C:\\vmm-rootref') { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath \"\\\\?\\$d\" -Recurse -Force } }\nRemove-Item -LiteralPath (Join-Path $env:SystemRoot 'Temp\\vmm-victim.sddl') -Force\n'clean'"
+    },
+    "expect": {
+      "contains": "clean"
+    }
+  }
+]
