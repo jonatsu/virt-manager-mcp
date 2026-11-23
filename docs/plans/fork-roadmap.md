@@ -189,6 +189,14 @@ Reviews of earlier work found these. None blocks the server's use.
 31. **Done: `templates-reset-saved.json` waits for the login prompt.** In the last full run of follow-ups run 2, the
     Enter sent to `t-u`'s serial console just after a refused reset got no answer within the case's 3 s
     `console_read` wait. The case now waits up to 30 s with `wait_for` for a `login:` printed after the Enter.
+32. **The event worker has three narrow gaps.** The final code review of outcome 4 approved the worker and found them,
+    each optional. First, a batch the worker has taken is not yet in flight for a few microseconds, so a reconnect from
+    a tool call in that window records a `during_gap` stop beside the real one. Second, a VM that libvirt reports as
+    not found is cached as hidden, and only its `undefined` event clears that entry; when that event is lost to a queue
+    overflow or a reconnect, a VM defined again under the same UUID and name records nothing until the server
+    restarts. Third, no test covers a waiting event from an earlier pass followed by its VM's undefine. The fixes are
+    to publish the batch as in flight under the queue's lock, to drop a not-found event without caching it, and to add
+    the test. They land with the next change to `src/events/worker.rs`, after the 0.3.0 release.
 
 ## Outcomes
 
