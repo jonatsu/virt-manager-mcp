@@ -75,7 +75,7 @@ commits finds no blocking defect, its findings fixed or recorded.
 | -- | -- | -- | -- |
 | 1. UTF-8 error text (24) | `fix(winsteps): write guest error text as UTF-8` | Parse test passes; under code page 437 on `t-win11`, a push below a file named `vmm-été-file` fails with `Cannot create "C:\Windows\Temp\vmm-été-file" because ...` intact; `run-all.sh win-transfer.json win-transfer-caps.json` passed all seven Windows cases | Self-reviewed; the closing review covers it |
 | 2. PowerShell errors as text (15) | `fix(exec): report PowerShell errors on Windows as text` | Probe on `t-win11`: `-OutputFormat Text` works with `-Command` but not with `-EncodedCommand`; the decoded script block with a closing `$?` check matched today's exit code in all ten probe commands (1 1 0 0 3 1 0 0 0 1); `win-exec.json` passes with the new check, and a rerun passed all seven Windows cases after one intermittent `job_stop` failure, recorded as follow-up 28 | Self-reviewed; the closing review covers it |
-| 3. Archive access probe (25) |  |  |  |
+| 3. Archive access probe (25) | `docs(research): probe a Windows push archive's access list and crafted entries` | [Probe note](../research/2026-11-23-windows-archive-probe.md): the archive inherits `INTERACTIVE:(M,DC)`; seven crafted archives wrote nothing outside the staging directory; symbolic links pointing outside stay in the tree. The fix is a parked question below | Self-reviewed |
 | 4. Install from scratch (26) |  |  |  |
 | Closing checks |  |  |  |
 
@@ -87,4 +87,14 @@ commits finds no blocking defect, its findings fixed or recorded.
 
 ## Parked questions
 
-None yet.
+- **How should a Windows push protect its archive (follow-up 25)?** An interactive user under `C:\Users\Public` can
+  rewrite `.vmm-<id>.tar` before it is unpacked as `SYSTEM`. The probe shows the rewrite cannot write outside the
+  staging directory, but it can change what arrives and plant symbolic links pointing anywhere. The options:
+
+  - Write the archive inside a fresh directory that only `SYSTEM` and `Administrators` can write, made as
+    `push-mkdir.ps1` makes the staging directory. It closes the gap, and costs one more guest step per push.
+  - Accept the risk, and document that a push into a directory where untrusted users have write access delivers what
+    they let through.
+
+  Recommendation: the protected directory, because it reuses `push-mkdir.ps1`'s checked access list, and follow-up 23
+  needs a similar decision about the staging directory's parent, so the two can share one design.

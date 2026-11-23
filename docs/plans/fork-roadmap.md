@@ -152,9 +152,11 @@ Reviews of earlier work found these. None blocks the server's use.
 25. **A Windows push's archive inherits its parent's access list.** The guest agent writes `.vmm-<id>.tar` beside the
     target before the staging directory exists. Under `C:\Users\Public`, files that `SYSTEM` creates inherit
     `INTERACTIVE:(M,DC)`, so an interactive user could rewrite the archive before `tar.exe` unpacks it as `SYSTEM`.
-    `tar.exe` refuses absolute paths and `..` by default, but whether a crafted hard-link or symbolic-link entry
-    reaches outside the staging directory is untested. Check the archive's `icacls` list on `t-win11`, then probe
-    such entries, or write the archive into a directory only `SYSTEM` and `Administrators` can write.
+    A probe on `t-win11` confirmed that list, and found that `tar.exe -x -o` keeps crafted symbolic-link, hard-link,
+    `..` and absolute entries inside the staging directory
+    ([probe note](../research/2026-11-23-windows-archive-probe.md)). A rewritten archive can still change what the
+    push delivers, and leave symbolic links that point anywhere in the pushed tree. Decide whether to write the
+    archive into a directory only `SYSTEM` and `Administrators` can write, or to accept the risk.
 26. **No evidence shows an agent installing a VM from scratch.** One of the project's success signals is an agent
     that sets up a new VM from an installer ISO with no template, such as CachyOS, and leaves it booted and usable.
     `create_vm` takes an installer ISO, and `screen-installer.json` drives only the start of the Debian installer.
