@@ -498,6 +498,24 @@ a row.
 
 ## Execution record
 
+Run rules, re-read after any compaction or resume:
+
+- Answer questions from this plan, the design, the roadmap and the files they name.
+- Make reversible calls yourself, and record each under "Judgement calls" with its reason and how to undo it.
+- Park what only the project owner can answer under "Parked questions", with options and a recommendation; continue.
+- Run every command standalone from the repository root: no `cd … &&`, no `git -C`, nothing chained after a commit.
+- Commit this record's update with each landed unit, and keep working past a progress report.
+
+Order: 17, 18, 3, then 4 to 16 by the diagram. Units 1 and 2 landed in follow-ups run 2.
+
+Judgement calls:
+
+- Unit 17: after a failed `taskkill`, `stop.ps1` ends the listed processes still running itself, rather than only
+  rechecking them, because the probe found a child that `taskkill` exit 128 leaves running. Undo: drop the
+  `Stop-Process` line in the recheck loop, which turns those cases back into exit 5.
+
+Parked questions: none yet.
+
 The run's goal:
 
 - **Objective.** Units 1 to 18 are committed on `main`, each with its row here.
@@ -535,5 +553,5 @@ The command that arms the run:
 | 14. `vm_stats` |  |  |  |
 | 15. Test-bed cases and docs |  |  |  |
 | 16. Final gate and reviews |  |  |  |
-| 17. `job_stop` on Windows: taskkill statuses |  |  |  |
+| 17. `job_stop` on Windows: taskkill statuses | `fix(jobs): end a Windows job's tree when taskkill fails on a racing root` | [Probe note](../research/2026-11-23-taskkill-race-probe.md). Before: 24 cycles gave exit 0 ×8, 128 ×14 (2 with a surviving child), 255 ×2. After, with the race injected: 30 cycles, exit 0 ×20 and 7 ×10, no survivors. Unit tests with the fake Windows guest for exits 7 and 5; parse test; `win-jobs.json` passed 5 times in a row on the rebuilt server, every stop with status 0 | Self-reviewed |
 | 18. `templates-reset-saved.json` waits for the login prompt |  |  |  |

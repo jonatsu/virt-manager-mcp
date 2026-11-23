@@ -70,6 +70,9 @@ Each release's section lists what changed for people who run the server and for 
 
 ### Fixed
 
+- `job_stop` on Windows no longer fails with "taskkill failed" when the job's root process exits during the stop. The
+  stop ends whatever is left of the tree it listed, including a child `taskkill` would have left running, and says
+  which status `taskkill` returned.
 - `exec` with PowerShell on Windows no longer fills stderr with CLIXML progress records such as "Preparing modules
   for first use".
 - `exec` refuses `args` together with `command`, and runs nothing. It used to run the command line and drop the

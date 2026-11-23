@@ -167,10 +167,11 @@ Reviews of earlier work found these. None blocks the server's use.
 27. **`deny.toml` ignores the unmaintained-`chrono` advisory.** RUSTSEC-2026-0543 marks `chrono` unmaintained, and
     `rmcp` 3.9.0 and `schemars` 1.2.3 depend on it; this crate does not use it. Once neither depends on `chrono`,
     remove the entry, and `cargo deny check advisories` must still pass.
-28. **`job_stop` on Windows failed once with `taskkill failed with 255`.** In follow-ups run 2, one of three runs of
-    `win-jobs.json` failed this way on `t-win11`, stopping `ping.exe -n 300 127.0.0.1` with `force`. The job still
-    ended, and `job_list` then read "ended without status". The next run passed. Find which `taskkill` exit statuses
-    mean the tree is already gone, and repeat the case to measure how often it happens.
+28. **Done: `job_stop` on Windows no longer fails when the tree is already going.** `taskkill /T /F` exits 255 when
+    the root exits while it walks the tree, and 128 when the root is gone before it starts, which can leave a child
+    running ([probe note](../research/2026-11-23-taskkill-race-probe.md)). `stop.ps1` lists the tree first and, after
+    a failed `taskkill`, ends what is left of the list itself; `job_stop` then reports the job ended and names the
+    status.
 29. **Done: `create_vm` can make a UEFI VM without Secure Boot.** libvirt picks the `secure-enrolled` firmware
     descriptor, so an unsigned installer such as CachyOS's was refused at boot
     ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). `create_vm` and template entries take a

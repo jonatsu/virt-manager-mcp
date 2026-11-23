@@ -117,13 +117,18 @@ pub fn stop(agent: &Agent, os: GuestOs, id: &Uuid, force: bool) -> Result<String
     let (name, number) = if force { ("KILL", "9") } else { ("TERM", "15") };
     let out = agent.exec(&stop_spec(os, id, number), HELPER_TIMEOUT, HELPER_OUTPUT)?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let windows_ended = || {
+        format!(
+            "ended job {id}'s process tree with taskkill /T /F; on Windows, force makes no difference"
+        )
+    };
     match out.exit_code {
         Some(0) => Ok(match os {
             GuestOs::Linux => format!("sent {name} to job {id}"),
-            GuestOs::Windows => format!(
-                "ended job {id}'s process tree with taskkill /T /F; on Windows, force makes no difference"
-            ),
+            GuestOs::Windows => windows_ended(),
         }),
+        // taskkill failed, but the tree went anyway: the script ended what was left of it.
+        Some(7) if os == GuestOs::Windows => Ok(format!("{} ({text})", windows_ended())),
         Some(3 | 4) => bail!("job {id} is {text}"),
         Some(6) => bail!("no job {id} in this guest"),
         _ => bail!("could not stop job {id}: {text}"),
@@ -815,6 +820,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, format!("job {id} is not running"));
+    }
+
+    #[test]
+    fn a_windows_stop_whose_taskkill_failed_reports_whether_the_tree_went() {
+        let id = Uuid::new_v4();
+        let gone = WinGuest::new(7, "ended; taskkill exited 255 after the tree had gone\r\n");
+        let message = stop(&Agent::new(&gone, 10), GuestOs::Windows, &id, true).unwrap();
+        assert!(message.contains("force makes no difference"), "{message}");
+        assert!(
+            message.ends_with("(ended; taskkill exited 255 after the tree had gone)"),
+            "{message}"
+        );
+
+        let running = WinGuest::new(5, "taskkill failed with 128\r\n");
+        let error = stop(&Agent::new(&running, 10), GuestOs::Windows, &id, true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!("could not stop job {id}: taskkill failed with 128")
+        );
+        // The script ends the processes it listed before taskkill, each matched by ID and start time.
+        assert!(WIN_STOP.contains("Get-CimInstance Win32_Process"));
+        assert!(WIN_STOP.contains("Stop-Process -Id $p.Id -Force"));
+        assert!(WIN_STOP.contains("exit 7"));
     }
 
     #[test]
