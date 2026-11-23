@@ -80,6 +80,11 @@ Each release's section lists what changed for people who run the server and for 
   memory every 5 s, and the crash action `manage.on_crash`: `preserve`, the default, keeps a crashed VM stopped in
   place until `stop_vm` with `force: true`, and `destroy` stops it. Any other value stops the server at start.
   `limits.max_events` (default 256) bounds the events kept for each VM. Existing VMs keep their XML.
+- `vm_events` lists what happened to a VM since the server started: starts, stops, pauses, crashes, reboots,
+  watchdog firings, the guest agent connecting and disconnecting, and gaps while the libvirt connection was lost.
+  Each record names its cause: the tool that caused it, `expiry` for the server's own expiry sweep, or `outside`,
+  which includes expiries by the `virtmanager-mcp sweep` command. It works on a VM in any state and in read-only
+  mode, and takes `since` and `kinds`.
 - Each VM keeps the console output of one earlier run. When a new run replaces a session, or `console_close`,
   `reset_vm` or `snapshot_revert` ends one, `console_read` with `run: "previous"` reads its output, closed, with the
   reason it ended and its own generation. `console_read` and `console_close` work on a stopped VM.

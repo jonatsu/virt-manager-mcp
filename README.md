@@ -85,6 +85,7 @@ The path is passed as data, never spliced into shell code.
 | `read_file`, `list_dir`, `stat_path` | ✅ |
 | `vm_addresses`: a running VM's addresses per interface, from libvirt's DHCP lease, else the guest agent, else ARP | ✅ (lease and ARP only) |
 | `console_open`, `console_read`, `console_close` | ✅ |
+| `vm_events`: what happened to a VM since the server started (starts, stops, crashes, reboots, watchdog, guest agent, connection gaps), with what caused each | ✅ |
 | `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text, background copy finished), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
 | `job_read`, `job_list`: a background job's output and state | ✅ |
 | `job_start`, `job_stop`: run a long command detached in a Linux or Windows guest, and stop it | ❌ |
@@ -337,11 +338,12 @@ max_disk_gib = 32
   It starts and waits for the guest agent by default. With `lifetime_minutes` (at most
   `max_lifetime_minutes`), the server deletes the VM and its disks once the time has passed: every
   running server checks once a minute, and `virtmanager-mcp sweep` does one check, for a systemd timer
-  when no server runs. `reset_vm` returns such a VM to the template's state: new disks, no snapshots,
-  same name, MAC address, hardware and expiry. `list_templates` shows the usable templates; one whose
-  volume is missing, not qcow2 or attached to any VM, or whose user data is unreadable, does not start
-  with a `#cloud-config` line or exceeds 1 MiB, is hidden, and the server log says why. Never change
-  or delete a template volume while VMs use it.
+  when no server runs. A running server's `vm_events` records its own expiry as cause `expiry`, and one
+  by `virtmanager-mcp sweep` as `outside`. `reset_vm` returns such a VM to the template's state: new
+  disks, no snapshots, same name, MAC address, hardware and expiry. `list_templates` shows the usable
+  templates; one whose volume is missing, not qcow2 or attached to any VM, or whose user data is
+  unreadable, does not start with a `#cloud-config` line or exceeds 1 MiB, is hidden, and the server
+  log says why. Never change or delete a template volume while VMs use it.
 
   ```toml
   [manage]

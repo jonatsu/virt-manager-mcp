@@ -190,7 +190,8 @@ takes the tool's name as its `cause`, whichever client made the call. Destroys b
 
 A `stop_vm` that gives up waiting while the guest powers off later produces an outside `stopped`; the tool description
 says so. A reboot an agent starts with `exec` is also `outside`, because the server cannot tell it from any other guest
-reboot.
+reboot. A VM that the `sweep` command, run as its own process, destroys gets the cause `outside`, because only
+the server process that destroys a VM can mark it.
 
 #### The notice in replies
 

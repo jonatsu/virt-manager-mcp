@@ -39,5 +39,15 @@
       "error": true,
       "contains": "VM 'trial-deb13' is not in allowed_vms"
     }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "trial-deb13"
+    },
+    "expect": {
+      "error": true,
+      "contains": "VM 'trial-deb13' is not in allowed_vms"
+    }
   }
 ]

@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 
 use crate::config::Config;
+use crate::events::{Cause, Kind};
 use crate::manage::{self, Owner};
 use crate::server::State;
 
@@ -50,7 +51,7 @@ pub struct Outcome {
 /// # Errors
 ///
 /// Fails when the configuration does not allow a sweep or the VMs cannot be listed.
-pub fn sweep_once(state: &State) -> Result<Outcome> {
+pub fn sweep_once(state: &State, serving: bool) -> Result<Outcome> {
     if let Some(why) = refusal(&state.hv.config) {
         bail!("not sweeping: {why}");
     }
@@ -58,8 +59,20 @@ pub fn sweep_once(state: &State) -> Result<Outcome> {
     let now = manage::now_epoch();
     let mut outcome = Outcome::default();
     for uuid in select(&candidates, now) {
-        match manage::expire(&state.hv, uuid, now) {
+        // Only the serving process sees the events, so only it marks its destroys; the sweep command's read as outside.
+        let expected = serving.then(|| {
+            state
+                .events
+                .expect(uuid, Cause::Expiry, &[Kind::Shutdown, Kind::Stopped])
+        });
+        let expired = manage::expire(&state.hv, uuid, now);
+        if let Some(id) = expected {
+            state.events.finish(id, manage::now_epoch());
+        }
+        match expired {
             Ok(Some(msg)) => {
+                state.consoles.forget(uuid);
+                state.events.drop_vm(uuid);
                 outcome.deleted += 1;
                 tracing::info!("{msg}");
             }
@@ -80,7 +93,7 @@ pub fn sweep_once(state: &State) -> Result<Outcome> {
 ///
 /// Fails when the sweep cannot run or any deletion failed.
 pub fn run_command(state: &State) -> Result<()> {
-    let Outcome { deleted, failed } = sweep_once(state)?;
+    let Outcome { deleted, failed } = sweep_once(state, false)?;
     tracing::info!("sweep done: {deleted} expired VMs deleted, {failed} failed");
     if failed > 0 {
         bail!("{failed} expired VMs could not be deleted; the log above names them");
@@ -99,8 +112,9 @@ pub fn spawn(state: Arc<State>) -> Result<()> {
         .spawn(move || {
             loop {
                 // A panic in one sweep must not end expiry for the rest of the process.
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep_once(&state)))
-                {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sweep_once(&state, true)
+                })) {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => tracing::error!("expiry sweep: {e:#}"),
                     Err(_) => {

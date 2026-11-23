@@ -23,7 +23,7 @@ use crate::config::Config;
 use crate::console::{
     CLOSED_BY_CONSOLE_CLOSE, Consoles, LibvirtOpener, OpenRequest, Pacing, Run, VmId,
 };
-use crate::events::Events;
+use crate::events::{Cause, Events, Kind, Record};
 use crate::guestpath::GuestPath;
 use crate::hypervisor::{self, Hypervisor};
 use crate::start::Starting;
@@ -349,6 +349,17 @@ pub struct ConsoleOpenParams {
     /// attached to.
     #[serde(default)]
     pub force: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VmEventsParams {
+    pub vm: String,
+    /// Return only records after this sequence number: pass `next` from the previous call. Default 0, the whole log.
+    pub since: Option<u64>,
+    /// Return only these kinds. Without `kinds`, the records returned count as seen, so no later reply announces
+    /// them again.
+    pub kinds: Option<Vec<Kind>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1187,6 +1198,7 @@ impl VirtServer {
         ),
         description = "Shut down a VM. By default asks the guest to shut down cleanly (ACPI power button or guest \
         agent) and waits for it; with force: true it is powered off immediately, which can lose unsaved data. \
+        If the wait runs out while the guest powers off later, vm_events records that stop with cause `outside`. \
         Only VMs with power_control: true in list_vms can be stopped."
     )]
     async fn stop_vm(
@@ -1202,7 +1214,13 @@ impl VirtServer {
                 name: &p.vm,
             };
             let generation = s.consoles.generation(vm);
-            let off = s.hv.stop(&p.vm, p.force, wait)?;
+            // The stop and its shutdown are this call's; a guest that powers off after the wait gave up is outside.
+            let expected = s
+                .events
+                .expect(&uuid, Cause::Tool("stop_vm"), &[Kind::Shutdown, Kind::Stopped]);
+            let off = s.hv.stop(&p.vm, p.force, wait);
+            s.events.finish(expected, manage::now_epoch());
+            let off = off?;
             let msg = if off {
                 // Keep any console session, so a later console_read reports the console closed instead of "no
                 // console open"; wait for it to record the end first, so even a read with wait_ms 0 sees it.
@@ -1354,6 +1372,39 @@ impl VirtServer {
                 ContentBlock::text(meta.to_string()),
                 ContentBlock::text(text),
             ])
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
+        description = "List what happened to a VM since this server started: starts, stops, pauses, crashes, \
+        reboots, watchdog firings, the guest agent connecting and disconnecting, and gaps when the server lost its \
+        libvirt connection. Each record has `seq`, `time` (UTC), `kind`, `detail` and `cause`: the tool that caused \
+        it, `expiry` for the server's expiry sweep, or `outside` for the guest or anything else. Returns `next` to \
+        pass as `since` on the following call, and how many old records the bound dropped. Works on a VM in any \
+        state. After a crash, read the console's previous run (console_read run: \"previous\") for the panic text."
+    )]
+    async fn vm_events(
+        &self,
+        Parameters(p): Parameters<VmEventsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            // Looked up like every other tool's VM, so a hidden or deleted VM answers as they do.
+            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
+            let read = s
+                .events
+                .read(&uuid, p.since.unwrap_or(0), p.kinds.as_deref());
+            let reply = json!({
+                "records": read.records.iter().map(Record::to_json).collect::<Vec<_>>(),
+                "next": read.next,
+                "dropped": read.dropped,
+            });
+            Ok(vec![json_block(&reply)?])
         })
         .await
     }
@@ -1916,9 +1967,19 @@ impl VirtServer {
             // Claimed before the power-off, so no start can boot the VM while its disks are replaced.
             let _starting = s.starting.claim(&uuid, &p.vm)?;
             // The session moves to the previous run, so the output from before the reset stays readable.
-            let mut msg = manage::reset(&s.hv, &p.vm, || {
+            let mut expected = None;
+            let reset = manage::reset(&s.hv, &p.vm, || {
                 s.consoles.close(&uuid, "closed by reset_vm");
-            })?;
+                expected = Some(s.events.expect(
+                    &uuid,
+                    Cause::Tool("reset_vm"),
+                    &[Kind::Shutdown, Kind::Stopped],
+                ));
+            });
+            if let Some(id) = expected {
+                s.events.finish(id, manage::now_epoch());
+            }
+            let mut msg = reset?;
             let started = manage::reset_start(&s.hv, &p.vm)
                 .and_then(|(dom, flags)| s.boot_claimed(&dom, &uuid, &p.vm, flags, "reset_vm"));
             match started {
@@ -1953,8 +2014,9 @@ impl VirtServer {
         self.blocking(move |s| {
             let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
             let msg = manage::delete(&s.hv, &p.vm)?;
-            // Nothing can read a deleted VM's output again, so none is kept.
+            // Nothing can read a deleted VM's output or events again, so none is kept.
             s.consoles.forget(&uuid);
+            s.events.drop_vm(&uuid);
             Ok(vec![ContentBlock::text(msg)])
         })
         .await
@@ -2475,7 +2537,7 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 44);
+        assert_eq!(tools.len(), 45);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"
@@ -2544,8 +2606,11 @@ mod tests {
                 "snapshot_list",
                 "stat_path",
                 "vm_addresses",
+                "vm_events",
             ]
         );
+        // Read-only mode keeps the diagnostics.
+        assert!(!read_only_mode.contains(&"vm_events"));
         // Input to the guest can run anything, such as `rm -rf /`; so can wait_for's command condition.
         for name in [
             "exec",
