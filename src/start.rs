@@ -101,9 +101,15 @@ pub struct BootRequest<'a> {
 /// The kinds of event a paused boot and its resume produce.
 const BOOT_KINDS: &[Kind] = &[Kind::Started, Kind::Paused, Kind::Resumed];
 
-/// The kinds of event a revert to a running snapshot produces: the old run's stop when the VM was running, and the
-/// paused start and the resume.
-const REVERT_KINDS: &[Kind] = &[Kind::Stopped, Kind::Started, Kind::Paused, Kind::Resumed];
+/// The kinds of event a revert to a running snapshot produces: the old run's shutdown and stop when the VM was running,
+/// and the paused start and the resume.
+const REVERT_KINDS: &[Kind] = &[
+    Kind::Shutdown,
+    Kind::Stopped,
+    Kind::Started,
+    Kind::Paused,
+    Kind::Resumed,
+];
 
 /// Boots a VM: starts it paused, opens its console in libvirt's safe mode, replacing this server's own session, and
 /// resumes it. A console that cannot be opened is reported in the reply, and the VM still runs. Returns what the reply
@@ -282,9 +288,11 @@ impl State {
         };
         let done = format!("reverted '{name}' to snapshot '{snapshot}'");
         if !target.running {
-            let id = self
-                .events
-                .expect(&uuid, Cause::Tool("snapshot_revert"), &[Kind::Stopped]);
+            let id = self.events.expect(
+                &uuid,
+                Cause::Tool("snapshot_revert"),
+                &[Kind::Shutdown, Kind::Stopped],
+            );
             let reverted = manage::snapshot_revert(&target, snapshot);
             self.events.finish(id, now_epoch());
             reverted?;

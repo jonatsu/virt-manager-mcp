@@ -1,13 +1,6 @@
 //! The per-VM event log: what happened to each visible VM, who caused it, and which records an agent has yet to be
 //! told about. Plain data only: the callbacks and the worker that feed it live elsewhere, and nothing here calls
 //! libvirt. Times are epoch seconds, passed in by the caller so tests can drive them.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the event worker and the event tools of later units use it"
-    )
-)]
 
 pub mod ffi;
 pub mod worker;
@@ -21,6 +14,9 @@ use virt::sys;
 
 /// How long after a tool returns its expectation still claims a matching record.
 pub const EXPECTATION_WINDOW_SECS: u64 = 5;
+
+/// How long after its window closed `finish` keeps an expectation, for an event the worker reaches late.
+const PRUNE_MARGIN_SECS: u64 = 60;
 
 /// A second `reboot` event within this many seconds of the first is the same reboot: libvirt sends a guest reboot
 /// twice, a few milliseconds apart.
@@ -343,6 +339,13 @@ impl Events {
         if let Some(e) = inner.expectations.iter_mut().find(|e| e.id == id.0) {
             e.until = Some(now + EXPECTATION_WINDOW_SECS);
         }
+        // Windows closed well before now go here too, so tool calls on a server that sees no events do not grow the
+        // list. The margin keeps a window for an event the worker handles late, as during a reconnect; `append`
+        // prunes by each event's own time.
+        inner.expectations.retain(|e| {
+            e.until
+                .is_none_or(|until| now <= until.saturating_add(PRUNE_MARGIN_SECS))
+        });
     }
 
     /// Adds a libvirt event to its VM's log, and returns the record's `seq` when it made or changed one.
@@ -910,6 +913,22 @@ mod tests {
             causes,
             [Cause::Tool("stop_vm"), Cause::Outside, Cause::Outside]
         );
+    }
+
+    #[test]
+    fn finished_expectations_are_dropped_without_any_event() {
+        let events = Events::new(16);
+        for at in [100, 101, 102] {
+            let id = events.expect(UUID, Cause::Tool("stop_vm"), &[Kind::Stopped]);
+            events.finish(id, at);
+        }
+        assert_eq!(events.lock().expectations.len(), 3);
+        let open = events.expect(UUID, Cause::Tool("stop_vm"), &[Kind::Stopped]);
+        let id = events.expect(UUID, Cause::Tool("stop_vm"), &[Kind::Stopped]);
+        events.finish(id, 200);
+        // The three closed windows are gone; the open one and the one just finished stay.
+        assert_eq!(events.lock().expectations.len(), 2);
+        events.finish(open, 201);
     }
 
     #[test]

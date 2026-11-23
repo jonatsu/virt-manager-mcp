@@ -530,7 +530,8 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
 - `wait_for` returns within `limits.max_wait_secs` (default 50 s, below the 60 s at which some clients cut a call)
   plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
   between. A console condition without `since` starts where the last `console_write` began, and a match moves that
-  point past it. A wait never changes what `console_read` returns.
+  point past it. On a console the server captured from boot, that point is offset 0 until the first write, so a wait
+  also sees a prompt printed before the call. A wait never changes what `console_read` returns.
 - `console_write` can pause between bytes (`inter_char_delay_ms`) or between chunks (`chunk_size` with
   `chunk_delay_ms`), up to 1000 ms each, for firmware and bootloaders that drop input sent back to back. A write
   whose pauses would exceed `limits.max_wait_secs` is refused.

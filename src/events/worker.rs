@@ -121,15 +121,22 @@ impl Listener {
             if let Some(registration) = state.registration.take() {
                 old.deregister(registration);
             }
+            // A registration that failed earlier ends here when this one succeeds, so the worker does not register a
+            // second set; its time without callbacks joins this gap.
+            let mut unregistered = None;
             match new.register(&self.queue) {
-                Ok(registration) => state.registration = Some(registration),
+                Ok(registration) => {
+                    state.registration = Some(registration);
+                    unregistered = state.unregistered_since.take();
+                }
                 Err(e) => {
                     tracing::error!("registering libvirt event callbacks after a reconnect: {e:#}");
                     state.unregistered_since.get_or_insert(now);
                 }
             }
             state.reconnected_at = now;
-            state.lost_at.take().unwrap_or(alive_at)
+            let lost = state.lost_at.take().unwrap_or(alive_at);
+            unregistered.map_or(lost, |since| since.min(lost))
         };
         self.events.record_gap(from, now);
         self.compare(new, now);
@@ -528,6 +535,31 @@ mod tests {
         assert!(!l.needs_register());
         let gap = l.events().read("a", 0, None).records.pop().unwrap();
         assert_eq!(gap.gap, Some((10, 15)));
+    }
+
+    #[test]
+    fn a_good_reconnect_after_a_failed_registration_registers_once() {
+        let l = listener();
+        l.events().record_during_gap("a", "t-a", true, 1);
+        let failing = FakeSession::default();
+        failing.fail_register.set(true);
+        l.reconnected(&FakeSession::default(), &failing, 3, 10);
+        assert!(l.needs_register());
+        // register_again reconnects first when the connection died, and that reconnect registers.
+        let good = FakeSession::default();
+        l.reconnected(&failing, &good, 12, 14);
+        assert!(!l.needs_register());
+        l.register_again(&good, 15).unwrap();
+        assert_eq!(good.registered.get(), 1);
+        // The time without callbacks since 10 is one gap with the reconnect's, not a second one.
+        let gaps: Vec<_> = l
+            .events()
+            .read("a", 0, None)
+            .records
+            .into_iter()
+            .filter_map(|r| r.gap)
+            .collect();
+        assert_eq!(gaps.last(), Some(&(10, 14)));
     }
 
     #[test]

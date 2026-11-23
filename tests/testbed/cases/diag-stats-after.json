@@ -62,5 +62,45 @@
       "contains": "not created by this server",
       "absent": "\"state\""
     }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-dst"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not created by this server",
+      "absent": "\"kind\""
+    }
+  },
+  {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-dst",
+      "timeout_secs": 0,
+      "conditions": [
+        {
+          "kind": "event",
+          "since": 0
+        }
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "not created by this server",
+      "absent": "\"kind\""
+    }
+  },
+  {
+    "tool": "console_read",
+    "args": {
+      "vm": "t-dst",
+      "run": "previous"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not created by this server"
+    }
   }
 ]

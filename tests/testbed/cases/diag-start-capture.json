@@ -115,6 +115,29 @@
     }
   },
   {
+    "tool": "__sleep__",
+    "args": {
+      "secs": 2
+    }
+  },
+  {
+    "tool": "vm_events",
+    "args": {
+      "vm": "t-ds",
+      "kinds": [
+        "shutdown"
+      ]
+    },
+    "expect": {
+      "contains": [
+        "\"cause\": \"stop_vm\"",
+        "\"cause\": \"reset_vm\"",
+        "\"cause\": \"snapshot_revert\""
+      ],
+      "absent": "\"cause\": \"outside\""
+    }
+  },
+  {
     "tool": "exec",
     "args": {
       "vm": "t-ds",

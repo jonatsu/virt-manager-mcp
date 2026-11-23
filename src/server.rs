@@ -1209,7 +1209,9 @@ impl VirtServer {
         self.blocking(move |s| {
             let wait = Duration::from_secs(p.wait_secs.unwrap_or(60).min(300));
             // Only the session open before the stop is marked, not one a concurrent start and open made meanwhile.
-            let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
+            // power_domain refuses a VM the server may not power before any expectation is recorded, so a refused
+            // call claims none of the guest's own events.
+            let uuid = s.hv.power_domain(&p.vm)?.get_uuid_string()?;
             let vm = VmId {
                 uuid: &uuid,
                 name: &p.vm,
@@ -1290,7 +1292,8 @@ impl VirtServer {
         description = "Attach to the VM's serial/virtio text console (like `virsh console`). A VM this server \
         started already has its console open from its first byte, and console_open attaches to that session; \
         otherwise output is buffered from this point on. Read it with console_read. Needs a <console>/<serial> device \
-        in the VM and a getty or other program on it in the guest."
+        in the VM and a getty or other program on it in the guest. A Windows guest writes nothing to its serial \
+        console; use the screen tools for it."
     )]
     async fn console_open(
         &self,
@@ -1336,7 +1339,8 @@ impl VirtServer {
         second; a closed console returns at once. Works on a stopped VM, so the output of a console that ended with \
         the VM stays readable. `run: \"previous\"` reads the run before the current one, which a restart, \
         console_close, reset_vm or snapshot_revert moved aside, as closed with the reason it ended. After a start, \
-        reset or template create by this server, `since: 0` reads the boot from its first byte."
+        reset or template create by this server, `since: 0` reads the boot from its first byte. A Windows guest writes \
+        nothing to its serial console, so read its screen with the screen tools instead."
     )]
     async fn console_read(
         &self,
@@ -1388,7 +1392,8 @@ impl VirtServer {
         libvirt connection. Each record has `seq`, `time` (UTC), `kind`, `detail` and `cause`: the tool that caused \
         it, `expiry` for the server's expiry sweep, or `outside` for the guest or anything else. Returns `next` to \
         pass as `since` on the following call, and how many old records the bound dropped. Works on a VM in any \
-        state. After a crash, read the console's previous run (console_read run: \"previous\") for the panic text."
+        state. After a crash, read the panic text with console_read: in the current run while the crashed VM stays \
+        in place, and in the previous run (run: \"previous\") once the VM has started again."
     )]
     async fn vm_events(
         &self,
@@ -1538,7 +1543,9 @@ impl VirtServer {
         running PID, and each screen_text condition's last OCR text, to loosen a pattern that missed. With \
         `screenshot: true`, a match attaches a screenshot and gives \
         its size as `screenshot`, or a `screenshot_note` when it could not be taken. A console condition without \
-        `since` starts where the last console_write began, so write first, then wait. A wait never changes what \
+        `since` starts where the last console_write began, so write first, then wait; on a console this server \
+        captured from boot it starts at offset 0 until the first write, so it also sees a prompt printed before the \
+        call. A wait never changes what \
         console_read returns. `transfer_done` (a copy that replied with a `transfer` ID has ended) must be the only \
         condition of its wait and takes no screenshot; it matches with the copy's own reply as `text`, or its \
         failure as `error`, and times out with the bytes moved so far. It answers even after the VM stopped. \
@@ -2011,10 +2018,10 @@ impl VirtServer {
             let uuid = s.hv.lookup(&p.vm)?.get_uuid_string()?;
             // Claimed before the power-off, so no start can boot the VM while its disks are replaced.
             let _starting = s.starting.claim(&uuid, &p.vm)?;
-            // The session moves to the previous run, so the output from before the reset stays readable.
+            // The hook runs under the connection lock, so it only records the expectation: closing the console takes
+            // the console lock, which an open holds while it takes the connection lock.
             let mut expected = None;
             let reset = manage::reset(&s.hv, &p.vm, || {
-                s.consoles.close(&uuid, "closed by reset_vm");
                 expected = Some(s.events.expect(
                     &uuid,
                     Cause::Tool("reset_vm"),
@@ -2023,6 +2030,9 @@ impl VirtServer {
             });
             if let Some(id) = expected {
                 s.events.finish(id, manage::now_epoch());
+                // Once the reset got as far as the power-off, the session moves to the previous run, so the output
+                // from before the reset stays readable, whether the reset then succeeded or failed.
+                s.consoles.close(&uuid, "closed by reset_vm");
             }
             let mut msg = reset?;
             let started = manage::reset_start(&s.hv, &p.vm)
@@ -2300,8 +2310,7 @@ impl VirtServer {
     }
 }
 
-/// The notice for a VM's records that have one and that no reply has announced yet, which moves the VM's seen-cursor
-/// past them. `lookup` gives the VM's UUID and whether it sits in libvirt's crashed state, or fails for a VM the server
+/// The notice for a VM's records that have one and that no reply has announced yet, which marks them as shown. `lookup` gives the VM's UUID and whether it sits in libvirt's crashed state, or fails for a VM the server
 /// may not see, which then gets no notice.
 fn take_notice(
     events: &Events,

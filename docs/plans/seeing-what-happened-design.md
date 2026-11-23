@@ -111,9 +111,16 @@ session's. A VM that config hides, or one deleted since, gets the same "not foun
 ### The previous run
 
 Each VM has one previous-run slot. When a start replaces a session from an earlier run (a different domain ID), or
-`console_close` ends one, the old session's buffer, generation, device and end reason move into the slot. Its reader is
-joined and its stream released first, and the slot's earlier content is dropped. A session that a power-off closed
-stays the current run until then, so it remains readable as before.
+`console_close`, `reset_vm` or `snapshot_revert` ends one, the old session's buffer, generation, device and end reason
+move into the slot. Its reader is joined and its stream released first, and the slot's earlier content is dropped. A
+session that a power-off closed stays the current run until then, so it remains readable as before. A start that cannot
+open its console still moves the earlier run's session, so `console_read` never shows an old run as current while a new
+one runs. `delete_vm` drops both runs.
+
+A moved session keeps the reason its stream ended. One moved while still live reads "replaced by a new run", and one
+that a tool ended reads "closed by" with the tool's name, such as "closed by console_close". `reset_vm` moves the
+session only after its power-off, so its run usually keeps the reason the power-off gave the stream. A `console_open`
+over a closed session of the same domain ID drops the old output, as `force` does.
 
 `console_read` takes `run: "current"` (default) or `run: "previous"`. A previous run keeps its own generation and
 offsets, and a read reports it as closed with the reason it ended. `wait_for`'s console condition reads only the current
@@ -201,12 +208,14 @@ any, the reply gains a separate trailing text block, such as
 `VM 't-deb' crashed (panicked) at 14:02:11Z; see vm_events since 41`, so a reply whose first block is JSON stays
 parseable. The notice never replaces a tool's result or error.
 
-Each VM's log has one seen-cursor in the server process, because MCP protocol `2026-07-28` removes sessions and tells
-servers not to treat a stdio process or a connection as one ([research](../research/2026-11-15-mcp-sessions.md)). The
-first reply, from any client, that names the VM carries the notice; with several agents on one server, `vm_events`
-lists every record for the others. Reading and advancing the cursor happen under one lock, and the cursor advances
-only over records actually returned: by a notice, by `vm_events` without a `kinds` filter, or by a `wait_for` event
-match. A `vm_events` call filtered by `kinds` advances nothing, so a crash it did not return is still announced.
+Each VM's log keeps, in the server process, the set of records a reply has shown, because MCP protocol `2026-07-28`
+removes sessions and tells servers not to treat a stdio process or a connection as one
+([research](../research/2026-11-15-mcp-sessions.md)). The first reply, from any client, that names the VM carries the
+notice; with several agents on one server, `vm_events` lists every record for the others. Reading and marking happen
+under one lock, and only records actually returned count as shown: by a notice, by `vm_events` without a `kinds`
+filter, or by a `wait_for` event match. A `vm_events` call filtered by `kinds` marks nothing, and a read that starts
+past an unannounced record leaves it unannounced, so a crash no reply returned is still announced. A reply looks the VM
+up for its notice only when its log has a record to announce.
 
 A crash notice under `preserve` tells the agent that the VM holds its memory until it is stopped with `force: true`.
 
@@ -224,7 +233,9 @@ event could land between two calls. A match returns the record.
 
 The wait evaluates event conditions before its check for a stopped VM, so a wait for a crashed console line or a
 `crashed` event, whichever comes first, returns the event. When every condition is an event, the wait skips the
-running check altogether, so an agent can also wait on a stopped VM for `started`.
+running check altogether, so an agent can also wait on a stopped VM for `started`. A crash's record reaches the log
+just after libvirt reports the stop, so once the VM check finds the VM stopped, or a console condition finds its session
+closed, a wait with event conditions reads the log for one second more before it ends as closed.
 
 ### `vm_stats`
 
@@ -281,7 +292,7 @@ screen tools for a Windows boot.
 - No reply holds an event, console output or statistics of a VM that config hides, or of a deleted VM.
 - A visible, defined VM's retained diagnostics are bounded: two console buffers and `limits.max_events` records. A
   deleted or undefined VM keeps none.
-- A notice never replaces a tool's result or error, and announces each record once per MCP session.
+- A notice never replaces a tool's result or error, and announces each record once per server process.
 - An event callback makes no libvirt call and cannot unwind into libvirt.
 - `manage.on_crash` accepts only `preserve` and `destroy`, and `limits.max_events` is positive.
 - Read-only mode keeps `vm_events` and `vm_stats`, sends no guest-agent query for `vm_stats`, and still hides every
@@ -294,9 +305,10 @@ Each needs a test that shows the refusal or the bound still holds, as `CLAUDE.md
 
 - `src/config.rs`: `manage.on_crash` as an enum, and `limits.max_events` with its check.
 - `src/manage.rs`: the panic device, the stats period and `<on_crash>` in `domain_xml`; reset's start moved onto the
-  shared start operation; the expiry's destroys marked for attribution.
-- `src/events.rs` (new): the per-VM logs keyed by UUID, `seq`, the kind mapping, expectations, per-session cursors and
-  the notice text, all without FFI and unit-tested on their own.
+  shared start operation.
+- `src/sweep.rs`: the expiry's destroys marked for attribution when the server process runs the sweep.
+- `src/events.rs` (new): the per-VM logs keyed by UUID, `seq`, the kind mapping, expectations, the records each log has
+  shown and the notice text, all without FFI and unit-tested on their own.
 - `src/events/ffi.rs` (new): registration and deregistration through `virt-sys`, the callbacks and their queue, and the
   close callback. `src/events/worker.rs` (new): the event worker and the reconnect hook.
 - `src/hypervisor.rs`: one reconnect function, which runs the events hook under the connection's write lock.
@@ -337,12 +349,12 @@ New cases then cover:
 - `vm_stats` with and without a guest agent, in read-only mode, and on `t-win11`;
 - `console_open` attaching to a live capture, and a VM deleted and recreated under the same name.
 
-Four existing cases expect `console_open` to report a newly opened console, and change with this outcome:
-`console-stall.json`, `templates-reset-uefi.json`, `owrt-wait.json` and `console-closed-on-power-off.json`.
+Existing cases that expect `console_open` after a start to report a newly opened console, or `start_vm` to reply
+without its capture, change with this outcome; a `console_open` with `force: true` still reports a new session.
 
 Unit tests cover the event log's bound, the kind mapping and the merged crash record, attribution, the once-only
-notice per session, filtered reads and two concurrent readers, the previous-run slot, the `on_crash` refusal, the XML
-of both create paths, and the hidden and deleted VM filters on every new reply.
+notice per server process, filtered reads and two concurrent readers, the previous-run slot, the `on_crash` refusal,
+the XML of both create paths, and the hidden and deleted VM filters on every new reply.
 
 ## Checks
 

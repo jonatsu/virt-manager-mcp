@@ -498,6 +498,8 @@ a row.
 | A lost libvirt connection and the reconnect | Restarting `libvirtd` or dropping a client needs root | Unit 10's tests with a fake source, for a reconnect from a tool call and from the close callback |
 | A notice shown once across two HTTP clients | `mcp_call.py` speaks stdio only | Unit 5's and 12's tests of two concurrent callers |
 | A guest without pvpanic support | Debian 13 ships the driver | None: design risk 4 |
+| The hidden and deleted VM refusals of `vm_events`, `vm_stats`, `wait_for` `event` and `console_read` as unit tests | Each comes from `Hypervisor::lookup`, which needs libvirt | The test-bed cases `console-refusals.json` and `diag-hidden.json` for a hidden VM and `diag-stats-after.json` for a deleted one; the notice path has its unit test |
+| `vm_stats` filesystem figures matching `df`, checked by a case | A case cannot compare numbers across two replies | Unit 14's live check on `t-st`: `used_bytes` equal to `df`'s Used, `total_bytes` to Used plus Avail |
 
 ## Execution record
 
@@ -577,6 +579,31 @@ Judgement calls:
 - Unit 14: the refusal of a hidden or deleted VM by `vm_stats` has no unit test, because it comes from
   `Hypervisor::lookup`, which needs libvirt, as for `vm_events`. The test-bed cases of unit 15 show it instead:
   `diag-hidden.json` for a hidden VM, and `diag-stats-after.json` for a deleted one. Undo: none needed.
+- Every review in the run, the final ones included, ran on Sonnet rather than Opus, because a standing instruction sends
+  every subagent to Sonnet until Anthropic's safeguard false positives are fixed. The rows' "Sonnet code review" means
+  that. Undo: rerun a review on Opus.
+- Unit 16: the conformance review found that amendment 2 had not reached the design, and that the design still
+  described the seen-cursor, notices once per MCP session, the expiry marking in `src/manage.rs` and four changed cases.
+  The design now says what the code does, as its own rule for a built design asks; the behaviour behind each was already
+  an amendment or a judgement call here. Undo: revert the design part of unit 16's fix commit.
+- Unit 16: `reset_vm` moves its console session to the previous run after `manage::reset` returns, not from inside
+  its power-off hook, because the hook runs under the connection lock and closing takes the console lock, which an
+  open holds while it takes the connection lock. When the power-off ends the stream first, the moved run keeps the
+  stream's own end reason instead of "closed by reset_vm". Undo: close inside the hook again, which brings the
+  deadlock back.
+- Unit 16: a `snapshot_revert` that libvirt refuses still leaves the console session in the previous run, as the
+  final review's optional finding noted. The session closes before the revert so its end reason reads "closed by
+  snapshot_revert"; closing after the revert would let the stream's end, which the revert causes, win the reason.
+  The refusal is rare, because `snapshot_target` checks the snapshot first. Undo: close in `LibvirtRevert::start_paused`
+  after the revert returns.
+- Unit 16: a reconnect whose registration succeeds ends a registration that failed earlier, so the worker does not
+  register a second set of callbacks, and the time without callbacks joins the reconnect's gap. This is the final
+  review's required finding. Undo: none wanted; the old code doubled every event after such a failure.
+- Unit 16: `stop_vm` checks power rights before it records an expectation, and `Events::finish` drops expectation
+  windows that closed more than 60 s earlier, so refused calls claim no events and a quiet server's list stays small.
+  The margin keeps a window for an event the worker reaches late. Undo: record before the check, and drop the pruning.
+- Unit 16: the revert expectations include `shutdown`, which libvirt sends when a revert stops a running VM, so that
+  record carries cause `snapshot_revert`; `diag-start-capture.json` checks it. Undo: drop `Kind::Shutdown` from both.
 - Unit 15: `diag-stats` is three cases in one unit, because the read-only check needs its own server process: the
   first leaves `t-dst` running, `diag-stats-read-only` runs under `config-read-only.toml`, which `run-all.sh` writes,
   and `diag-stats-after` deletes the VM. Undo: fold them into one case without the read-only check.
