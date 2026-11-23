@@ -31,7 +31,7 @@ after the run of follow-ups 17 and 19 to 21.
 | `vm_stats` in read-only mode | Kept, without filesystem figures | Read-only mode already disables guest-agent queries, which is why `guest_info` is hidden there | resolved |
 | Devices on created VMs | A panic device, and a balloon stats period of 5 s | Without a panic device a panicked guest hangs with no event; without the period the balloon reports no guest memory | resolved |
 | Panic device model | `isa` (the pvpanic device) for Linux guests, `hyperv` for Windows guests | Debian kernels load the pvpanic driver themselves, and `isa` takes no PCI slot. Windows reports a stop error through the Hyper-V crash registers with no driver, and VMs the server creates for Windows already have Hyper-V enlightenments | provisional: the run's probe confirms both |
-| Crash action | `manage.on_crash`, `preserve` by default or `destroy`, written into a VM's XML when it is created | `preserve` keeps a crashed VM stopped in place, so an agent can take a screenshot of a Windows stop screen or read the frozen state. The operator, not the agent, chooses | resolved; if the probe shows that `preserve` lets the guest run on, the choice returns for a decision |
+| Crash action | `manage.on_crash`, `preserve` by default or `destroy`, written into a VM's XML when it is created | `preserve` keeps a crashed VM stopped in place, so an agent can read the frozen state: the console up to the panic, and the screen as it was at the crash. A Windows guest stops before it paints a stop screen ([probe](../research/2026-11-23-crash-and-events-probe.md)). The operator, not the agent, chooses | resolved; if the probe shows that `preserve` lets the guest run on, the choice returns for a decision |
 | Other crash actions | Refused by the config check | `restart` hides a crash loop behind a guest that looks alive; the core-dump actions write guest memory to a host path | resolved |
 | Windows serial output | Not in this outcome | Windows writes nothing to the serial port unless its emergency console is switched on inside the guest; on Windows the screen tools show a boot | resolved |
 | Delivery | One run, tested on `trial-deb13`, the `t-*` Linux guests and `t-win11` | About eleven units, a little larger than outcome 3's first run | resolved |
@@ -250,8 +250,9 @@ balloon already reports them.
 
 ### A preserved crash
 
-Under `preserve`, a crashed VM stays stopped in place, in libvirt's crashed state or paused with reason crashed; the
-probe records which. It keeps the memory it held while running until `stop_vm` with `force: true` or `reset_vm` ends
+Under `preserve`, a crashed VM stays stopped in place, in libvirt's crashed state with reason panicked, as the
+[probe](../research/2026-11-23-crash-and-events-probe.md) found; `virsh resume` would let it run on, so `start_vm`
+refuses it. It keeps the memory it held while running until `stop_vm` with `force: true` or `reset_vm` ends
 it. The console capture stays open, so the panic text is in the current run. `max_vms` already caps how many such VMs
 exist, because it counts every VM the server created, whatever its state. Under `destroy`, the memory is freed at the
 crash and the panic text moves to the previous run at the next start.
@@ -310,8 +311,8 @@ The run starts with a probe on a throwaway VM made by `create_vm_from_template`,
   `preserve`;
 - that a Debian 13 guest loads its pvpanic driver for the `isa` device;
 - the same for a Windows stop error with `<panic model='hyperv'/>`, forced through `exec` as `SYSTEM`, with a
-  screenshot of the stop screen under `preserve`. The device goes into `tests/testbed/t-win11.xml`, from which `t-win11`
-  is defined, so the VM never drifts from its file.
+  screenshot under `preserve`, which shows the screen as it was at the crash. The device and the crash action go into
+  `tests/testbed/t-win11.xml`, so the VM's definition and its file match.
 
 New cases then cover:
 

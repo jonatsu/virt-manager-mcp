@@ -93,6 +93,9 @@ Each lands in `seeing-what-happened-design.md` in the commit of the unit named.
    `t-win11` has `<memballoon model="none"/>`.
 6. **Another process's sweep (unit 11).** VMs that the `sweep` command, run as its own process, destroys get the cause
    `outside`, because only the server process that destroys a VM can mark it. The README says so.
+7. **A preserved Windows crash shows no stop screen (unit 3).** The probe found that the Hyper-V crash notification
+   stops the guest before Windows paints a stop screen, so a screenshot shows the screen as it was at the crash. The
+   design's crash-action reason, its preserved-crash section and its test-bed list say so; behaviour is unchanged.
 
 ## Preflight
 
@@ -513,6 +516,12 @@ Judgement calls:
 - Unit 17: after a failed `taskkill`, `stop.ps1` ends the listed processes still running itself, rather than only
   rechecking them, because the probe found a child that `taskkill` exit 128 leaves running. Undo: drop the
   `Stop-Process` line in the recheck loop, which turns those cases back into exit 5.
+- Unit 3: `t-win11` got its panic device and `<on_crash>preserve</on_crash>` through `virt-xml` rather than by
+  redefining it from `tests/testbed/t-win11.xml`, because the file holds no UUID and redefining would mean undefining
+  the VM with its NVRAM and TPM state. The file carries the same two changes. Undo: remove both from the file and run
+  `virt-xml t-win11 --remove-device --panic all` and `--edit --events on_crash=destroy`.
+- Unit 3: `wininit` is protected even from `SYSTEM`, so the Windows stop error came from a process that marked itself
+  critical with `RtlSetProcessIsCritical` and exited. The result is the same kind of stop error.
 
 Parked questions: none yet.
 
@@ -539,7 +548,7 @@ The command that arms the run:
 | -- | -- | -- | -- |
 | 1. `exec`: non-ASCII program arguments on Windows | `fix(exec): refuse text the Windows guest agent cannot pass` | Probe on `t-win11`: a non-ASCII `env` entry fails like an argument, with `program` and with `command`, so `env` is refused in both modes. Three new unit tests pass; `win-exec.json` passes on `t-win11` with both refusals and `echo été` through `command` | Self-reviewed |
 | 2. Windows scripts: UTF-8 errors | `fix(winsteps): write guest error text as UTF-8` | Parse test passes; under code page 437 on `t-win11`, a push below a file named `vmm-été-file` fails naming the path intact; the seven Windows cases pass. Built in [follow-ups run 2](followups-run-2-implementation-plan.md) | Self-reviewed |
-| 3. Probe: panics, devices and event sequences |  |  |  |
+| 3. Probe: panics, devices and event sequences | `docs(research): record the crash and event probe for outcome 4` | [Probe note](../research/2026-11-23-crash-and-events-probe.md). Debian loads pvpanic; both `isa` and `hyperv` raise `Crashed Panicked`; `preserve` leaves `crashed (panicked)` with the vCPUs stopped, and `destroy` adds `Stopped Crashed`; a console opened during a paused start holds the boot from GRUB on. `t-win11` booted after the crash and the clone was deleted. None of the stop outcomes held; design amendment 7 records the missing stop screen | Self-reviewed |
 | 4. Config and devices on created VMs |  |  |  |
 | 5. Event log core |  |  |  |
 | 6. Console sessions by UUID, with a previous run |  |  |  |

@@ -53,6 +53,7 @@
     <suspend-to-disk enabled="no"/>
   </pm>
   <on_reboot>restart</on_reboot>
+  <on_crash>preserve</on_crash>
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type="file" device="disk">
@@ -94,5 +95,6 @@
       <model type="virtio"/>
     </video>
     <memballoon model="none"/>
+    <panic model="hyperv"/>
   </devices>
 </domain>
