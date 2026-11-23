@@ -1,18 +1,22 @@
 # Seeing what happened: implementation plan
 
-Status: draft, revised after a plan-critic review; for approval. Built from
-[`seeing-what-happened-design.md`](seeing-what-happened-design.md) at `d41fa1c`, which owns the behaviour, and from
-roadmap follow-ups 22 and 24 in [`fork-roadmap.md`](fork-roadmap.md) at `7469a67`. This plan owns order and checks.
-Progress goes in the execution record at the end.
+Status: draft, revised after a plan-critic review and refreshed after follow-ups 25, 29 and 30; for approval. Built
+from [`seeing-what-happened-design.md`](seeing-what-happened-design.md) at `d41fa1c`, which owns the behaviour, and
+from roadmap follow-ups 22, 24, 28 and 31 in [`fork-roadmap.md`](fork-roadmap.md) at `75794cb`. This plan owns order
+and checks. Progress goes in the execution record at the end.
 
 ## Overview
 
-The run builds roadmap outcome 4, so that an agent can find out why something failed in a guest, and folds in two
-small Windows follow-ups first.
+The run builds roadmap outcome 4, so that an agent can find out why something failed in a guest, and folds in four
+small follow-ups first.
 
 - **Follow-ups first.** `exec` with `program` refuses arguments that are not ASCII on a Windows guest, with a message
   that suggests `command` (follow-up 22). The Windows transfer scripts write their error text as UTF-8, as
-  `pull-pack.ps1` already does (follow-up 24).
+  `pull-pack.ps1` already does (follow-up 24). Both landed in follow-ups run 2. `job_stop` on Windows no longer
+  reports a failure when the tree is already gone (follow-up 28), and `templates-reset-saved.json` waits for the login
+  prompt instead of reading for a fixed time (follow-up 31). These two are units 17 and 18: they run right after
+  units 1 and 2 and before the probe, and are numbered last so that the references among units 3 to 16 stay as they
+  are.
 - **A probe before code.** The design leaves three facts to a probe: the libvirt event sequence of a guest panic under
   each crash action, whether Debian's pvpanic driver and Windows' Hyper-V crash registers raise the panic event, and
   which state a preserved crash leaves the VM in.
@@ -51,6 +55,8 @@ flowchart TD
   U14 --> U15
   U1 --> U15
   U2 --> U15
+  U17[17 job_stop: taskkill statuses] --> U15
+  U18[18 templates-reset-saved waits for the prompt] --> U6
   U15 --> U16[16 Final gate and reviews]
 ```
 
@@ -103,6 +109,10 @@ These apply to every unit, which names only its additions.
   Every `unsafe` block carries a `SAFETY` comment, and every libvirt allocation has one owner that frees it.
 - **No new crates.** Times are kept as epoch seconds and formatted as UTC by a small tested function, because the run
   adds no crates.
+- **Strict arguments.** Every tool refuses fields it does not know (follow-up 30). New parameter structs carry
+  `#[serde(deny_unknown_fields)]`, which `every_tool_with_parameters_refuses_unknown_ones` in `src/server.rs` checks,
+  and a new `wait_for` condition with no fields is a struct variant, as `Agent {}` is, because serde ignores extra
+  fields on a unit variant of a tagged enum.
 - **Test bed.** Touch only `trial-deb13`, and VMs and volumes named `t-*` or `tpl-*` in pool `agent-vms` on
   `qemu:///system`. Throwaway VMs come from `create_vm_from_template` with names starting `t-`; `config-templates.toml`
   allows three of 1 GiB each. Check `free -m` before starting a VM: `t-win11` needs 5 GiB available. A crashed VM under
@@ -209,12 +219,14 @@ when 0) are read and checked, and both create tools write the panic device, `<st
 
 **Changes.** `src/config.rs` gains both keys, with an enum for `on_crash` whose other values stop the server with a
 message naming the two. `domain_xml` in `src/manage.rs` adds the panic device by guest OS (`isa` for Linux, `hyperv`
-for Windows), the stats period and `<on_crash>`. `reset_vm` edits the existing XML, so it keeps what a VM has. The
-README's configuration section and the CHANGELOG describe the keys.
+for Windows), the stats period and `<on_crash>`, beside the `<firmware>` features and pflash loader that `<os>` gains
+for `secure_boot: false` (follow-up 29). `reset_vm` edits the existing XML, so it keeps what a VM has. The README's
+configuration section and the CHANGELOG describe the keys.
 
 **Verification.** Unit tests: an unknown `on_crash` and `max_events = 0` are refused; the XML of both create paths
-holds the three elements, with the right panic model per OS; a reset's XML keeps `<on_crash>` and lacks a panic
-device when the original lacked one. A VM made by `create_vm_from_template` shows the elements in `virsh dumpxml`.
+holds the three elements, with the right panic model per OS, with `secure_boot` true and false; a reset's XML keeps
+`<on_crash>` and lacks a panic device when the original lacked one. `firmware-secure-boot.json` still passes. A VM
+made by `create_vm_from_template` shows the elements in `virsh dumpxml`.
 
 ### 5. Event log core (self-reviewed; unit 12's review covers it)
 
@@ -369,15 +381,16 @@ after carries none; a `stop_vm` causes no notice.
 **Result.** `wait_for` gains an `event` condition with `kinds` and `since`, evaluated before the stopped check; a
 wait whose conditions are all events skips the running check and works on a stopped VM.
 
-**Changes.** `src/wait.rs` gains the condition, its check and an `Env` method that reads the log; the zero-timeout
+**Changes.** `src/wait.rs` gains the condition as a struct variant that refuses unknown fields, its check and an
+`Env` method that reads the log; the zero-timeout
 rule lets `event` conditions be checked once, as console ones are. `src/server.rs` uses `Hypervisor::lookup` instead
 of `domain` when every condition is an event. A match returns the record and advances the VM's cursor over it.
 The console condition still reads only the current run.
 
-**Verification.** Unit tests in the wait engine with a fake log: an event before the stopped check wins over
-`closed`; an all-event wait on a stopped VM matches `started`; `since` from `vm_events` catches a record that landed
-between two calls; a hidden VM's records never match. On a `t-*` VM: a wait for `crashed` together with a console
-condition returns the event when the guest panics.
+**Verification.** Unit tests in the wait engine with a fake log: an `event` condition with an unknown field is
+refused; an event before the stopped check wins over `closed`; an all-event wait on a stopped VM matches `started`;
+`since` from `vm_events` catches a record that landed between two calls; a hidden VM's records never match. On a
+`t-*` VM: a wait for `crashed` together with a console condition returns the event when the guest panics.
 
 ### 14. `vm_stats` (reviewed, Opus)
 
@@ -440,6 +453,34 @@ after a crash.
   findings fixed and rechecked.
 - This row names the evidence for each of the design's "Checks".
 
+### 17. `job_stop` on Windows: taskkill statuses (self-reviewed)
+
+**Result.** `job_stop` on a Windows job whose process tree is gone by the time `taskkill` runs, or goes during it,
+reports the job ended instead of "taskkill failed". Follow-up 28.
+
+**Changes.** First, on `t-win11`, record the exit status and output of `taskkill.exe /T /F /PID` for a live tree, for
+a PID that has just exited, and for a tree whose root exits while `taskkill` walks it, such as a job's
+`ping.exe -n 300 127.0.0.1` ended with `Stop-Process` a moment before. Then `src/jobs/stop.ps1` treats a non-zero
+status as success when the recorded process, by PID and start time, no longer runs afterwards, and says so in its
+output, such as "ended (taskkill exited 255 after the tree had gone)". It still exits 5 with the status when the
+process runs on. The roadmap marks 28 done, and the CHANGELOG gains a "Fixed" entry.
+
+**Verification.** The parse test passes. A unit test checks the script text for the recheck. On `t-win11`,
+`win-jobs.json` passes five times in a row, and the record says how many of those stops met a non-zero status.
+
+### 18. `templates-reset-saved.json` waits for the login prompt (self-reviewed)
+
+**Result.** The case's check that the console still reads output after a refused reset waits for the login prompt,
+instead of a fixed 3 s `console_read` that a slow guest missed once. Follow-up 31.
+
+**Changes.** In `tests/testbed/cases/templates-reset-saved.json`, after the `console_write` of an empty line, a
+`wait_for` console condition for `login:` with `since: 0` and a 30 s timeout replaces the `console_read`, and a
+`console_read` from offset 0 then checks that the console is open and holds output. Unit 6 later changes the same
+case for its attach behaviour, on top of this. The roadmap marks 31 done; the change is to a test only, so the
+CHANGELOG has no entry.
+
+**Verification.** The `templates-reset-uefi` unit of `run-all.sh`, which runs the case, passes three times in a row.
+
 ## Exceptions the run records
 
 | Check | Why it cannot run here | Stand-in evidence |
@@ -452,7 +493,7 @@ after a crash.
 
 The run's goal:
 
-- **Objective.** Units 1 to 16 are committed on `main`, each with its row here.
+- **Objective.** Units 1 to 18 are committed on `main`, each with its row here.
 - **Success.** After the last change:
   - the gate and `cargo +1.94 test --locked` exit 0;
   - `tests/testbed/run-all.sh` exits 0, with `t-win11` present;
@@ -466,7 +507,7 @@ The run's goal:
 The command that arms the run:
 
 ```text
-/goal Outcome 4 per docs/plans/seeing-what-happened-implementation-plan.md is built: units 1-16 on main, each with its record row. After the last change, AGENTS.md gate and `cargo +1.94 test --locked` exit 0, `tests/testbed/run-all.sh` exits 0 with t-win11 present, and an Opus code review (Sonnet if safeguards stop Opus) plus a separate conformance review against the design, roadmap and plan find no material mismatch. Nothing pushed; only trial-deb13 and t-*/tpl-* in agent-vms touched. Else stop: root, design change, other VM or pool, low memory
+/goal Outcome 4 per docs/plans/seeing-what-happened-implementation-plan.md is built: units 1-18 on main, each with its record row. After the last change, AGENTS.md gate and `cargo +1.94 test --locked` exit 0, `tests/testbed/run-all.sh` exits 0 with t-win11 present, and an Opus code review (Sonnet if safeguards stop Opus) plus a separate conformance review against the design, roadmap and plan find no material mismatch. Nothing pushed; only trial-deb13 and t-*/tpl-* in agent-vms touched. Else stop: root, design change, other VM or pool, low memory
 ```
 
 | Unit | Commits | Evidence | Review |
@@ -487,3 +528,5 @@ The command that arms the run:
 | 14. `vm_stats` |  |  |  |
 | 15. Test-bed cases and docs |  |  |  |
 | 16. Final gate and reviews |  |  |  |
+| 17. `job_stop` on Windows: taskkill statuses |  |  |  |
+| 18. `templates-reset-saved.json` waits for the login prompt |  |  |  |

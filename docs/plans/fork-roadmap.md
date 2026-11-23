@@ -142,9 +142,11 @@ Reviews of earlier work found these. None blocks the server's use.
 23. **A Windows push into a parent where a guest user may delete or rename entries is not protected.** Such a user,
     the owner of `C:\Users\alice` for example, or any interactive user in a directory that a push created below
     `C:\Users\Public`, can replace the staging directory with a junction between two guest calls, and so make the
-    push write elsewhere as `SYSTEM`. Closing it means unpacking in a directory where no other user may delete or
-    rename entries, such as `%SystemRoot%\Temp`, and moving the tree into place, which fails across drives. Decide
-    whether to do that, to refuse such parents, or to accept the risk for guests whose users are trusted.
+    push write elsewhere as `SYSTEM`; since follow-up 25 they could swap the archive directory the same way. Decided:
+    the push writes its archive and unpacks it in `%SystemRoot%\Temp`, where no other user may delete or rename
+    entries, then moves the tree into place, and copies it instead when the target is on another drive, which is
+    slower and not atomic. Refusing such parents would block pushes into a user's own folders, and accepting the risk
+    does not fit opted-in VMs with real users. It needs a short design before it is built.
 24. **Done: the Windows transfer scripts write their error text as UTF-8.** Every script in `src/winsteps/` that
     writes to stderr does so through a UTF-8 writer with `AutoFlush`, as `pull-pack.ps1` did, so a non-ASCII path in
     a message arrives intact. `pull-prepare.ps1` writes no error text. `win-transfer.json` checks one such message
@@ -258,7 +260,7 @@ Parked ideas, which no outcome includes yet:
 ## Next
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
-approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and
-24, its units 1 and 2, are done, and so are 25, 29 and 30. Follow-ups 16, 23, 27, 28 and 31 can land at any time;
-16 waits on a newer `virtio-win`, 23 needs a design decision, and 27 waits
-on `rmcp` and `schemars`.
+approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and 24,
+its units 1 and 2, are done, and its run also builds follow-ups 28 and 31, as units 17 and 18. Follow-ups 25, 29 and
+30 are done. Of the rest, 23 has its approach decided and needs a short design, 16 waits on a newer `virtio-win`, and
+27 waits on `rmcp` and `schemars`.
