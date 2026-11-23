@@ -67,11 +67,26 @@
     }
   },
   {
+    "tool": "wait_for",
+    "args": {
+      "vm": "t-u",
+      "timeout_secs": 30,
+      "conditions": [
+        {
+          "kind": "console",
+          "pattern": "login:"
+        }
+      ]
+    },
+    "expect": {
+      "matches": "\"kind\":\"console\",\"next\":\\d+,\"result\":\"matched\",\"text\":\"login:\""
+    }
+  },
+  {
     "tool": "console_read",
     "args": {
       "vm": "t-u",
-      "since": 0,
-      "wait_ms": 3000
+      "since": 0
     },
     "expect": {
       "matches": "\"closed\":null,.*\"next\":[1-9]"

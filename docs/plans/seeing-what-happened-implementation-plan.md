@@ -554,4 +554,4 @@ The command that arms the run:
 | 15. Test-bed cases and docs |  |  |  |
 | 16. Final gate and reviews |  |  |  |
 | 17. `job_stop` on Windows: taskkill statuses | `fix(jobs): end a Windows job's tree when taskkill fails on a racing root` | [Probe note](../research/2026-11-23-taskkill-race-probe.md). Before: 24 cycles gave exit 0 ×8, 128 ×14 (2 with a surviving child), 255 ×2. After, with the race injected: 30 cycles, exit 0 ×20 and 7 ×10, no survivors. Unit tests with the fake Windows guest for exits 7 and 5; parse test; `win-jobs.json` passed 5 times in a row on the rebuilt server, every stop with status 0 | Self-reviewed |
-| 18. `templates-reset-saved.json` waits for the login prompt |  |  |  |
+| 18. `templates-reset-saved.json` waits for the login prompt | `test(testbed): wait for the login prompt after a refused reset` | The getty on the Debian template prints `login:` again after a bare Enter, so the wait without `since` matched; the `templates-reset-uefi` unit passed 3 times in a row | Self-reviewed |

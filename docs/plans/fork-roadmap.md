@@ -183,10 +183,9 @@ Reviews of earlier work found these. None blocks the server's use.
     parameters now use `deny_unknown_fields`, so the error names the field and the published schemas declare
     `additionalProperties: false`; tools that take no arguments still ignore any they are sent. A unit test checks
     every listed tool's schema.
-31. **`templates-reset-saved.json` failed once on a slow console answer.** In the last full run of follow-ups run 2,
-    the Enter sent to `t-u`'s serial console just after a refused reset got no answer within the case's 3 s
-    `console_read` wait; the case passed alone straight afterwards, and in three earlier full runs. Wait for the
-    login prompt with `wait_for` instead of a fixed read, or lengthen the wait.
+31. **Done: `templates-reset-saved.json` waits for the login prompt.** In the last full run of follow-ups run 2, the
+    Enter sent to `t-u`'s serial console just after a refused reset got no answer within the case's 3 s
+    `console_read` wait. The case now waits up to 30 s with `wait_for` for a `login:` printed after the Enter.
 
 ## Outcomes
 
