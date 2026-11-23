@@ -57,7 +57,10 @@ and whether a crafted hard-link or symbolic-link entry in an archive reaches out
 **Result.** A dated note in `docs/research/` records an agent-style install of `cachyos-desktop-linux-260809.iso` from
 `~/Downloads`, driven only through the server's tools: `create_vm` with the ISO, then the screen, mouse, keyboard,
 console and wait tools, until the installed system boots and answers. The VM is `t-cachy`, at most 4 GiB of memory,
-deleted at the end. Gaps that block the install are fixed when the fix is small and needs no design decision;
+deleted at the end. The server needs an `iso_dirs` entry it can list and QEMU can read: the pool directory is
+root-only, and the home directory is closed to `libvirt-qemu`. So the run copies the ISO to `/var/tmp/vmm-iso/`, which
+only it uses, and names that directory in a scratch config with `manage.create` on; it deletes the copy at the end.
+Gaps that block the install are fixed when the fix is small and needs no design decision;
 otherwise they become roadmap follow-ups.
 
 ## Closing checks
