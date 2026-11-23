@@ -242,8 +242,9 @@ domain statistics for that VM twice, about one second apart, and returns:
 The filesystem figures are the guest's own claim, and the reply says so. When the agent does not answer within
 `limits.agent_timeout_secs`, the reply has no filesystems and says why. In read-only mode the reply has no
 filesystems either, and says that read-only mode disables guest-agent queries. When the guest's memory figures are
-missing, the reply names the cause it can see: no stats period on the balloon, or, with a period set, no balloon
-driver reporting in the guest, which on Windows needs the virtio balloon driver and its service.
+missing, the reply names the cause it can see: no balloon device at all, as on a VM with
+`<memballoon model="none"/>`; no stats period on the balloon; or, with a period set, no balloon driver reporting in
+the guest, which on Windows needs the virtio balloon driver and its service.
 
 ### Devices on VMs the server creates
 

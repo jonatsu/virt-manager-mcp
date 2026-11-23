@@ -94,6 +94,12 @@ Each release's section lists what changed for people who run the server and for 
   events. The notice is its own text block after the result or error, names `vm_events since` for the details, and
   appears once per server process, in the first such reply from any client. A crash under `preserve` adds that the VM
   holds its memory until `stop_vm` with `force: true`.
+- `vm_stats` reports a running VM's resource use from two samples about a second apart: CPU use as a percentage of
+  its vCPUs, memory (with the guest's own figures when the balloon reports them), per-disk and per-interface rates,
+  and the guest's filesystems from the guest agent, marked as the guest's claim. Missing guest memory figures or
+  filesystems come with the reason: no balloon device, no stats period, no balloon driver in the guest, or no answer
+  from the agent. A VM in any other state gets
+  its state. Read-only mode keeps it and skips the guest agent.
 - Each VM keeps the console output of one earlier run. When a new run replaces a session, or `console_close`,
   `reset_vm` or `snapshot_revert` ends one, `console_read` with `run: "previous"` reads its output, closed, with the
   reason it ended and its own generation. `console_read` and `console_close` work on a stopped VM.

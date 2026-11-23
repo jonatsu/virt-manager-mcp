@@ -67,6 +67,7 @@ a goal or widen the scope.
 | -- | -- | -- |
 | `exec`, `read_file`, `write_file`, `copy_to_vm`, `copy_dir_to_vm`, `copy_from_vm`, `copy_dir_from_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs work on Linux and Windows guests |
 | `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs the OCR models |
+| `vm_stats` | libvirt domain statistics (`virDomainListGetStats`), and the guest agent's `guest-get-fsinfo` for filesystems | none; the guest's own memory figures need a balloon device with a stats period and a balloon driver in the guest, and filesystems need qemu-guest-agent |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
 | `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
 | `mouse` | QEMU monitor `input-send-event` (`virDomainQemuMonitorCommand`) | A graphics device and a USB tablet |
@@ -86,6 +87,7 @@ The path is passed as data, never spliced into shell code.
 | `vm_addresses`: a running VM's addresses per interface, from libvirt's DHCP lease, else the guest agent, else ARP | ✅ (lease and ARP only) |
 | `console_open`, `console_read`, `console_close` | ✅ |
 | `vm_events`: what happened to a VM since the server started (starts, stops, crashes, reboots, watchdog, guest agent, connection gaps), with what caused each | ✅ |
+| `vm_stats`: a running VM's CPU, memory, disk, network and filesystem use, from two samples a second apart | ✅ (no filesystems) |
 | `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text, background copy finished, VM event), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
 | `job_read`, `job_list`: a background job's output and state | ✅ |
 | `job_start`, `job_stop`: run a long command detached in a Linux or Windows guest, and stop it | ❌ |
@@ -521,6 +523,8 @@ Adjust the VM name in them to yours. Both use the same inventory directory, so a
   `reset_vm` or `snapshot_revert` ends one, its output moves to the previous run, and `console_read` with
   `run: "previous"` reads it as closed with the reason it ended. The previous run has its own generation and offsets,
   and a second move drops the first. `console_read` also works on a stopped VM.
+- `vm_stats` reports one snapshot from two samples about a second apart and keeps no history, so a spike that ended
+  before the call leaves no trace. Its filesystem figures come from the guest agent and are the guest's own claim.
 - `wait_for` returns within `limits.max_wait_secs` (default 50 s, below the 60 s at which some clients cut a call)
   plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
   between. A console condition without `since` starts where the last `console_write` began, and a match moves that

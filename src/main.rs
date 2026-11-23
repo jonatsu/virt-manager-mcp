@@ -19,6 +19,7 @@ mod push;
 mod seed;
 mod server;
 mod start;
+mod stats;
 mod sweep;
 mod transfer;
 mod wait;

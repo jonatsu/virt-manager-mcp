@@ -223,14 +223,19 @@ impl Hypervisor {
 
 /// libvirt's state name for a VM, e.g. "running" or "shutoff".
 pub fn state_name(dom: &Domain) -> &'static str {
-    match dom.get_state().map(|s| s.0) {
-        Ok(sys::VIR_DOMAIN_RUNNING) => "running",
-        Ok(sys::VIR_DOMAIN_BLOCKED) => "blocked",
-        Ok(sys::VIR_DOMAIN_PAUSED) => "paused",
-        Ok(sys::VIR_DOMAIN_SHUTDOWN) => "shutting down",
-        Ok(sys::VIR_DOMAIN_SHUTOFF) => "shutoff",
-        Ok(sys::VIR_DOMAIN_CRASHED) => "crashed",
-        Ok(sys::VIR_DOMAIN_PMSUSPENDED) => "suspended",
+    dom.get_state().map_or("unknown", |s| state_label(s.0))
+}
+
+/// libvirt's state name for a state number.
+pub fn state_label(state: u32) -> &'static str {
+    match state {
+        sys::VIR_DOMAIN_RUNNING => "running",
+        sys::VIR_DOMAIN_BLOCKED => "blocked",
+        sys::VIR_DOMAIN_PAUSED => "paused",
+        sys::VIR_DOMAIN_SHUTDOWN => "shutting down",
+        sys::VIR_DOMAIN_SHUTOFF => "shutoff",
+        sys::VIR_DOMAIN_CRASHED => "crashed",
+        sys::VIR_DOMAIN_PMSUSPENDED => "suspended",
         _ => "unknown",
     }
 }

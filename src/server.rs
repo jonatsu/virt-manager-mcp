@@ -29,8 +29,8 @@ use crate::guestpath::GuestPath;
 use crate::hypervisor::{self, Hypervisor};
 use crate::start::Starting;
 use crate::{
-    addresses, ansi, dirpull, display, fsops, jobs, manage, mouse, ocrfetch, pull, push, transfer,
-    wait,
+    addresses, ansi, dirpull, display, fsops, jobs, manage, mouse, ocrfetch, pull, push, stats,
+    transfer, wait,
 };
 
 /// Time a console write may take beyond its pauses, for a slow guest to take the bytes.
@@ -1412,6 +1412,35 @@ impl VirtServer {
 
     #[tool(
         annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false
+        ),
+        description = "Report a running VM's resource use from two samples about a second apart: CPU use as a \
+        percentage of its vCPUs; memory configured, current, resident on the host and, when the balloon reports them, \
+        the guest's own available, usable and unused figures and disk caches; per disk its read and write bytes per \
+        second, capacity and allocation; per interface its received and sent bytes per second and drops; and per \
+        guest filesystem its mount point, type, total and used bytes from the guest agent, which are the guest's own \
+        claim. A filesystem's total is its used plus available space, as df's Used plus Avail, so it leaves out \
+        blocks reserved for root. Sizes are in bytes. Missing guest memory figures or filesystems come with the reason; \
+        a rate reads null when its counter went down between the samples, as on a restart. A VM in any other state gets its state. Read-only mode \
+        skips the guest agent, so the reply has no filesystems."
+    )]
+    async fn vm_stats(
+        &self,
+        Parameters(p): Parameters<VmParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let dom = s.hv.lookup(&p.vm)?;
+            let agent = s.agent(&dom);
+            let reply = stats::report(&dom, &agent, s.hv.config.read_only, stats::INTERVAL)?;
+            Ok(vec![json_block(&reply)?])
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false
@@ -2703,7 +2732,7 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 45);
+        assert_eq!(tools.len(), 46);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"
@@ -2773,10 +2802,12 @@ mod tests {
                 "stat_path",
                 "vm_addresses",
                 "vm_events",
+                "vm_stats",
             ]
         );
         // Read-only mode keeps the diagnostics.
         assert!(!read_only_mode.contains(&"vm_events"));
+        assert!(!read_only_mode.contains(&"vm_stats"));
         // Input to the guest can run anything, such as `rm -rf /`; so can wait_for's command condition.
         for name in [
             "exec",

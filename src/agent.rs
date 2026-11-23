@@ -125,6 +125,11 @@ impl<'a> Agent<'a> {
         })
     }
 
+    /// The guest's mounted filesystems, as `guest-get-fsinfo` reports them.
+    pub fn fsinfo(&self) -> Result<Value> {
+        self.call("guest-get-fsinfo", None)
+    }
+
     // ---- command execution -------------------------------------------------
 
     pub fn exec(
