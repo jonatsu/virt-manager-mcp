@@ -176,6 +176,10 @@ Reviews of earlier work found these. None blocks the server's use.
 30. **The tools ignore unknown arguments.** A `screenshot` given `x`, `y`, `width` and `height` instead of `region`
     returned the whole screen without an error, so an agent does not learn its mistake. Decide whether every tool's
     parameters refuse unknown fields, which would break a client that sends extra ones.
+31. **`templates-reset-saved.json` failed once on a slow console answer.** In the last full run of follow-ups run 2,
+    the Enter sent to `t-u`'s serial console just after a refused reset got no answer within the case's 3 s
+    `console_read` wait; the case passed alone straight afterwards, and in three earlier full runs. Wait for the
+    login prompt with `wait_for` instead of a fixed read, or lengthen the wait.
 
 ## Outcomes
 
@@ -251,5 +255,5 @@ Parked ideas, which no outcome includes yet:
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and
-24, its units 1 and 2, are done. Follow-ups 16, 23, 25, 27, 28, 29 and 30 can land at any time; 16
+24, its units 1 and 2, are done. Follow-ups 16, 23, 25 and 27 to 31 can land at any time; 16
 waits on a newer `virtio-win`, 23, 25, 29 and 30 need a design decision, and 27 waits on `rmcp` and `schemars`.
