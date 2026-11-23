@@ -131,10 +131,12 @@ Reviews of earlier work found these. None blocks the server's use.
 21. **Done: a Windows push retries its cleanup after a timed-out unpack.** A timeout is now an error type of its own,
     and after a timed-out unpack or inherit step the cleanup tries again every second for up to 10 s, as the pull
     retries removing its archive ([plan](transfer-followups-implementation-plan.md)).
-22. **`exec` with `program` fails on Windows when an argument is not ASCII.** The guest agent fails such a
-    `guest-exec`, and libvirt reports only `failed to parse JSON: invalid utf-8 string`
-    ([probe note](../research/2026-11-13-windows-followups-probe.md)). `exec` with `command` is unaffected. Refuse
-    such arguments on Windows with a message that suggests `command`, or report it upstream to `virtio-win`.
+22. **Done: `exec` refuses text the Windows guest agent cannot pass.** The guest agent fails a `guest-exec` whose
+    program path or arguments are not ASCII, and libvirt reports only `failed to parse JSON: invalid utf-8 string`
+    ([probe note](../research/2026-11-13-windows-followups-probe.md)). On `t-win11`, a non-ASCII `env` entry fails
+    the same way, with `program` and with `command` alike. `exec` now refuses all three on Windows, before any
+    `guest-exec`, and suggests `command`, which passes any text. `win-exec.json` checks both refusals and an `echo été`
+    through `command`.
 23. **A Windows push into a parent where a guest user may delete or rename entries is not protected.** Such a user,
     the owner of `C:\Users\alice` for example, or any interactive user in a directory that a push created below
     `C:\Users\Public`, can replace the staging directory with a junction between two guest calls, and so make the
@@ -230,6 +232,6 @@ Parked ideas, which no outcome includes yet:
 ## Next
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
-approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and 24 are
-its units 1 and 2. Follow-ups 15, 16, 23, 25 and 26 can land at any time; 16 waits on a newer `virtio-win`, and 23
-and 25 need a design decision.
+approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-up 22, its
+unit 1, is done, and follow-up 24 is its unit 2. Follow-ups 15, 16, 23, 25 and 26 can land at any time; 16 waits on
+a newer `virtio-win`, and 23 and 25 need a design decision.

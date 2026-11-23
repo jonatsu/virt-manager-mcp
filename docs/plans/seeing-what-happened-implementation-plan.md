@@ -471,7 +471,7 @@ The command that arms the run:
 
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
-| 1. `exec`: non-ASCII program arguments on Windows |  |  |  |
+| 1. `exec`: non-ASCII program arguments on Windows | `fix(exec): refuse text the Windows guest agent cannot pass` | Probe on `t-win11`: a non-ASCII `env` entry fails like an argument, with `program` and with `command`, so `env` is refused in both modes. Three new unit tests pass; `win-exec.json` passes on `t-win11` with both refusals and `echo été` through `command` | Self-reviewed |
 | 2. Windows scripts: UTF-8 errors |  |  |  |
 | 3. Probe: panics, devices and event sequences |  |  |  |
 | 4. Config and devices on created VMs |  |  |  |

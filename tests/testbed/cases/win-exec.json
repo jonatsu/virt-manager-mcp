@@ -43,6 +43,47 @@
     }
   },
   {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "program": "cmd.exe",
+      "args": [
+        "/c",
+        "echo",
+        "\u00e9t\u00e9"
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "not ASCII; use `command`"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "$env:X",
+      "env": [
+        "X=\u00e9t\u00e9"
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "`env` entry that is not ASCII"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11",
+      "command": "echo \u00e9t\u00e9"
+    },
+    "expect": {
+      "contains": "\u00e9t\u00e9",
+      "absent": "CLIXML"
+    }
+  },
+  {
     "tool": "write_file",
     "args": {
       "vm": "t-win11",

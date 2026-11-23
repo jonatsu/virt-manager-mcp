@@ -114,12 +114,13 @@ pub struct ExecParams {
     pub shell: Shell,
     /// Program to run directly, without a shell (argv style). Use either `command` or `program`.
     pub program: Option<String>,
-    /// Arguments for `program` only; `exec` refuses them with `command`.
+    /// Arguments for `program` only; `exec` refuses them with `command`. On Windows, `program` and `args` must be
+    /// ASCII; use `command` for other text.
     #[serde(default)]
     pub args: Vec<String>,
     /// Data written to the process's stdin.
     pub stdin: Option<String>,
-    /// Extra environment variables as "NAME=value".
+    /// Extra environment variables as "NAME=value". On Windows, each must be ASCII.
     #[serde(default)]
     pub env: Vec<String>,
     /// Kill the command after this many seconds (default from config).
@@ -128,19 +129,53 @@ pub struct ExecParams {
     pub max_output_bytes: Option<usize>,
 }
 
-/// The program and arguments `exec` runs. `os` asks the guest for its OS, and is called only for `command`, after
-/// every refusal, so a refused call reaches no guest.
+/// The program and arguments `exec` runs. `os` asks the guest for its OS. It is called at most once: for `command`,
+/// and for `program` only when the call holds text that is not ASCII, so a refused call reaches no guest and an
+/// ASCII `program` call sends no extra query.
+///
+/// The Windows guest agent fails a `guest-exec` whose path, arguments or environment are not ASCII, with only "invalid
+/// utf-8 string" from libvirt, so such a call is refused on Windows before it is sent. `command` reaches the guest
+/// inside an encoded command line, and so carries any text.
 fn exec_spec(p: &ExecParams, os: impl FnOnce() -> Result<agent::GuestOs>) -> Result<ExecSpec> {
+    let ascii = |s: &String| s.is_ascii();
     match (&p.command, &p.program) {
         (Some(_), None) if !p.args.is_empty() => {
             bail!(
                 "`args` goes with `program`; with `command`, put the arguments in the command line"
             )
         }
-        (Some(cmd), None) => shell_spec(os()?, p.shell, cmd),
-        (None, Some(prog)) => Ok(ExecSpec::new(prog, p.args.clone())),
+        (Some(cmd), None) => {
+            let os = os()?;
+            refuse_windows_env(os, p)?;
+            shell_spec(os, p.shell, cmd)
+        }
+        (None, Some(prog)) => {
+            let argv_ascii = prog.is_ascii() && p.args.iter().all(ascii);
+            if !argv_ascii || !p.env.iter().all(ascii) {
+                let os = os()?;
+                if os == agent::GuestOs::Windows && !argv_ascii {
+                    bail!(
+                        "the Windows guest agent cannot pass a program path or argument that is not ASCII; \
+                         use `command`, which can"
+                    );
+                }
+                refuse_windows_env(os, p)?;
+            }
+            Ok(ExecSpec::new(prog, p.args.clone()))
+        }
         _ => bail!("provide exactly one of `command` or `program`"),
     }
+}
+
+/// Refuses an `env` entry that is not ASCII on Windows, where the guest agent fails it in either mode.
+fn refuse_windows_env(os: agent::GuestOs, p: &ExecParams) -> Result<()> {
+    if os == agent::GuestOs::Windows && !p.env.iter().all(|e| e.is_ascii()) {
+        bail!(
+            "the Windows guest agent cannot pass an `env` entry that is not ASCII; \
+             set the variable inside `command` instead"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, Default, PartialEq)]
@@ -2294,6 +2329,47 @@ mod tests {
             (spec.path.as_str(), spec.args),
             ("ls", vec!["-l".into(), "/".into()])
         );
+    }
+
+    #[test]
+    fn exec_refuses_text_the_windows_agent_cannot_pass() {
+        let windows = || Ok(agent::GuestOs::Windows);
+        for p in [
+            json!({"vm": "v", "program": "C:\\été\\x.exe"}),
+            json!({"vm": "v", "program": "cmd.exe", "args": ["/c", "echo", "été"]}),
+        ] {
+            let err = exec_spec(&exec_params(p), windows).unwrap_err().to_string();
+            assert!(err.contains("not ASCII; use `command`"), "{err}");
+        }
+        for p in [
+            json!({"vm": "v", "program": "cmd.exe", "env": ["X=été"]}),
+            json!({"vm": "v", "command": "$env:X", "env": ["X=été"]}),
+        ] {
+            let err = exec_spec(&exec_params(p), windows).unwrap_err().to_string();
+            assert!(err.contains("`env` entry that is not ASCII"), "{err}");
+        }
+    }
+
+    #[test]
+    fn exec_passes_non_ascii_text_elsewhere() {
+        let linux = || Ok(agent::GuestOs::Linux);
+        let p =
+            exec_params(json!({"vm": "v", "program": "echo", "args": ["été"], "env": ["X=été"]}));
+        let spec = exec_spec(&p, linux).unwrap();
+        assert_eq!(
+            (spec.path.as_str(), spec.args),
+            ("echo", vec!["été".into()])
+        );
+
+        let p = exec_params(json!({"vm": "v", "command": "echo été"}));
+        assert!(exec_spec(&p, || Ok(agent::GuestOs::Windows)).is_ok());
+    }
+
+    #[test]
+    fn exec_asks_nothing_for_an_ascii_program() {
+        let p =
+            exec_params(json!({"vm": "v", "program": "cmd.exe", "args": ["/c"], "env": ["X=1"]}));
+        assert!(exec_spec(&p, no_guest).is_ok());
     }
 
     #[test]
