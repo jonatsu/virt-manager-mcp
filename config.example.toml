@@ -26,7 +26,7 @@ share_project_dir = false
 # host_pull_dirs = ["/home/me/vm-pulls"]
 
 # When true, only tools that change nothing in a VM or on the host are exposed, such as list_vms,
-# read_file, list_dir, vm_addresses and the console tools. The README's tool table lists them all.
+# read_file, list_dir, vm_addresses and the console tools. docs/tools.md in the repository lists them all.
 read_only = false
 
 # VM management. Everything here is off by default; each operation is enabled separately.

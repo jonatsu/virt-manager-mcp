@@ -5,8 +5,9 @@ This repository is a Rust MCP server that gives AI agents guarded access to libv
 
 ## Ground rules
 
-- Work within the project's goals in the `## Goals` section of `README.md`. A change to them needs the project
-  owner's approval, so stop and ask before work that would break a goal or widen the scope.
+- Work within the project's goals: purpose and scope are in the `## Goals` section of `README.md`, and the success
+  signals, method and rules for changing them are in `docs/goals.md`. A change to them needs the project owner's
+  approval, so stop and ask before work that would break a goal or widen the scope.
 - Track planned work in `docs/plans/fork-roadmap.md`, and mark each item done in the commit that lands it.
 - Keep dated evidence in `docs/research/`. Cite it from the roadmap rather than copying it.
 - Treat `example-global-CLAUDE.md` and `example-global-AGENTS.md` as product templates for the server's users. They

@@ -1,17 +1,17 @@
 # virtmanager-mcp
 
-This is a fork of [KubeRl/MCP-Server-For-VirtManager-AI](https://github.com/KubeRl/MCP-Server-For-VirtManager-AI)
-that gives coding agents access to deploy and manage virtual machines on a QEMU/KVM host managed by libvirt. Its
-[goals](#goals) set its purpose and scope, and planned work is in
-[docs/plans/fork-roadmap.md](docs/plans/fork-roadmap.md).
+virtmanager-mcp is a server for the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), which lets AI
+agents call tools. It gives coding agents guarded access to virtual machines on a Linux host that runs QEMU/KVM
+through libvirt, with Linux and Windows guests. Agents can create disposable test VMs from templates or installer
+ISOs, snapshot, reset and delete them, and fully control them. They can also work in other VMs on the host that the
+operator opts in. Inside a VM, agents run commands and long jobs, read and write files, and copy files and
+directories to and from the host. They also read the serial console, take screenshots, type and click, and see
+crashes and resource use. The operator's config decides which VMs and host directories an agent can reach, and
+every default denies, so the operator's other VMs stay out of reach.
 
-An MCP server that gives an AI access to libvirt / virt-manager VMs:
-command execution, file access, copying host files into guests, the serial console, screenshots,
-and keyboard and mouse input. VMs you opt in can also be started and stopped. Creating, deleting and
-reconfiguring VMs and snapshots are available too, but are off until you enable them (see
-[VM management](#vm-management)).
-
-Host: Linux. Guests: Linux and Windows.
+This repository is a GPL-2.0 fork of
+[KubeRl/MCP-Server-For-VirtManager-AI](https://github.com/KubeRl/MCP-Server-For-VirtManager-AI) that diverges from
+upstream and takes upstream changes case by case. The host is Linux, and the guests are Linux and Windows.
 
 ## Goals
 
@@ -25,16 +25,6 @@ risk.
 Safety and usability both count. Guardrails default to deny, and each one stays proportionate to the risk it
 covers. A guardrail that makes an ordinary agent task impractical is a defect, just as a gap in one is. When the
 two truly conflict, safety wins, and the design that settles the conflict shows how safety still holds.
-
-### Success signals
-
-- An agent takes a VM from a template to a tested result and back without operator help.
-- Asked to do a task in an existing VM that the operator has opted in, an agent finishes it without operator
-  help.
-- Asked to set up a new VM from an installer ISO with no template, such as a CachyOS VM for a test, an agent
-  installs it and leaves it booted and usable.
-- `tests/testbed/run-all.sh` passes every case.
-- No tool reaches a VM or storage pool outside the operator's config, and the guardrail refusal tests prove it.
 
 ### Scope
 
@@ -51,506 +41,154 @@ Out of scope:
 - keeping up with upstream as an aim of its own;
 - the roadmap's parked ideas, until an outcome takes them up.
 
-### Method
+The success signals, the method and the rules for changing these goals are on the [project goals](docs/goals.md) page.
 
-`AGENTS.md` fixes the language, the build gate, the guardrails and the commit rules. Within those, agents choose
-the approach and the tools, as long as these goals hold.
+## What agents can do
 
-### Changing these goals
-
-A change to these goals needs the project owner's approval. Agents stop and ask before any work that would break
-a goal or widen the scope.
-
-## How it talks to the guest
-
-| Capability | Mechanism | Guest requirement |
+| Task | Tools | Needs |
 | -- | -- | -- |
-| `exec`, `read_file`, `write_file`, `copy_to_vm`, `copy_dir_to_vm`, `copy_from_vm`, `copy_dir_from_vm`, `list_dir`, `stat_path`, `guest_info`, `job_*` | QEMU guest agent over a virtio-serial channel (`virDomainQemuAgentCommand`) | qemu-guest-agent running; jobs work on Linux and Windows guests |
-| `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs the OCR models |
-| `vm_stats` | libvirt domain statistics (`virDomainListGetStats`), and the guest agent's `guest-get-fsinfo` for filesystems | none; the guest's own memory figures need a balloon device with a stats period and a balloon driver in the guest, and filesystems need qemu-guest-agent |
-| `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
-| `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
-| `mouse` | QEMU monitor `input-send-event` (`virDomainQemuMonitorCommand`) | A graphics device and a USB tablet |
-| `start_vm`, `stop_vm` | libvirt (`virDomainCreateWithFlags` paused, `virDomainOpenConsole`, `virDomainResume`, `virDomainShutdown`, `virDomainDestroy`) | none (graceful stop needs ACPI or the guest agent) |
-| VM management tools | libvirt domain, storage volume and snapshot APIs | none |
+| Run commands, read and write files in a guest | `exec`, `read_file`, `write_file`, `list_dir`, `stat_path`, `guest_info`, `job_start` | the QEMU guest agent in the guest |
+| Move files between host and guest | `copy_to_vm`, `copy_dir_to_vm`, `copy_from_vm`, `copy_dir_from_vm` | host directories in the config |
+| Watch and drive a guest that has no agent | `console_open`, `console_read`, `console_write`, `screenshot`, `send_keys`, `type_text`, `mouse`, `wait_for` | a serial console or a graphics device |
+| Inspect a VM | `list_vms`, `vm_addresses`, `vm_events`, `vm_stats` | none |
+| Start and stop VMs | `start_vm`, `stop_vm` | the VM in `power_vms` |
+| Create, snapshot and delete VMs | `create_vm`, `create_vm_from_template`, `reset_vm`, `snapshot_create`, `delete_vm`, `configure_vm` | `[manage]` enabled in the config |
 
-`list_dir` and `stat_path` run fixed helper commands through `guest-exec`
-(`stat`/`find` on Linux, PowerShell on Windows), because qemu-ga has no directory listing.
-The path is passed as data, never spliced into shell code.
+The [tools reference](docs/tools.md) lists every tool, the mechanism behind it, and what read-only mode hides.
 
-## Tools
+## Install
 
-| Tool | Read-only mode |
-| -- | -- |
-| `list_vms`: allowed VMs, power state, agent status, OS family | ✅ |
-| `read_file`, `list_dir`, `stat_path` | ✅ |
-| `vm_addresses`: a running VM's addresses per interface, from libvirt's DHCP lease, else the guest agent, else ARP | ✅ (lease and ARP only) |
-| `console_open`, `console_read`, `console_close` | ✅ |
-| `vm_events`: what happened to a VM since the server started (starts, stops, crashes, reboots, watchdog, guest agent, connection gaps), with what caused each | ✅ |
-| `vm_stats`: a running VM's CPU, memory, disk, network and filesystem use, from two samples a second apart | ✅ (no filesystems) |
-| `wait_for`: the first of several conditions (console pattern, guest agent up, command exits 0, job ended, job output pattern, screen settled, screen text, background copy finished, VM event), optionally attaching a screenshot (see [Screen and mouse](#screen-and-mouse)) | ✅ (no `command` or screen conditions, no screenshot attachment) |
-| `job_read`, `job_list`: a background job's output and state | ✅ |
-| `job_start`, `job_stop`: run a long command detached in a Linux or Windows guest, and stop it | ❌ |
-| `exec`: shell command (`sh`/`bash`/`cmd`/`powershell`) or program + args, with timeout | ❌ |
-| `write_file` (overwrite/append, text or base64) | ❌ |
-| `copy_to_vm`: copy a host file into the guest (only with `host_share_dirs`) | ❌ |
-| `copy_dir_to_vm`: push a host directory into a Linux or Windows guest as a `tar` archive, following `.gitignore`, replacing a directory only with `replace` (only with `host_share_dirs`) | ❌ |
-| `copy_from_vm`: copy a guest file into a pull directory on the host, mode 644, replacing a file only with `overwrite` (only with `host_pull_dirs`) | ❌ |
-| `copy_dir_from_vm`: pull a Linux or Windows guest directory into a pull directory as a `tar` archive the server unpacks itself, modes 644 and 755, without links or special files, replacing a directory only with `overwrite` (only with `host_pull_dirs`) | ❌ |
-| `start_vm`, `stop_vm` (graceful or `force`) (only for VMs in `power_vms`) | ❌ |
-| `console_write`, optionally paced per byte or per chunk | ❌ |
-| `guest_info`: OS, hostname, NICs, filesystems, users, timezone | ❌ |
-| `screenshot` (PNG, downscaled to 1280 px wide by default) of the whole screen or a `region` | ❌ |
-| `send_keys` (`ctrl+alt+delete`, `win+r`, …), `type_text` (US layout) | ❌ |
-| `mouse`: move, click, double-click, drag or scroll at a point of a full-screen screenshot | ❌ |
-| `create_vm`, `delete_vm` (only with `manage.create` / `manage.delete`) | ❌ |
-| `list_templates`, `create_vm_from_template` (with `manage.create` and a template), `reset_vm` (also `manage.delete`) | ❌ |
-| `configure_vm`, `attach_disk`, `detach_disk`, `set_cdrom`, `attach_nic`, `detach_nic` (only with `manage.reconfigure`) | ❌ |
-| `snapshot_create`, `snapshot_list`, `snapshot_revert`, `snapshot_delete` (only with `manage.snapshots`) | ❌ |
-| `describe_vm` (with any `manage` operation), `list_isos` (with create/reconfigure and `iso_dirs`) | ❌ |
+Install a release build, or build from source. Either way, the host needs the libvirt client library at run time.
 
-In read-only mode the ❌ tools are not advertised at all. `start_vm`/`stop_vm` are also hidden while
-`power_vms` is empty (unless VM management is on), `copy_to_vm` and `copy_dir_to_vm` while no host directory is
-shared (`host_share_dirs` / `share_project_dir`), and `copy_from_vm` and `copy_dir_from_vm` while `host_pull_dirs` is
-empty.
+### From a release
 
-## Build
-
-Requires the libvirt development files (`libvirt` on Arch, `libvirt-dev` on Debian/Ubuntu,
-`libvirt-devel` on Fedora).
+Each `v*` tag publishes an x86_64 Linux tarball and its SHA-256 checksum on the
+[releases page](https://github.com/jonatsu/virt-manager-mcp/releases). The binary links dynamically against the libvirt
+and glibc of GitHub's `ubuntu-latest` runner. Download both files, check the checksum, and unpack the tarball:
 
 ```sh
-cargo build --release --locked
-# binary: target/release/virtmanager-mcp
+version=0.2.0
+name=virtmanager-mcp-$version-x86_64-linux-gnu
+base=https://github.com/jonatsu/virt-manager-mcp/releases/download/v$version
+curl -fLO $base/$name.tar.gz -O $base/$name.tar.gz.sha256
+sha256sum -c $name.tar.gz.sha256
+tar -xzf $name.tar.gz
 ```
 
-This fork publishes no release binaries; build it from source.
+The unpacked directory holds the `virtmanager-mcp` binary, `config.example.toml`, `scripts/`, `LICENSE` and
+`CHANGELOG.md`. Copy the binary to a directory on your `PATH`.
 
-## Host setup
+### From source
 
-1. Access to `qemu:///system`: add your user to the `libvirt` group and log in again.
+Install Rust 1.94 or later and the libvirt development files: `libvirt-dev` on Debian and Ubuntu, `libvirt-devel` on
+Fedora, or `libvirt` on Arch. Then build the binary:
+
+```sh
+cargo build --release --locked   # binary: target/release/virtmanager-mcp
+```
+
+## Quick start
+
+These steps take a VM you already have to an agent that can use it. They assume Claude Code and a local
+`qemu:///system` libvirt.
+
+1. Give your user access to libvirt, then log in again. Membership of the `libvirt` group is effectively root on the
+   host.
+
    ```sh
    sudo usermod -aG libvirt $USER
    ```
-2. Configuration: copy `config.example.toml` to `~/.config/virtmanager-mcp/config.toml` and list
-   your VMs in `allowed_vms`. **No VM is accessible until it is listed** (or `"*"` is used).
-   CLI flags override the file: `--uri`, `--allow <VM>` (repeatable), `--allow-power <VM>`
-   (repeatable), `--share <DIR>` (repeatable), `--share-project-dir`, `--read-only`, `--bind`,
-   `--config`.
-3. Optional: list VMs the AI may start and stop in `power_vms` (they must also be in `allowed_vms`),
-   and host directories it may copy files from in `host_share_dirs`. To allow copying only from the
-   project you're working in, set `share_project_dir = true` instead: Claude Code starts the
-   server in the session's project directory, and that directory becomes the only share. It is
-   ignored when that directory is `/` or your home directory. In HTTP mode there's one shared
-   server, so the "project" is wherever you started it.
-4. Optional: list host directories that pulls from a guest may write into in `host_pull_dirs`. Keep them apart from
-   anything else: the server refuses to start when a pull directory equals, contains or lies inside a share
-   directory, the shared project directory, an ISO directory, or the target of any libvirt storage pool, because a
-   guest controls what a pull writes. The check compares resolved paths, so it cannot see a bind mount that shows
-   the same directory at two places; do not bind-mount a pull directory elsewhere, and mount nothing inside one,
-   because an overwrite deletes the replaced tree with whatever is mounted in it. Pull directories may nest: a pull
-   never writes to a pull directory itself or to a path that holds one, and a path inside nested pull directories
-   belongs to the innermost. Each pull directory gets a private `.vmm-staging/` directory, where pulls build their
-   copies; its filesystem must support `renameat2` with `RENAME_NOREPLACE` and `RENAME_EXCHANGE`, as local
-   filesystems such as ext4, xfs, btrfs and tmpfs do.
-
-## Moving files
-
-Four tools move files between the host and a guest without passing the data through the conversation. Pushes read
-only from `host_share_dirs` (or the shared project directory), and pulls write only into `host_pull_dirs`, set up as
-[Host setup](#host-setup) describes. The server hides each tool while its directories are not configured, and
-read-only mode hides all four.
-
-- `copy_to_vm` streams one file in 64 KiB guest-agent requests. The host path is resolved (symlinks, `..`) before the
-  share check, so a link pointing outside a share is refused. On a Linux guest a new file gets mode 644 and an existing
-  one keeps its mode; run `chmod +x` through `exec` for scripts. The parent directory must exist.
-- `copy_from_vm` copies one guest file into a pull directory. The file arrives with mode 644 and appears only once
-  complete. Missing parent directories are created with mode 755, symlinks on the host side are never followed, and
-  an existing file is replaced only with `overwrite: true`. A pull never replaces a directory with a file.
-- `copy_dir_to_vm` pushes a host directory into a guest, for example a checkout. It follows the
-  `.gitignore` rules in the tree and in its parent directories inside the share (`respect_gitignore`, on by default),
-  leaves `.git` out unless `include_git` is set, and takes more `exclude` patterns. A symlink goes along only when it
-  stays inside the tree; other links, FIFOs, sockets and devices are skipped and named in the reply. The guest
-  unpacks the archive beside the target as `.vmm-<random>.d`. Files keep their host modes without setuid and setgid
-  bits, and belong to the user the guest agent runs as. An existing target is replaced as a whole only with
-  `replace: true`, never `/` or a directory directly below it, and a failed push leaves the old target in place.
-- `copy_dir_from_vm` pulls a directory from a guest. A Linux guest packs it in `/var/tmp`, or `/tmp` when that is
-  missing, and the server deletes the archive afterwards. The server unpacks the archive itself, because
-  the guest controls it: files arrive with mode 644 and directories with 755, and links, devices and FIFOs are
-  skipped and named. An archive with absolute or `..` paths, paths over 4096 bytes or 256 levels, repeated paths or
-  sparse files fails the pull, which then writes nothing. `exclude` takes gitignore patterns, applied on the host. An
-  existing directory is replaced as a whole only with `overwrite: true`. A file that changed while `tar` read it
-  gives a warning, not a failure.
-
-`limits.max_pull_bytes` (default 1 GiB) caps one pull: the archive while the guest builds it, and the files written.
-`limits.max_pull_entries` (default 100,000) caps the entries of a directory pull, counting the directories their
-paths imply. The server stops a guest `tar` whose archive grows past the byte cap.
-
-Every copy waits up to `limits.max_wait_secs`. A longer copy goes on in the background and replies with a transfer
-ID, and `wait_for` with a lone `transfer_done` condition reports how it ended. At most `limits.max_transfers`
-(default 4) copies run at once, and the server keeps the newest 64 results. A background copy lives in the server
-process, so it ends when the server does. A push cut short, for example by the VM stopping, can leave `.vmm-*`
-entries beside its target in the guest; delete them through `exec`.
-
-`vm_addresses` tells an agent where to reach a guest for other ways of moving files, such as `scp`. For each
-interface it takes libvirt's DHCP lease, then the guest agent's answer, then the host's ARP table, and names the
-source. Only a lease comes from outside the guest. The agent's answer and the ARP table are the guest's own claims,
-so a compromised guest can name another VM's address or a host address. When a VM has a network interface without a
-host-side device name, such as a passed-through device, the server skips the lease and ARP sources, and only the
-guest agent can answer.
-
-### Directory transfers on Windows
-
-A Linux guest needs `tar`. A Windows guest uses its own `%SystemRoot%\System32\tar.exe`, which Windows 10 1803 and
-later ship; the server runs it directly through the guest agent and runs PowerShell only for the steps around it.
-The guest agent fails a command whose arguments are not ASCII, so a pull from such a path, such as
-`C:\Windows\Temp\vmm-été`, runs `tar.exe` from PowerShell instead.
-
-- A Windows `guest_path` is a drive path such as `C:\work\app`, with `\` or `/` between components. The
-  server refuses relative and drive-relative paths (`C:work`), UNC and device paths (`\\server\share`, `\\?\C:\`),
-  `..`, control characters and `< > " | ? *`, and a component that ends in a dot or a space. A push never replaces a
-  drive root, and `replace` also refuses the directories directly below one, compared without regard to case.
-- `tar.exe` unpacks some names without an error but onto a device, another file or
-  another name, so a push to Windows skips and names them: reserved device names such as `CON` or `nul.txt`, names
-  with a control character or one of `< > : " | ? * \`, names ending in a dot or a space, names that are not valid
-  UTF-8, names shaped like 8.3 short names such as `LONGFI~1.TXT`, and a name that differs from an earlier one in its
-  directory only in case. It also skips every symlink, because the archive cannot say whether a link points to a
-  file or a directory. A name outside the guest's code page, such as a Japanese name on a Western guest, fails the
-  push in `tar.exe`.
-- Every pushed file and directory arrives writable; host modes do not carry over. While `tar.exe` unpacks, only
-  `SYSTEM` and `Administrators` can write the push's staging directory, so no other guest user can plant a junction
-  in it. The pushed tree then gets the access list its parent passes on. A guest user who may delete or rename
-  entries in the target's parent, such as its owner, can still redirect a push.
-- Windows refuses to rename a directory while a file in it is open, so a `replace` of a tree in
-  use fails after one retry and leaves the old tree in place.
-- The guest packs in `%SystemRoot%\Temp`, usually `C:\Windows\Temp`, where only `SYSTEM` and `Administrators` can
-  read the archive. `tar.exe` follows junctions, so a junction in the pulled tree brings its target's content along
-  until a cap stops it; a junction to the tree itself fails the pull. Any non-zero exit of `tar.exe`, including a
-  file another program holds open, fails the pull, as does a name in the tree outside the guest's code page, for
-  which `tar.exe` prints no reason and the pull's error names that cause. The server polls the archive's size
-  through PowerShell, so an archive can pass `max_pull_bytes` by about a second of writing before `tar.exe` stops;
-  the host still writes nothing past the cap.
-- `tar.exe` creates paths over 260 characters, which programs without long-path support, such as
-  Explorer, cannot open.
-
-## Screen and mouse
-
-The graphical display lets an agent drive guests that have no guest agent, such as installers and firmware screens.
-`screenshot`, `send_keys`, `type_text`, `mouse` and the screen conditions of `wait_for` all use it.
-
-Coordinates are pixels of a full-screen image from `screenshot` without a region, or from a wait's screenshot
-attachment. Each call that takes them also takes that image's `image_width` and `image_height`, and refuses a point or
-region outside the image. The server maps them onto the screen proportionally, so a resolution change keeps them at
-the same relative place. A `region` (`x`, `y`, `width`, `height`) on `screenshot` returns only that part, cropped at
-full resolution before downscaling. Its reply gives the region's place in the full-screen image. A region image's
-pixels are not click coordinates.
-
-`wait_for` has two screen conditions, which read a frame captured every 500 ms. All screen conditions of one wait use
-the same display head.
-
-- `screen_settled` holds once no two consecutive frames differ in more than `max_changed_pixels` pixels (default
-  600, which lets a blinking cursor through) for `settle_secs` (default 3, from 0.5 to the timeout less 0.5). It needs
-  no OCR models.
-- `screen_text` matches a `pattern` against the text that OCR reads from the screen, or from a `region`. A time-out
-  returns the last text read as `last_text`, so the agent can loosen its pattern. OCR misreads some text: a console
-  `login:` read as `log in:`. A region or a tolerant pattern such as `log ?in:` helps. Each `screen_text` condition
-  runs its own OCR, so one pattern with alternatives (`a|b`) costs less than several conditions.
-
-With `screenshot: true`, a match of any condition attaches a PNG downscaled to 1280 pixels wide: the frame a screen
-condition matched, or a new capture of display head 0. Some guests drop input sent too early: the Debian installer
-ignores keys sent within about 2 s of a new screen. Wait for the screen's text and then for `screen_settled` before
-typing.
-
-`screen_text` needs the `ocrs` OCR models, about 12 MiB. Start the server with `VIRTMANAGER_OCR_DOWNLOAD=1` in its
-environment, and it downloads them in the background into `~/.local/share/virtmanager-mcp/ocr-models`, or under
-`$XDG_DATA_HOME`. It checks each file against a pinned SHA-256 sum, and it skips files already there. Until the
-download ends, `screen_text` replies that the models are still downloading. A failed download leaves the server
-running, and `screen_text` names the cause. The variable needs `curl` on the host.
-
-To keep the models somewhere else, or on a host without network access, fetch them once and name the directory in
-the config:
-
-```sh
-scripts/fetch-ocr-models.sh ~/.local/share/virtmanager-mcp/ocr   # checks pinned SHA-256 sums
-```
-
-```toml
-[display]
-ocr_models = "/home/me/.local/share/virtmanager-mcp/ocr" # absolute path
-```
-
-When `ocr_models` is set, the server refuses to start unless the directory holds both model files, and it ignores
-`VIRTMANAGER_OCR_DOWNLOAD`. With neither, `screen_text` is refused and `screen_settled` still works. OCR runs in a
-pool of 4 threads, so it leaves the host's other cores to its VMs.
-[`docs/how-to/ocr-models.md`](docs/how-to/ocr-models.md) covers where the models run and how to update and remove
-them.
-
-`mouse` moves, clicks, double-clicks, drags or scrolls. It needs a USB tablet (`<input type='tablet' bus='usb'/>`),
-which VMs from `create_vm` and `create_vm_from_template` have, and it supports display head 0 only. It sends QEMU
-only `input-send-event` commands that it builds itself, through the QEMU monitor. libvirt then marks the domain as
-tainted (`custom-monitor`).
-
-In read-only mode, `screenshot` and `mouse` are hidden, and `wait_for` refuses the screen conditions and the
-screenshot attachment.
-
-## VM management
-
-All of it is off by default. Enable each operation separately in the `[manage]` section of the
-config file (see `config.example.toml`):
-
-```toml
-[manage]
-create = true
-delete = true
-reconfigure = true
-snapshots = true
-manage_vms = []                     # existing VMs (also in allowed_vms) the tools may act on
-disk_pool = "default"               # libvirt pool for new disks, required for create
-iso_dirs = ["/var/lib/libvirt/iso"]
-networks = ["default"]
-max_vms = 2
-max_vcpus = 2
-max_memory_mib = 4096
-max_disk_gib = 32
-```
-
-- **Which VMs:** the management tools act on VMs this server created and on VMs listed in
-  `manage_vms`. A VM created by the server carries a marker in its libvirt metadata. While any
-  `manage` operation is enabled, such VMs are also treated as if they were in `allowed_vms` and
-  `power_vms`, so the AI can start them, use `exec` and so on. Other VMs stay off limits.
-  `list_vms` shows `managed: true` for VMs the tools may act on.
-
-- **Creating:** `create_vm` takes a name, `os` (`linux`/`windows`), vCPUs, memory, disk size,
-  `firmware` (`uefi`, the default, or `bios`), an optional TPM 2.0, an install ISO, a second
-  "driver" ISO (e.g. `virtio-win.iso` for Windows) and a network. A UEFI VM uses the host's firmware with Secure
-  Boot, which refuses an installer that is not signed; `secure_boot: false` turns it off. The VM gets a q35 machine,
-  a virtio disk (a new qcow2 volume `<name>.qcow2` in `disk_pool`), a SATA CD-ROM it boots from
-  after the disk, a virtio NIC, the guest agent channel, a serial console, SPICE and spare PCIe
-  ports for hot-plugging. Windows guests also get Hyper-V enlightenments and a local-time clock.
-  Every VM the server creates, here or from a template, also gets a panic device (`isa` for Linux, `hyperv` for
-  Windows), so a guest crash becomes libvirt's crashed event, a balloon that reports guest memory every 5 s, and
-  `manage.on_crash` as its crash action: `preserve` (the default) keeps a crashed VM stopped in place, holding its
-  memory, until `stop_vm` with `force: true`, and `destroy` stops it. The VM is created shut off.
-
-- **Disposable VMs from templates:** `create_vm_from_template` makes a VM in seconds from a template
-  volume the operator prepared, such as a Debian 13 cloud image with the guest agent installed
-  ([docs/templates.md](docs/templates.md) builds one with `scripts/make-template.sh`). The VM gets a
-  thin qcow2 overlay on the template (`<name>-g1.qcow2`) and a small read-only seed disk
-  (`<name>-g1-seed.img`) that cloud-init reads for the VM's identity; its name is also its hostname.
-  It starts and waits for the guest agent by default. With `lifetime_minutes` (at most
-  `max_lifetime_minutes`), the server deletes the VM and its disks once the time has passed: every
-  running server checks once a minute, and `virtmanager-mcp sweep` does one check, for a systemd timer
-  when no server runs. A running server's `vm_events` records its own expiry as cause `expiry`, and one
-  by `virtmanager-mcp sweep` as `outside`. `reset_vm` returns such a VM to the template's state: new
-  disks, no snapshots, same name, MAC address, hardware and expiry. `list_templates` shows the usable
-  templates; one whose volume is missing, not qcow2 or attached to any VM, or whose user data is
-  unreadable, does not start with a `#cloud-config` line or exceeds 1 MiB, is hidden, and the server
-  log says why. Never change or delete a template volume while VMs use it.
-
-  ```toml
-  [manage]
-  create = true
-  delete = true               # also needed for reset_vm
-  disk_pool = "agent-vms"
-  max_lifetime_minutes = 1440
-
-  [manage.templates.debian13]
-  volume = "tpl-debian13.qcow2" # qcow2 volume in disk_pool
-  firmware = "bios"             # or "uefi"; os = "linux" (default) or "windows"
-  # secure_boot = false                           # UEFI only: for a boot loader that is not signed
-  description = "Debian 13 with qemu-guest-agent"
-  # user_data = "/etc/virtmanager-mcp/debian13.yaml"   # optional cloud-config for every new VM
-  ```
-
-- **Deleting:** `delete_vm` needs the VM to be shut off. It removes the VM with its snapshots,
-  NVRAM and TPM state, and deletes the VM's disks that are volumes in `disk_pool`. Disks
-  elsewhere and ISOs are never deleted. The same applies to VMs in `manage_vms`.
-
-- **Reconfiguring:** `configure_vm` changes vCPUs and memory in the persistent configuration
-  (takes effect at the next boot). `attach_disk` creates a new volume in `disk_pool` and attaches
-  it, also while the VM is running. `detach_disk` needs the VM shut off and **deletes** the volume
-  if it is in `disk_pool`. `set_cdrom` inserts or ejects ISOs, `attach_nic`/`detach_nic` add and
-  remove interfaces on allowed networks. `describe_vm` shows targets and MAC addresses.
-
-- **Limits:** `max_vcpus`, `max_memory_mib` and `max_disk_gib` apply to create and reconfigure.
-  `max_vms` caps how many VMs created by the server exist at once. It holds across every server
-  process and `sweep` command of one account, such as several Claude Code sessions: management
-  operations take the lock file `~/.cache/virtmanager-mcp/manage.lock`, and wait up to 30 s for
-  another operation to release it. Processes running as different accounts, or with a different
-  `HOME`, do not share it.
-
-- **Paths:** ISOs must be inside `iso_dirs` (resolved like `host_share_dirs`, symlinks
-  included), and QEMU (user `libvirt-qemu`/`qemu`) must be able to read them. `list_isos` lists the
-  `.iso` files found there.
-
-- **Snapshots** are libvirt's internal qcow2 snapshots. A running VM's snapshot includes its
-  memory. A *running* UEFI VM cannot be snapshotted on hosts whose OVMF firmware has no qcow2
-  NVRAM variant (Arch, Ubuntu): libvirt refuses, so shut it down first. BIOS VMs work either way.
-
-## Guest setup
-
-### Guest agent channel (both OSes)
-
-The VM needs a guest agent channel. virt-manager adds one automatically for new VMs; check the XML
-(*Details → Overview → XML*) for:
-
-```xml
-<channel type="unix">
-  <target type="virtio" name="org.qemu.guest_agent.0"/>
-</channel>
-```
-
-If it is missing, add it (*Add Hardware → Channel → org.qemu.guest_agent.0*) and power-cycle the VM.
-
-### Linux guest
-
-```sh
-sudo dnf install qemu-guest-agent     # or apt / pacman
-sudo systemctl enable --now qemu-guest-agent
-```
-
-> **RHEL / CentOS / Rocky / Alma:** the packaged agent blocks `guest-exec` and file
-> operations by default. Unblock both, because file writes also use `guest-exec`: remove them
-> from `BLOCK_RPCS` (or the `--block-rpcs` / `FILTER_RPC_ARGS` setting) in
-> `/etc/sysconfig/qemu-ga` and restart the agent.
-
-Serial console (for `console_*`): the default virt-manager VM has a `pty` serial console. Enable a login
-on it with:
-
-```sh
-sudo systemctl enable --now serial-getty@ttyS0.service
-```
-
-To also see kernel/boot messages there, add `console=ttyS0` to the kernel command line.
-
-### Windows guest
-
-1. Install the [virtio-win drivers](https://github.com/virtio-win/virtio-win-pkg-scripts)
-   (`virtio-win-guest-tools.exe`). It installs the VirtIO serial driver and the **QEMU Guest Agent** service.
-2. Make sure the *QEMU Guest Agent* service is running (`services.msc`).
-
-`exec` defaults to PowerShell on Windows (`shell: "cmd"` is also available). `list_dir`/`stat_path`
-need PowerShell. Windows does not offer a serial console login by default, so use `exec`
-or `screenshot`/`send_keys`/`type_text` instead of `console_*`.
-
-A PowerShell command's exit code is the one passed to `exit`, 1 after an uncaught error or when the last command is a
-failing native program or cmdlet, and 0 otherwise. `$false` is not a failure, so a bare `Test-Path` exits 0 either way;
-write `exit [int](-not (Test-Path C:\ready))` for a `wait_for` `command` condition.
-
-Jobs run a PowerShell script as `SYSTEM` in session 0, without a desktop, so they cannot open windows the screen
-shows. They keep their files in `C:\ProgramData\virtmanager-mcp\jobs\<id>\`; `job_start` refuses to run when that
-directory or its parent is a junction or symbolic link, is owned by anyone but `SYSTEM` or `Administrators`, or grants
-access to anyone else. A job's exit code follows `powershell -File`: the code passed to `exit`, 1 after an uncaught
-error, and 0 otherwise, even after a failing native program, so end a job with `exit $LASTEXITCODE` to pass on a
-program's code. `job_stop` ends the job's process tree at once with `taskkill /T /F`, with or without `force`, and the
-job then reads "ended without status"; processes outside that tree keep running, such as those the job started
-through WMI, or whose parent has already exited. The job's output waits in memory, up to 64 MiB, while a reader such
-as the agent holds the log file open; output beyond that is dropped, and a line in the log says how many bytes.
-
-Windows support was tested on an offline, English Windows 11 Pro guest. Reading a job's state depends on the guest
-agent's English error texts for a missing or locked file, so on a guest in another display language `job_read`,
-`job_list` and the job conditions may fail.
-
-Restarting the `QEMU-GA` service sometimes leaves the agent unreachable until the VM is powered off and on: the new
-agent runs, but libvirt reports its channel disconnected. This was seen with `virtio-win` 0.1.302. Windows also
-ignores the ACPI power button while a user is logged on, so a graceful `stop_vm` relies on the agent there.
-
-## Connecting an MCP client
-
-### stdio (default)
-
-Claude Code:
-
-```sh
-claude mcp add virtmanager -- /path/to/virtmanager-mcp
-```
-
-Generic JSON config (Claude Desktop and others):
-
-```json
-{
-  "mcpServers": {
-    "virtmanager": {
-      "command": "/path/to/virtmanager-mcp",
-      "args": []
-    }
-  }
-}
-```
-
-### Streamable HTTP
-
-```sh
-VIRTMANAGER_MCP_TOKEN=change-me virtmanager-mcp --transport http   # http://127.0.0.1:8765/mcp
-claude mcp add --transport http virtmanager http://127.0.0.1:8765/mcp \
-  --header "Authorization: Bearer change-me"
-```
-
-HTTP mode refuses to start without a token. Requests without a matching `Authorization: Bearer` header get `401`.
-
-## Instructions for AI agents
-
-Two templates tell an agent to install and test software in a development VM through this server
-instead of on the host, keep an inventory of what the VM contains, and use snapshots and
-disposable VMs when the management tools are enabled:
-
-- `example-global-CLAUDE.md` for Claude Code: copy it into `~/.claude/CLAUDE.md`.
-- `example-global-AGENTS.md` for agents that read `AGENTS.md` (e.g. Codex: `~/.codex/AGENTS.md`).
-
-Adjust the VM name in them to yours. Both use the same inventory directory, so agents share it.
-
-## Notes and limitations
-
-- The server records each visible VM's starts, stops, crashes, reboots and similar events in memory, up to
-  `limits.max_events` per VM, until it exits or the VM is deleted; `vm_events` lists them. When one of them happened
-  outside any tool call, such as a guest panic, the next reply to a call that names the VM ends with a notice, once
-  per server process whichever client makes the call. With several agents on one server, only the first sees the
-  notice, and the others find the records with `vm_events`.
-- `exec` is not interactive: output is returned when the process exits. On timeout the server tries
-  to kill the process (`kill -KILL` / `taskkill /F /T`). On Linux, children of the shell may survive.
-- When this server boots a VM, through `start_vm`, `create_vm_from_template` or `reset_vm`, it starts the VM paused,
-  opens its console, then resumes it, so `console_read` from offset 0 holds the boot from its first byte. A Windows
-  guest writes nothing to its serial console, so its boot shows only through the screen tools. A console opened on a
-  VM the server did not boot holds output from the open on. While a boot runs, a second `start_vm` of the VM is
-  refused. Only one client can hold a console: if virt-manager's serial console view is open when the server boots
-  the VM, the reply says the console could not be captured, and `console_open` fails unless `force: true`, which
-  disconnects the other client.
-- `console_open` on a console this server holds open attaches to it and replies with its generation; `force: true`
-  opens a new session and drops the old one's output. Every new session starts a new console generation, and every
-  offset a console tool returns comes with its `generation`. A `console_read` or console wait from an offset above 0
-  must pass that generation back, so an offset from an earlier session is refused instead of misread.
-- Each VM keeps the console output of one earlier run. When a new run replaces a session, or `console_close`,
-  `reset_vm` or `snapshot_revert` ends one, its output moves to the previous run, and `console_read` with
-  `run: "previous"` reads it as closed with the reason it ended. The previous run has its own generation and offsets,
-  and a second move drops the first. `console_read` also works on a stopped VM. After a guest panic, the panic text
-  is in the current run while a preserved crash keeps the VM in place, and in the previous run once the VM has
-  started again.
-- `vm_stats` reports one snapshot from two samples about a second apart and keeps no history, so a spike that ended
-  before the call leaves no trace. Its filesystem figures come from the guest agent and are the guest's own claim.
-- `wait_for` returns within `limits.max_wait_secs` (default 50 s, below the 60 s at which some clients cut a call)
-  plus 2 s. A wait that runs out returns resume points, so the next call still finds output that arrived in
-  between. A console condition without `since` starts where the last `console_write` began, and a match moves that
-  point past it. On a console the server captured from boot, that point is offset 0 until the first write, so a wait
-  also sees a prompt printed before the call. A wait never changes what `console_read` returns.
-- `console_write` can pause between bytes (`inter_char_delay_ms`) or between chunks (`chunk_size` with
-  `chunk_delay_ms`), up to 1000 ms each, for firmware and bootloaders that drop input sent back to back. A write
-  whose pauses would exceed `limits.max_wait_secs` is refused.
-- Input sent before the guest program that should read it is waiting can go astray. Right after a command line, the
-  shell may still hold the terminal in its own raw, no-echo mode, so input that arrives before the command starts
-  is not echoed, and a Ctrl-D in it is read as data. Wait for the program's prompt with `wait_for`, or pause, before
-  sending its input.
-- Jobs keep their files in `/var/lib/virtmanager-mcp/jobs/<id>/` in the guest and run under `systemd-run`, or
-  `setsid` without systemd, so they survive an agent restart and a server restart. The launcher refuses a job
-  directory parent that is a symbolic link, or is not a root-owned directory with mode 700. Windows jobs are
-  described under [Windows guest](#windows-guest).
-- `write_file` gives a new file on a Linux guest mode 644, or the octal `mode` it is given (up to
-  `777`). Overwriting or appending keeps an existing file's mode unless `mode` is given. The guest
-  agent itself would create the file world-writable, so the mode is set before any data is written.
-  On Linux guests `write_file` and `copy_to_vm` therefore also need `guest-exec`, which runs `test`,
-  `chmod` and `rm`; an agent that allows file operations but blocks `guest-exec` cannot write files.
-- `stop_vm` without `force` sends a shutdown request and waits (60 s by default). A guest that
-  ignores ACPI and has no guest agent will not shut down; use `force: true` to power it off.
-- `type_text` assumes a US keyboard layout in the guest and supports printable ASCII only.
-- Created VMs reference their disks by file path, like virt-manager. Volume-type disks
-  (`<source pool=… volume=…/>`) failed to open under Ubuntu's AppArmor setup.
-- Logs go to stderr; set verbosity with `RUST_LOG` (e.g. `RUST_LOG=debug`).
+
+2. Install and start the QEMU guest agent in the VM. [Guest setup](docs/guest-setup.md) shows how for Linux and Windows.
+
+3. Write a config file that lists the VM. No VM is accessible until it is listed.
+
+   ```sh
+   mkdir -p ~/.config/virtmanager-mcp
+   printf 'allowed_vms = ["my-vm"]\npower_vms = ["my-vm"]\n' > ~/.config/virtmanager-mcp/config.toml
+   ```
+
+4. Register the server with your MCP client. It talks to the client over stdio.
+
+   ```sh
+   claude mcp add virtmanager -- /path/to/virtmanager-mcp
+   ```
+
+5. Ask the agent to list your VMs. The server answers with its `list_vms` tool.
+
+[MCP clients](docs/mcp-clients.md) covers other clients and the HTTP transport.
+
+## Configuration
+
+The server reads one TOML file. With `--config <file>`, that file must exist. Without it, the server reads
+`$XDG_CONFIG_HOME/virtmanager-mcp/config.toml`, or `~/.config/virtmanager-mcp/config.toml` when `XDG_CONFIG_HOME` is
+unset. If the default file is missing, the server logs a warning and runs with defaults, which make no VM accessible.
+Every key is optional, and the server refuses a file with an unknown key.
+
+[`config.example.toml`](config.example.toml) documents every key with its default. The main parts are:
+
+- top-level keys: `uri`, `allowed_vms`, `power_vms`, `host_share_dirs`, `share_project_dir`, `host_pull_dirs` and
+  `read_only`;
+- `[manage]`: VM management, which is off by default, and `[manage.templates.<name>]` for disposable VMs;
+- `[limits]`: timeouts and size caps, such as `exec_timeout_secs`, `max_output_bytes`, `max_wait_secs` and
+  `max_pull_bytes`;
+- `[display]`: `ocr_models`, the directory of text recognition models for the `screen_text` wait condition;
+- `[http]`: `bind`, which defaults to `127.0.0.1:8765`, and `token`, which the HTTP transport requires.
+
+The server reads these environment variables:
+
+- `VIRTMANAGER_MCP_TOKEN`: the HTTP bearer token. It replaces `http.token` from the file.
+- `VIRTMANAGER_OCR_DOWNLOAD=1`: downloads the OCR models in the background, unless `display.ocr_models` is set.
+- `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME`: the locations of the config file and the downloaded OCR models.
+  `HOME` also places the lock file `~/.cache/virtmanager-mcp/manage.lock`.
+- `RUST_LOG`: the log verbosity, `info` by default. Logs go to stderr.
+
+Command-line flags:
+
+- `-c, --config <file>` and `-t, --transport <stdio|http>` choose the file and the transport. Stdio is the default.
+- `--uri <uri>` and `--bind <address>` replace `uri` and `http.bind` from the file.
+- `--allow <vm>`, `--allow-power <vm>` and `--share <dir>` add to `allowed_vms`, `power_vms` and `host_share_dirs`.
+  Each repeats.
+- `--share-project-dir` and `--read-only` switch their setting on. No flag switches either one off when the file
+  turns it on.
+- The `sweep` command deletes expired VMs made from templates once, then exits. It needs `manage.create` and a
+  template in the config.
+- `-V, --version` prints the version.
+
+## Safety model
+
+The config decides what an agent can reach, and every default denies.
+
+- `allowed_vms` hides every VM it does not list, unless the list holds `"*"`.
+- `power_vms` limits `start_vm` and `stop_vm` to the VMs it lists, which must also be in `allowed_vms`.
+- VM management is off until the config enables each operation. Its tools act only on VMs the server created and on
+  those in `manage_vms`.
+- A VM carries the server's ownership marker only when a create tool made it. No tool adds the marker to an existing
+  VM.
+- Deletion removes only volumes in the configured `disk_pool`.
+- Copies read only from `host_share_dirs` or the shared project directory, and write only into `host_pull_dirs`.
+- `read_only` hides every tool that changes a VM or the host.
+
+The HTTP transport sends its bearer token over plain `http://`, because the server has no TLS of its own. Keep the
+default `127.0.0.1` bind, or put the server behind a TLS proxy. Requests without the matching token get `401`.
+
+Only `qemu:///system` is tested.
+
+## Documentation
+
+- [Tools](docs/tools.md): every tool, how it reaches the guest, and what read-only mode hides.
+- [Guest setup](docs/guest-setup.md): the guest agent and serial console for Linux and Windows guests.
+- [File transfer](docs/file-transfer.md): host directories and the four copy tools, including Windows directories.
+- [Screen and mouse](docs/screen-and-input.md): screenshots, keyboard and mouse input, and screen text recognition.
+- [VM management](docs/vm-management.md): creating, reconfiguring, snapshotting and deleting VMs, and templates.
+- [MCP clients](docs/mcp-clients.md): client setup for stdio and HTTP, and instructions to give your agents.
+- [Notes and limitations](docs/limitations.md): behaviour to know about, such as consoles, waits and jobs.
+
+## Project
+
+- [LICENSE](LICENSE): GPL-2.0.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to send a change, the version rules and the release steps.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability.
+- [docs/goals.md](docs/goals.md): the success signals, method and rules for changing the goals.
+- [docs/plans/fork-roadmap.md](docs/plans/fork-roadmap.md): planned work.
