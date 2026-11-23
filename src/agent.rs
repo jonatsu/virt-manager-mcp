@@ -505,6 +505,19 @@ pub enum Shell {
     Powershell,
 }
 
+/// Whether a PowerShell command names the automatic variable `$input`, as `$input` or `${input}` in any case, and not
+/// a longer name such as `$inputPath`.
+fn names_input(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    lower.contains("${input}")
+        || lower.match_indices("$input").any(|(at, m)| {
+            !lower[at + m.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+}
+
 /// Runs an agent's PowerShell command line, so that its errors reach stderr as the text a console shows.
 ///
 /// Without a console, `powershell.exe` writes progress records to stderr as CLIXML, such as "Preparing modules for
@@ -518,9 +531,7 @@ pub enum Shell {
 /// passed in. Any use of the outer `$input` reads all of stdin, which would leave `[Console]::In` empty, so it is
 /// passed only when the command names `$input`.
 fn powershell_command(cmd: &str) -> ExecSpec {
-    let lower = cmd.to_ascii_lowercase();
-    let uses_input = lower.contains("$input") || lower.contains("${input}");
-    let (outer, inner) = if uses_input {
+    let (outer, inner) = if names_input(cmd) {
         ("$vmmInput = ,$input; ", "$input = $vmmInput[0]; ")
     } else {
         ("", "")
@@ -606,14 +617,18 @@ mod tests {
 
     #[test]
     fn windows_powershell_passes_input_only_to_a_command_that_reads_it() {
-        let plain = shell_spec(
-            GuestOs::Windows,
-            Shell::Default,
+        for cmd in [
             "[Console]::In.ReadToEnd()",
-        )
-        .unwrap();
-        assert!(!plain.args.last().unwrap().contains("$input"));
-        assert!(!command_script(&plain).contains("$vmmInput"));
+            "$inputPath = 'a'; [Console]::In.ReadToEnd()",
+            "$input_2",
+        ] {
+            let spec = shell_spec(GuestOs::Windows, Shell::Default, cmd).unwrap();
+            assert!(!spec.args.last().unwrap().starts_with("$vmmInput"), "{cmd}");
+            assert!(!command_script(&spec).contains("$vmmInput"), "{cmd}");
+        }
+        for cmd in ["\"$input\"", "$INPUT", "@($input).Count", "$input"] {
+            assert!(names_input(cmd), "{cmd}");
+        }
 
         for cmd in ["$input | Sort-Object", "${Input} | Measure-Object"] {
             let spec = shell_spec(GuestOs::Windows, Shell::Default, cmd).unwrap();
