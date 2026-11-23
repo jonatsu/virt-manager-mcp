@@ -1,7 +1,8 @@
 //! libvirt connection handling and access control.
 
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -30,9 +31,16 @@ pub fn start_event_loop() -> Result<()> {
     Ok(())
 }
 
+/// Runs after a reconnect with the hypervisor, the old and the new connection, and when the old one was last seen
+/// alive, while the connection is still locked for writing. It must not call `with_conn`.
+pub type ReconnectHook = Box<dyn Fn(&Hypervisor, &Connect, &Connect, u64) + Send + Sync>;
+
 pub struct Hypervisor {
     pub config: Config,
     conn: RwLock<Connect>,
+    on_reconnect: OnceLock<ReconnectHook>,
+    /// When `with_conn` last found the connection alive, in epoch seconds.
+    alive_at: AtomicU64,
 }
 
 impl Hypervisor {
@@ -41,7 +49,16 @@ impl Hypervisor {
         Ok(Self {
             config,
             conn: RwLock::new(conn),
+            on_reconnect: OnceLock::new(),
+            alive_at: AtomicU64::new(manage::now_epoch()),
         })
+    }
+
+    /// Sets the hook every reconnect runs. Only the first call has an effect.
+    pub fn set_reconnect_hook(&self, hook: ReconnectHook) {
+        if self.on_reconnect.set(hook).is_err() {
+            tracing::warn!("a reconnect hook was already set; the new one is ignored");
+        }
     }
 
     /// Runs `f` with a live connection, reconnecting once if libvirtd went away.
@@ -49,19 +66,44 @@ impl Hypervisor {
         {
             let conn = self.conn.read().unwrap();
             if conn.is_alive().unwrap_or(false) {
+                self.alive_at.store(manage::now_epoch(), Ordering::Relaxed);
                 return f(&conn);
             }
         }
         let mut conn = self.conn.write().unwrap();
         if !conn.is_alive().unwrap_or(false) {
-            tracing::warn!(
-                "libvirt connection lost, reconnecting to {}",
-                self.config.uri
-            );
-            let _ = conn.close();
-            *conn = open(&self.config.uri)?;
+            self.reconnect(&mut conn)?;
         }
         f(&conn)
+    }
+
+    /// Replaces a dead connection, the one path every reconnect takes, so the hook runs under the same write lock as
+    /// the swap and no tool sees the new connection before the hook has.
+    fn reconnect(&self, conn: &mut Connect) -> Result<()> {
+        tracing::warn!(
+            "libvirt connection lost, reconnecting to {}",
+            self.config.uri
+        );
+        let new = open(&self.config.uri)?;
+        if let Some(hook) = self.on_reconnect.get() {
+            // A panic here would poison the connection lock and fail every later tool call, so it stops at the hook.
+            let alive_at = self.alive_at.load(Ordering::Relaxed);
+            let run = std::panic::AssertUnwindSafe(|| hook(self, conn, &new, alive_at));
+            if std::panic::catch_unwind(run).is_err() {
+                tracing::error!("the reconnect hook panicked; events may be missing");
+            }
+        }
+        let mut old = std::mem::replace(conn, new);
+        let _ = old.close();
+        self.alive_at.store(manage::now_epoch(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether config lets the server see `dom`: listed in `allowed_vms`, or created by this server while VM
+    /// management is on.
+    pub fn is_visible(&self, dom: &Domain) -> bool {
+        dom.get_name().is_ok_and(|n| self.config.is_allowed(&n))
+            || (self.config.manage.enabled() && manage::is_owned(dom))
     }
 
     /// The target path of every storage pool on the connection that has one, by pool name, resolved where it exists.
@@ -116,16 +158,9 @@ impl Hypervisor {
 
     /// All VMs (running or not) that are in the allow-list or were created by this server.
     pub fn allowed(&self) -> Result<Vec<Domain>> {
-        let manage = self.config.manage.enabled();
         self.with_conn(|conn| {
             let doms = conn.list_all_domains(0)?;
-            Ok(doms
-                .into_iter()
-                .filter(|d| {
-                    d.get_name().is_ok_and(|n| self.config.is_allowed(&n))
-                        || (manage && manage::is_owned(d))
-                })
-                .collect())
+            Ok(doms.into_iter().filter(|d| self.is_visible(d)).collect())
         })
     }
 

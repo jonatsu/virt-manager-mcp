@@ -9,6 +9,9 @@
     )
 )]
 
+pub mod ffi;
+pub mod worker;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
@@ -417,6 +420,48 @@ impl Events {
             };
             inner.push(&uuid, &name, record);
         }
+    }
+
+    /// Whether the VM's last record that says so left it running, or `None` when no record says.
+    pub fn last_running(&self, uuid: &str) -> Option<bool> {
+        let inner = self.lock();
+        inner.logs.get(uuid)?.records.iter().rev().find_map(|r| {
+            match r.kind {
+                Kind::Stopped => Some(false),
+                Kind::Crashed => Some(!r.stopped),
+                // A shutdown is always followed by its stop, a gap says nothing about the VM, and the agent
+                // disconnects after a stop as well as while the VM runs.
+                Kind::Shutdown | Kind::Gap | Kind::AgentDisconnected => None,
+                Kind::Started
+                | Kind::Paused
+                | Kind::Resumed
+                | Kind::Pmsuspended
+                | Kind::Rebooted
+                | Kind::Watchdog
+                | Kind::AgentConnected => Some(true),
+            }
+        })
+    }
+
+    /// Records that the VM started or stopped while the connection was lost, found by comparing its state afterwards
+    /// with its last record.
+    pub fn record_during_gap(&self, uuid: &str, name: &str, running: bool, time: u64) -> u64 {
+        let mut inner = self.lock();
+        inner.last_seq += 1;
+        let record = Record {
+            seq: inner.last_seq,
+            time,
+            kind: if running {
+                Kind::Started
+            } else {
+                Kind::Stopped
+            },
+            detail: "during_gap".into(),
+            cause: Cause::Outside,
+            stopped: false,
+            gap: None,
+        };
+        inner.push(uuid, name, record)
     }
 
     /// The VM's records after `since`, oldest first, of `kinds` when given. Without `kinds`, the VM's seen-cursor
