@@ -91,8 +91,8 @@ Each release's section lists what changed for people who run the server and for 
   have written outside the target. The staging directory now grants access only to
   `SYSTEM` and `Administrators` while `tar.exe` unpacks, and the pushed tree then gets the access list its parent
   passes on. A user who may delete or rename entries in the parent, such as its owner, can still redirect the push.
-  The archive written beside the target before the unpack still inherits the parent's access list, so under
-  `C:\Users\Public` such a user can rewrite it; whether that reaches outside the target is untested.
+  The archive goes into a second directory beside the target with the same protected access list, so no other user
+  can rewrite it before `tar.exe` reads it.
 
 ## 0.2.0
 

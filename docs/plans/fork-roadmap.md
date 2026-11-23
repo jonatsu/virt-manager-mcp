@@ -149,17 +149,15 @@ Reviews of earlier work found these. None blocks the server's use.
     writes to stderr does so through a UTF-8 writer with `AutoFlush`, as `pull-pack.ps1` did, so a non-ASCII path in
     a message arrives intact. `pull-prepare.ps1` writes no error text. `win-transfer.json` checks one such message
     under code page 437 ([run record](followups-run-2-implementation-plan.md)).
-25. **A Windows push's archive inherits its parent's access list.** The guest agent writes `.vmm-<id>.tar` beside the
-    target before the staging directory exists. Under `C:\Users\Public`, files that `SYSTEM` creates inherit
-    `INTERACTIVE:(M,DC)`, so an interactive user could rewrite the archive before `tar.exe` unpacks it as `SYSTEM`.
-    A probe on `t-win11` confirmed that list, and found that `tar.exe -x -o` keeps crafted symbolic-link, hard-link,
-    `..` and absolute entries inside the staging directory
-    ([probe note](../research/2026-11-23-windows-archive-probe.md)). A rewritten archive can still change what the
-    push delivers, and leave symbolic links that point anywhere in the pushed tree. Decided: the push creates a
-    second `.vmm-` directory beside the target with `push-mkdir.ps1`, which grants access only to `SYSTEM` and
-    `Administrators` and checks the result, writes the archive inside it, and `push-cleanup.ps1` removes it. The
-    archive stays on the target's volume. `win-transfer.json` checks that the archive directory's access list is the
-    protected one while a push runs, and that a push leaves no `.vmm-` entry behind.
+25. **Done: a Windows push's archive no longer inherits its parent's access list.** The guest agent wrote
+    `.vmm-<id>.tar` beside the target before the staging directory existed. Under `C:\Users\Public`, files that
+    `SYSTEM` creates inherit `INTERACTIVE:(M,DC)`, so an interactive user could rewrite the archive before `tar.exe`
+    unpacked it as `SYSTEM`. A probe on `t-win11` confirmed that list, and found that `tar.exe -x -o` keeps crafted
+    symbolic-link, hard-link, `..` and absolute entries inside the staging directory
+    ([probe note](../research/2026-11-23-windows-archive-probe.md)); a rewritten archive could still change what the
+    push delivers. The push now creates a second directory, `.vmm-<id>.a`, beside the target with `push-mkdir.ps1`,
+    which grants access only to `SYSTEM` and `Administrators` and checks the result, and writes `push.tar` inside it;
+    the cleanup removes it. `win-transfer.json` sees both access lists while a push to `C:\Users\Public` runs.
 26. **Done: an agent installs a VM from scratch.** A recorded run installed CachyOS from its ISO through
     `create_vm`, the screen, mouse, keyboard and wait tools, and `set_cdrom`, then logged in to the installed desktop
     and ran a command there ([run record](../research/2026-11-23-cachyos-install-from-scratch.md)). It needed
@@ -261,6 +259,6 @@ Parked ideas, which no outcome includes yet:
 
 Outcome 4, seeing what happened, comes next. Its [plan](seeing-what-happened-implementation-plan.md) awaits
 approval; once approved, arm its run with the `/goal` command in the plan's execution record. Follow-ups 22 and
-24, its units 1 and 2, are done, and so are 29 and 30. Follow-ups 16, 23, 25, 27, 28 and 31 can land at any time;
-16 waits on a newer `virtio-win`, 23 needs a design decision, 25 has its design decided, and 27 waits
+24, its units 1 and 2, are done, and so are 25, 29 and 30. Follow-ups 16, 23, 27, 28 and 31 can land at any time;
+16 waits on a newer `virtio-win`, 23 needs a design decision, and 27 waits
 on `rmcp` and `schemars`.

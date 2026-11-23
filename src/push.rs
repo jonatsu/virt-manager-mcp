@@ -784,6 +784,21 @@ impl Target {
         let base = self.parent.trim_end_matches(self.separator);
         format!("{base}{}.vmm-{}.{suffix}", self.separator, self.id)
     }
+
+    /// The directory a Windows push writes its archive into, which `push-mkdir.ps1` makes writable only by `SYSTEM`
+    /// and `Administrators`, so no other guest user can rewrite the archive before `tar.exe` reads it. A Linux push
+    /// has none.
+    fn archive_dir(&self) -> Option<String> {
+        (self.os == GuestOs::Windows).then(|| self.temp("a"))
+    }
+
+    /// Where the push writes its archive.
+    fn archive(&self) -> String {
+        match self.archive_dir() {
+            Some(dir) => format!("{dir}{}push.tar", self.separator),
+            None => self.temp("tar"),
+        }
+    }
 }
 
 /// One step a push runs in the guest.
@@ -793,7 +808,8 @@ pub enum Step {
     /// Sending the archive, which `Guest::write` does; only the tests' guest names it, to fail it.
     #[cfg(test)]
     Write,
-    /// Creating the directory to unpack into, a step of its own on Windows only, where `tar.exe` runs without a shell.
+    /// Creating a protected directory, for the archive or to unpack into, a step of its own on Windows only, where
+    /// `tar.exe` runs without a shell.
     MakeDir,
     Unpack,
     /// Giving the unpacked tree back the access list its parent passes on, Windows only: `MakeDir` protects the
@@ -1038,7 +1054,8 @@ fn push_retrying(
             probe.describe()
         ),
     }
-    let (packed, unpacked, old) = (target.temp("tar"), target.temp("d"), target.temp("old"));
+    let (packed, unpacked, old) = (target.archive(), target.temp("d"), target.temp("old"));
+    let archive_dir = target.archive_dir();
     // The Windows probe prints the path of `tar.exe`; the Linux steps find `tar` on the guest's `PATH`.
     let tar = probe.stdout.lines().last().unwrap_or_default();
     let result = send_and_swap(
@@ -1047,10 +1064,11 @@ fn push_retrying(
         flag,
         bytes,
         archive,
+        archive_dir.as_deref(),
         [&packed, &unpacked, &old, tar],
     );
     // The old tree goes only once the new one is in place; after a failed swap it may be all that is left of it.
-    let mut leftovers = vec![packed.as_str(), unpacked.as_str()];
+    let mut leftovers = vec![archive_dir.as_deref().unwrap_or(&packed), unpacked.as_str()];
     if result.is_ok() {
         leftovers.push(&old);
     }
@@ -1102,14 +1120,33 @@ fn clean_up(guest: &dyn Guest, leftovers: &[&str], retry_for: Duration) -> Optio
     }
 }
 
+/// Creates the Windows directory `dir` with `push-mkdir.ps1`, which leaves it writable only by `SYSTEM` and
+/// `Administrators` and refuses one that another user made first. `what` names it in the error.
+fn make_private_dir(guest: &dyn Guest, dir: &str, what: &str) -> Result<()> {
+    let made = guest.run(Step::MakeDir, &[dir])?;
+    match made.code {
+        Some(0) => Ok(()),
+        Some(2) => bail!(
+            "the {what} {dir} in the guest is not one the push created with its own access list, so the push \
+             stopped before using it; another guest user may have created it first: {}",
+            made.describe()
+        ),
+        _ => bail!("creating {dir} in the guest failed: {}", made.describe()),
+    }
+}
+
 fn send_and_swap(
     guest: &dyn Guest,
     target: &Target,
     flag: &str,
     bytes: &AtomicU64,
     archive: impl FnOnce(&mut dyn Write) -> Result<Summary> + Send,
+    archive_dir: Option<&str>,
     [packed, unpacked, old, tar]: [&str; 4],
 ) -> Result<Summary> {
+    if let Some(dir) = archive_dir {
+        make_private_dir(guest, dir, "archive directory")?;
+    }
     let (reader, writer) = io::pipe()?;
     let summary = std::thread::scope(|s| -> Result<Summary> {
         let builder = s.spawn(move || {
@@ -1133,19 +1170,7 @@ fn send_and_swap(
     let ran = match target.os {
         GuestOs::Linux => guest.run(Step::Unpack, &[packed, unpacked])?,
         GuestOs::Windows => {
-            let made = guest.run(Step::MakeDir, &[unpacked])?;
-            match made.code {
-                Some(0) => {}
-                Some(2) => bail!(
-                    "the staging directory {unpacked} in the guest is not one the push created with its own access \
-                     list, so nothing was unpacked; another guest user may have created it first: {}",
-                    made.describe()
-                ),
-                _ => bail!(
-                    "creating {unpacked} in the guest failed: {}",
-                    made.describe()
-                ),
-            }
+            make_private_dir(guest, unpacked, "staging directory")?;
             guest.run(Step::Unpack, &[packed, unpacked, tar])?
         }
     };
@@ -1847,12 +1872,13 @@ mod tests {
             guest.calls(),
             [
                 r"Probe C:\work\app | C:\work | 1",
-                r"write C:\work\.vmm-ID.tar",
+                r"MakeDir C:\work\.vmm-ID.a",
+                r"write C:\work\.vmm-ID.a\push.tar",
                 r"MakeDir C:\work\.vmm-ID.d",
-                r"Unpack C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d | C:\Windows\System32\tar.exe",
+                r"Unpack C:\work\.vmm-ID.a\push.tar | C:\work\.vmm-ID.d | C:\Windows\System32\tar.exe",
                 r"Inherit C:\work\.vmm-ID.d",
                 r"Swap C:\work\app | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old | 1",
-                r"Cleanup C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old",
+                r"Cleanup C:\work\.vmm-ID.a | C:\work\.vmm-ID.d | C:\work\.vmm-ID.old",
             ]
         );
     }
@@ -1900,7 +1926,7 @@ mod tests {
                     make_dir: 2,
                     ..WindowsGuest::new()
                 },
-                "another guest user may have created it first",
+                "the archive directory C:\\work\\.vmm-",
             ),
             (
                 WindowsGuest {
@@ -1950,7 +1976,7 @@ mod tests {
             // Every later failure deletes the archive and the unpacked tree, never the old tree.
             assert_eq!(
                 calls.last().unwrap(),
-                r"Cleanup C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d",
+                r"Cleanup C:\work\.vmm-ID.a | C:\work\.vmm-ID.d",
                 "{why}"
             );
         }
@@ -2118,7 +2144,7 @@ mod tests {
         assert_eq!(swaps(&guest), 2);
         assert_eq!(
             guest.calls().last().unwrap(),
-            r"Cleanup C:\work\.vmm-ID.tar | C:\work\.vmm-ID.d"
+            r"Cleanup C:\work\.vmm-ID.a | C:\work\.vmm-ID.d"
         );
     }
 

@@ -262,7 +262,10 @@ therefore creates its staging directory with an access list that is protected fr
 control only to `SYSTEM` and `Administrators`, given as SIDs because group names are localized. It reads the
 directory back before unpacking, and refuses one that is a junction, has another owner, or holds any other list. The
 owner matters because the archive, written first, shows the staging directory's name, and a user who created that
-directory first could change its list later. So no other guest user can add entries while `tar.exe` unpacks. After the
+directory first could change its list later. So no other guest user can add entries while `tar.exe` unpacks. The
+archive itself goes into a second directory made and checked the same way, `.vmm-<random>.a`, as `push.tar`, because
+a file `SYSTEM` writes under `C:\Users\Public` would otherwise let an interactive user rewrite it before the unpack
+([probe note](../research/2026-11-23-windows-archive-probe.md)). After the
 unpack, in a step of its own with the unpack's long timeout, the directory gets back the access list its parent passes
 on, and Windows propagates it to every entry, so the pushed tree ends with the permissions that a directory created
 there would have. The step applies the same list each time, so a failed run is repeated once; a second failure fails
