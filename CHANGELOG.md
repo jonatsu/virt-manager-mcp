@@ -5,6 +5,8 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+## 0.3.0
+
 ### Changed
 
 - The example global instructions, `example-global-CLAUDE.md` and `example-global-AGENTS.md`, tell an agent to find
