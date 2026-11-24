@@ -1,9 +1,10 @@
 # Custom templates and images: design
 
-Status: accepted. Its decisions came from an interview, and two of them are provisional until the
-test-bed probes under Checks settle them. The text is revised for a plan-critic review, its scoped re-review, an
-architecture review and the needs checks of the two projects that asked for it; none of them changed a decision. Once
-built, the code wins and this design follows it.
+Status: accepted. Its decisions came from an interview, and the test-bed probes in
+[`2026-11-24-custom-templates-probes.md`](../research/2026-11-24-custom-templates-probes.md) settled the two that were
+provisional. The text is revised for a plan-critic review, its scoped re-review, an architecture review and the needs
+checks of the two projects that asked for it; none of them changed a decision. Once built, the code wins and this design
+follows it.
 Basis: roadmap outcome 5 in [`fork-roadmap.md`](fork-roadmap.md). It extends
 [`disposable-vms-design.md`](disposable-vms-design.md), whose overlays, seeds, reset, expiry and invariants still hold
 unless this design changes them. The terms image, volume and template are used as the
@@ -17,7 +18,7 @@ templates agents made. A template is a disk together with the UEFI variables and
 fully updated Windows keeps its Secure Boot certificates in every VM made from it and after every reset. `create_vm`
 boots a built image directly, takes more CD-ROMs, and offers Secure Boot setup mode and hibernation. Every UEFI VM the
 server creates keeps its variables as a volume in the pool, which is what lets the server copy them for seals and
-snapshots.
+snapshots, and so does the TPM state of a VM that has one.
 
 Two needs drive it. A dotfiles repository builds a Windows 11 VM with every update, WSL and SSH, keeps that state as a
 template, and runs each test in a fresh VM from it. A Nix configuration repository boots each ISO and disk image it
@@ -37,11 +38,11 @@ Device passthrough was settled in the same interview but is its own roadmap item
 | Seal in the call or in the background | Background: `template_create` returns a transfer ID, the agent waits with `wait_for` `transfer_done`; the template is listed only when complete; a failure deletes the partial volumes; starting the VM being sealed is refused | As recommended | A copy of 30 GB or more can outlast an MCP client's call timeout | resolved |
 | Host device passthrough | Its own roadmap item, outside this design: operator-named devices in `[manage.devices.<name>]`, either `serial` (a host serial device such as a `/dev/serial/by-id/` path, shown to the guest as a serial port, attach while shut off) or `usb` (vendor, product, optional serial number resolved to the bus address at each attach, hot-pluggable); `list_devices`, `attach_device`, `detach_device` on owned VMs with `manage.reconfigure`; one VM per device across the host; templates never carry devices; tested with a USB-to-serial adapter and a spare USB device; PCI passthrough stays parked | As recommended | A guest driving physical hardware is a new trust boundary, so each device is named by the operator with no wildcards | resolved |
 | Tying a template to its firmware build | Variables stored as `tpl@<name>.vars`; each VM names the sealed VM's firmware code file and starts from a copy through `<nvram template=…>`; the code file's path is pinned and its hash recorded; a changed hash warns in the reply and the VM still starts | As recommended | A routine `ovmf` upgrade must not break every template, and the variable store format is stable; the Secure Boot template test catches a breaking firmware change | resolved |
-| Where VM variables live, and snapshots | Each UEFI VM the server creates keeps its variables as `<vm>.vars` in `disk_pool`, named in `<nvram>` and created by libvirt from the chosen firmware descriptor's variables at first start, or from the template's variables for a VM from a sealed template; seal copies it to `tpl@<name>.vars`; a snapshot of a shut-off UEFI VM copies it to `<vm>@<snapshot>.vars`, revert copies it back, snapshot and VM deletion delete the copies; UEFI VMs made earlier cannot be sealed and their snapshots stay without variables | As recommended | libvirt's own NVRAM path is root-owned and has no API to read or write it, so the server could neither seal nor snapshot variables there | provisional: the first probe under Checks must show that libvirt accepts a variables path in the pool and creates the file there, and that the per-VM AppArmor profile lets QEMU write it; a failure returns the design to the owner |
+| Where VM variables live, and snapshots | Each UEFI VM the server creates keeps its variables as `<vm>.vars` in `disk_pool`, named in `<nvram>` and created by libvirt from the chosen firmware descriptor's variables at first start, or from the template's variables for a VM from a sealed template; seal copies it to `tpl@<name>.vars`; a snapshot of a shut-off UEFI VM copies it to `<vm>@<snapshot>.vars`, revert copies it back, snapshot and VM deletion delete the copies; UEFI VMs made earlier cannot be sealed and their snapshots stay without variables | As recommended | libvirt's own NVRAM path is root-owned and has no API to read or write it, so the server could neither seal nor snapshot variables there | resolved: the first probe held on libvirt 12.0.0 ([probe note](../research/2026-11-24-custom-templates-probes.md)): libvirt accepts the pool path, creates the file at first start, QEMU writes it under the generated AppArmor profile, and libvirt's storage calls copy it |
 | Hardware a template records, and per-VM overrides | A template records OS, firmware, Secure Boot mode (off, Microsoft keys, setup), TPM, memory and vCPUs (disk size from the volume); seal takes them from the VM, import from the call, config templates may set them; a VM defaults to them and may override memory and vCPUs within limits, grow the disk, add or drop the TPM; firmware and Secure Boot are fixed for a sealed template and chosen per VM for an imported or config template; values above a limit are refused with the limit named | As recommended | The Windows template needs its build hardware back, one imported image must boot in every mode, and a sealed template's variables belong to one firmware | resolved |
 | Cloud-init seed per template | `seed = "nocloud"` or `"none"`, default `nocloud` for Linux and `none` for Windows, set at seal, import or in the config; with `none` the VM keeps the template's hostname and identity and `user_data` is refused; `nocloud` on Windows is the cloudbase-init opt-in, which its first user verifies | As recommended | Windows shows the seed as a stray drive, and images without cloud-init gain nothing from it | resolved |
 | Importing an image, and `disk_image` | Source inside `host_share_dirs`, resolved like `copy_to_vm` (a `/nix/store` result is copied in with `cp -L`); raw or qcow2 kept as-is, so a template may be raw; a qcow2 naming a backing file or an external data file is refused; virtual size within `max_disk_gib`, space counted toward the template cap; runs in the background with a transfer ID; `create_vm` `disk_image` makes the copy the VM's own disk, deleted with it, with `disk_bus` `virtio` (default), `sata` or `usb`; every upload is sparse: zero runs and holes go as holes through `virStreamSendHole` with `VIR_STORAGE_VOL_UPLOAD_SPARSE_STREAM`, and a seal's `qemu-img convert` copy already skips zeros; non-sparse sources are accepted | As recommended, with sparse uploads | One copy path serves both uses; a backing reference would let QEMU open host files; sparse uploads keep raw images small without asking agents to prepare them | resolved |
-| Secure Boot setup mode, and TPM state on reset | `secure_boot` takes `"off"`, `"on"` (Microsoft keys) or `"setup"` (no keys enrolled), with `true` and `false` still read as on and off, in `create_vm`, templates and per-VM choices; setup mode combines with `tpm: true`, and keys the guest enrolls live in its variables, so a seal carries them; `reset_vm` gives an empty TPM by default and keeps it with `keep_tpm: true`; TPM state persists across reboots and shutdowns | As recommended | Lanzaboote and `sbctl` need firmware with no keys; a reset must return to the template, which never carries TPM state, while TPM-bound disks opt in to keep it | provisional: a test-bed check settles how a reset clears TPM state, since a reset keeps the UUID that libvirt files TPM state under |
+| Secure Boot setup mode, and TPM state on reset | `secure_boot` takes `"off"`, `"on"` (Microsoft keys) or `"setup"` (no keys enrolled), with `true` and `false` still read as on and off, in `create_vm`, templates and per-VM choices; setup mode combines with `tpm: true`, and keys the guest enrolls live in its variables, so a seal carries them; a VM's TPM state is a file volume `<vm>.tpm` in `disk_pool`, named in the domain XML (libvirt 10.10 or later), which the server generates with `swtpm_setup` and uploads as a volume owned by the host's swtpm user; `reset_vm` gives an empty TPM by deleting and recreating `<vm>.tpm` while the VM is shut off, and keeps it with `keep_tpm: true`; TPM state persists across reboots and shutdowns; the generated state has no endorsement-key (EK) certificate; the host needs `swtpm-tools` and a root-made AppArmor rule for swtpm | As recommended | Lanzaboote and `sbctl` need firmware with no keys; a reset must return to the template, which never carries TPM state, while TPM-bound disks opt in to keep it. In libvirt's own state location nothing clears the state while the UUID stays, short of an undefine and define that leaves a gap or a new UUID; a file in the pool is deleted and recreated in place, and the server can copy it for snapshots | resolved: the TPM probes ([probe note](../research/2026-11-24-custom-templates-probes.md)) showed the file form works with the AppArmor rule, keeps the UUID and never leaves the VM undefined |
 | More CD-ROMs | `create_vm` `extra_isos`: up to 4 ISOs from `iso_dirs`, each a read-only SATA CD-ROM after the installer and driver drives, never booted from; `set_cdrom` on a shut-off VM adds a drive at a free named target | As recommended | An unattended Windows install needs the installer, virtio-win and an answer-file ISO; an existing VM can only gain a drive through `set_cdrom` | resolved |
 | Hibernation per VM | `hibernate` on `create_vm` and templates, off by default, sets `<suspend-to-disk enabled='yes'/>` with suspend to memory still off; a hibernating guest shuts the VM off, `vm_events` records it, `start_vm` resumes it; a seal records it; `vm_events` shows what libvirt reports, since libvirt keeps no hibernated state for a shut-off VM | As recommended | nix-config's hibernate-and-resume path with LUKS swap needs a VM to cover it | resolved |
 | Nested virtualization | No new setting: `host-passthrough` with the host's `kvm_intel nested=Y` already exposes it; a test-bed check shows `/dev/kvm` in a Linux template VM, and the dotfiles WSL 2 run covers Windows | As recommended | It already works but nothing proves it | resolved |
@@ -50,9 +51,9 @@ Device passthrough was settled in the same interview but is its own roadmap item
 
 ### Names
 
-Agent-made template volumes and variable copies use `@`, which no VM or snapshot name can contain, because
-`check_name` allows only `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. A VM can therefore never be named so that its volumes
-land on a template's:
+Agent-made template volumes and the copies of variables and TPM state use `@`, which no VM or snapshot name can
+contain, because `check_name` allows only `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. A VM can therefore never be named so
+that its volumes land on a template's:
 
 | Volume | Holds |
 | -- | -- |
@@ -61,6 +62,8 @@ land on a template's:
 | `tpl@<name>.meta` | An agent-made template's record. |
 | `<vm>.vars` | A UEFI VM's own firmware variables. |
 | `<vm>@<snapshot>.vars` | The variables saved with a snapshot of a shut-off UEFI VM. |
+| `<vm>.tpm` | A VM's own TPM state, owned by the host's swtpm user. |
+| `<vm>@<snapshot>.tpm` | The TPM state saved with a snapshot of a shut-off VM. |
 
 Templates from the config keep the volume names the operator gave them. Template names follow the hostname rule, and
 one name space covers config and agent-made templates.
@@ -196,8 +199,10 @@ user-given variables path under autoselection and, at the first start, creates t
 variables template, so code and variables always come from one descriptor and nothing pins a firmware path in the VM's
 definition. Before defining the VM, the server checks that no `<vm>.vars` volume exists, so a leftover file fails the
 create loudly instead of being reused; the error names the volume, and the operator removes it with `virsh vol-delete`.
-A VM that has never started has no `<vm>.vars` yet; a snapshot of it copies nothing, and a seal refuses it. On this host
-the features select:
+A VM that has never started has no `<vm>.vars` yet; a snapshot of it copies nothing, and a seal refuses it. The pool
+lists the file only after a refresh, so the server refreshes the pool after a first start before it reads or copies the
+file. libvirt refuses a plain `undefine` of a UEFI VM with an `<nvram>`, so the server passes `--nvram`, or
+`--keep-nvram` where it deletes the volume itself. On this host the features select:
 
 | Mode | Features | Code file | Variables template |
 | -- | -- | -- | -- |
@@ -206,12 +211,13 @@ the features select:
 | `setup` | `secure-boot` without `enrolled-keys` | `OVMF_CODE_4M.secboot.fd` | `OVMF_VARS_4M.fd` |
 
 libvirt's documentation says a user `<nvram template>` overrides the descriptor's template under autoselection, while a
-reading of libvirt 12.0.0's source found that autoselection rejects a template no descriptor names. The first probe
-tests both forms. If autoselection accepts the template, a VM from a sealed template uses it too and pins nothing.
-Otherwise it gets `<loader readonly='yes' secure='yes|no' type='pflash' format='raw'>` with the recorded code
+reading of libvirt 12.0.0's source found that autoselection rejects a template no descriptor names. A VM from a sealed
+template therefore gets `<loader readonly='yes' secure='yes|no' type='pflash' format='raw'>` with the recorded code
 file, `<nvram template='…/tpl@<name>.vars' templateFormat='raw' format='raw'>` naming `<vm>.vars`, and
-`<smm state='on'/>` when `secure` is yes. `templateFormat` needs libvirt 10.10.0 or later, so sealed templates need
-it, and the server refuses to seal or create from one on an older libvirt. A recorded code file that no longer exists,
+`<smm state='on'/>` when `secure` is yes; the probe started a VM from this form on libvirt 12.0.0, with the template's
+variables present. Whether autoselection accepts the template was not tried (see the open questions).
+`templateFormat` needs libvirt 10.10.0 or later, so sealed templates need it, and the server refuses to seal or create
+from one on an older libvirt. A recorded code file that no longer exists,
 or that no descriptor names, refuses the create. Only these VMs pin a firmware path, so an `ovmf` upgrade that renames
 its files affects only sealed templates.
 
@@ -258,31 +264,72 @@ combines with `tpm: true`, and keys a guest enrolls stay in its variables, so a 
 
 The snapshot tools take the manage lock for their whole sequence. A snapshot of a shut-off UEFI VM takes libvirt's
 snapshot, then copies `<vm>.vars` to `<vm>@<snapshot>.vars`; a failed copy deletes the snapshot again. Snapshot names
-of UEFI VMs follow `check_name`.
+of UEFI VMs follow `check_name`. A shut-off VM that has `<vm>.tpm` also gets `<vm>@<snapshot>.tpm` in the same step,
+because libvirt's own `snapshot-revert` restores only the disk and leaves the TPM state alone.
 
 `snapshot_revert` of a shut-off UEFI VM keeps a journal, `<vm>@@revert@<snapshot>.vars`, a name no snapshot can
 produce and that records the revert's target. It writes the journal in full from the current variables and reads it
 back before any other step, and never overwrites an existing one. It then copies the snapshot's variables in, reverts
-the disk, and deletes the journal. A failed disk revert copies the journal back. A journal found at the start of a call
+the disk, and deletes the journal. A failed disk revert copies the journal back. The TPM state copy has its own journal,
+`<vm>@@revert@<snapshot>.tpm`, which follows the same rules. A journal found at the start of a call
 that changes the VM means an earlier revert was cut short: the call refuses, naming the snapshot. `snapshot_revert` of
 that snapshot completes the revert from where it stopped, and `snapshot_revert` with `abandon: true` copies the
 journal's variables back and deletes it, which also works when the snapshot is gone. Read-only calls are not refused.
 A snapshot of a UEFI VM that has `<vm>.vars` but no copy for that snapshot, because a crash fell between the two steps
-or the snapshot predates this design, reverts the disk only, and the result says the variables were not restored.
+or the snapshot predates this design, reverts the disk only, and the result says the variables were not restored; the
+same holds for TPM state.
 `describe_vm` and `snapshot_list` show leftover variable copies and journals.
 
-`snapshot_delete` deletes the copy, and `delete_vm`, `reset_vm` and the expiry sweep delete every copy and journal. A
-revert leaves the TPM state as it is. A running UEFI VM still cannot be snapshotted on hosts whose firmware variables
-are raw files, as today.
+`snapshot_delete` deletes the copies, and `delete_vm`, `reset_vm` and the expiry sweep delete every copy and journal. A
+revert of a shut-off VM restores its TPM state from the copy. A running UEFI VM still cannot be snapshotted, as today:
+libvirt refuses an internal snapshot of a running VM whose `<nvram>` is a raw file, as `<vm>.vars` is.
 
 ### TPM state
 
-A template never carries TPM state. `reset_vm` gives the VM an empty TPM, and keeps the old one with `keep_tpm: true`,
-for a guest whose disk unlocks through the TPM. `reset_vm` also starts the VM from the template's variables, so Secure
-Boot keys enrolled since the VM was made are gone after it; a test of Lanzaboote or TPM2 unlocking should therefore
-not use `reset_vm` between its steps. TPM state persists across reboots and shutdowns as today. The probe that settles
-how a reset clears the state may choose only a method that never leaves the VM undefined while its disks exist; if
-none exists, the decision returns to the owner.
+A template never carries TPM state, so a VM made from a sealed template gets fresh state. A VM's TPM state is the file
+volume `<vm>.tpm` in `disk_pool`, which the domain XML names:
+
+```xml
+<tpm model='tpm-crb'>
+  <backend type='emulator' version='2.0'><source type='file' path='<pool dir>/<vm>.tpm'/></backend>
+</tpm>
+```
+
+It needs libvirt 10.10 or later, and it persists across reboots and shutdowns as today.
+
+libvirt starts swtpm as the swtpm user, which cannot create the file in the root-owned pool directory (mode 0711), and
+libvirt does not change the owner of a pool file. The server therefore makes the state itself:
+
+1. It runs `swtpm_setup` as the server's own user in a private temporary directory, on an empty file.
+2. It creates the volume `<vm>.tpm` with the uid and gid of the host's swtpm user, mode 0600, and uploads the state with
+   libvirt's storage calls. The server looks the user and group up, and hard-codes neither (114 and 117 on this host).
+   The state grows in use, so the volume's capacity follows the uploaded size.
+
+The host needs `swtpm-tools`. The generated state has no endorsement-key (EK) certificate. Windows 11 setup, BitLocker,
+`sbctl` and measured boot do not need one; remote attestation, such as Intune, does. A later option is
+`swtpm_setup --create-ek-cert` with a certificate authority of the server's own.
+
+The host also needs a root-made AppArmor rule in `/etc/apparmor.d/local/usr.bin.swtpm`, because swtpm's stock profile
+allows writes only under `/var/lib/libvirt/swtpm/` and `/var/lib/swtpm/`:
+
+```text
+owner <pool dir>/*.tpm rwk,
+```
+
+Without it, a start fails at `swtpm_setup`. libvirt reports that failure with a bare exit status, which a wrong owner
+also causes, so a failed start of a VM with a `<vm>.tpm` volume returns a refusal that names the rule as the first thing
+to check, and the setup guide documents the rule.
+
+`reset_vm` gives the VM an empty TPM while it is shut off by deleting `<vm>.tpm` and creating it again from freshly
+generated state. The UUID is kept and the VM is never undefined. `keep_tpm: true` skips this, for a guest whose disk
+unlocks through the TPM. `reset_vm` also starts the VM from the template's variables, so Secure Boot keys enrolled since
+the VM was made are gone after it; a test of Lanzaboote or TPM2 unlocking should therefore not use `reset_vm` between
+its steps.
+
+`virsh undefine` without `--keep-tpm` deletes the pool state file, whether or not `--tpm` is given. Wherever the server
+undefines a VM it means to keep, it passes `--keep-tpm`. Deletion removes `<vm>.tpm` through the pool, like other
+volumes. A VM made before this change keeps its TPM state in libvirt's own location; a reset cannot clear it and says
+so, as a seal says for a UEFI VM made earlier.
 
 ### Hibernation
 
@@ -318,9 +365,12 @@ advertised when the resolver finds any template source: a config template, or `a
   volumes. No call turns an existing volume into a template.
 - No imported image or `disk_image` names a backing file or an external data file when it is uploaded, and no seal
   copies a disk whose format or header could make libvirt follow a backing file.
-- No VM or snapshot name can produce a template's volume name or another VM's or snapshot's variables volume.
+- No VM or snapshot name can produce a template's volume name or another VM's or snapshot's variables or TPM state
+  volume.
 - A template is usable only when its record says `ready`, its checksum holds, and every volume it needs exists.
 - Templates never carry TPM state or host devices.
+- A VM's TPM state is a volume in `disk_pool` that the server makes and deletes, never a path an agent names, and no
+  undefine the server makes for a VM it keeps deletes it.
 - A VM under a live seal is refused by every management call that changes it and by the expiry sweep, and a seal whose
   VM changed anyway fails.
 - The guardrails in `AGENTS.md` hold: `is_owned`, `can_manage` and deletion only within `disk_pool` are unchanged. The
@@ -329,39 +379,41 @@ advertised when the resolver finds any template source: a config template, or `a
 
 ## Risks
 
-1. Variables in the pool are a departure from libvirt's default. On paper libvirt keeps a user `<nvram>` path under
-   autoselection and virt-aa-helper allows QEMU to write it; the first probe confirms both on this host.
-2. An `ovmf` upgrade changes the code file under sealed templates, the only VMs that pin one. The variable store format
-   is stable, so VMs usually still boot, and the warning names the cause when one does not.
-3. Secure Boot certificate and revocation updates live in the variables. A sealed template keeps them; an imported
-   template starts from the host's stock variables, which may refuse an updated Windows boot manager.
-4. A broken or tampered template spreads to every VM made from it: to the agents' own VMs and the pool, and through
-   their guest output and guest-agent replies into every agent's context that uses those VMs.
-5. `max_template_gib` can exceed the pool's free space, which the free-space check covers; other users of the
-   filesystem can still fill it during a copy.
-6. Any agent can delete a template another agent's workflow relies on, and another agent can then reuse its name for
-   different contents. The seal ID in results and the optional `seal_id` on create let a workflow notice.
-7. A sealed Windows whose disk is bound to the TPM, such as with BitLocker, does not unlock in VMs from the template,
-   because templates carry no TPM state.
-8. The backing check sees only volumes in libvirt pools; a disk outside every pool that backs onto a template is
-   invisible to it. `max_vms`, the manage lock and the seal lock are per account and `HOME`, as in the disposable
-   design; a process under another account or `HOME` honours a seal mark for 24 hours, so a seal that outlasts that
-   while such a process runs can be disturbed.
-9. cloudbase-init reading a NoCloud seed is unverified; its first user checks it.
+01. Variables in the pool are a departure from libvirt's default. On paper libvirt keeps a user `<nvram>` path under
+    autoselection and virt-aa-helper allows QEMU to write it; the first probe confirmed both on this host.
+02. An `ovmf` upgrade changes the code file under sealed templates, the only VMs that pin one. The variable store format
+    is stable, so VMs usually still boot, and the warning names the cause when one does not.
+03. Secure Boot certificate and revocation updates live in the variables. A sealed template keeps them; an imported
+    template starts from the host's stock variables, which may refuse an updated Windows boot manager.
+04. A broken or tampered template spreads to every VM made from it: to the agents' own VMs and the pool, and through
+    their guest output and guest-agent replies into every agent's context that uses those VMs.
+05. `max_template_gib` can exceed the pool's free space, which the free-space check covers; other users of the
+    filesystem can still fill it during a copy.
+06. Any agent can delete a template another agent's workflow relies on, and another agent can then reuse its name for
+    different contents. The seal ID in results and the optional `seal_id` on create let a workflow notice.
+07. A sealed Windows whose disk is bound to the TPM, such as with BitLocker, does not unlock in VMs from the template,
+    because templates carry no TPM state.
+08. The backing check sees only volumes in libvirt pools; a disk outside every pool that backs onto a template is
+    invisible to it. `max_vms`, the manage lock and the seal lock are per account and `HOME`, as in the disposable
+    design; a process under another account or `HOME` honours a seal mark for 24 hours, so a seal that outlasts that
+    while such a process runs can be disturbed.
+09. cloudbase-init reading a NoCloud seed is unverified; its first user checks it.
+10. TPM state in the pool needs a root-made AppArmor rule and `swtpm-tools` on every host that runs the server. Without
+    the rule, a start fails and the refusal names it.
+11. The generated TPM state has no EK certificate, so a guest that needs remote attestation, such as Intune enrolment,
+    cannot get one.
+12. A VM made before this change keeps its TPM state in libvirt's own location, where `reset_vm` cannot clear it.
 
 ## Open questions
 
 | Question | Kind | Recommendation |
 | -- | -- | -- |
-| How a reset clears TPM state | Probe | A method that never leaves the VM undefined while its disks exist; otherwise back to the owner. |
+| Does libvirt's firmware autoselection accept a user `<nvram template>` that no descriptor names? The probe tested only the explicit form | Probe | Try it on the test bed; if it does, a VM from a sealed template can keep autoselection and pin no firmware path. |
 
 ## Checks
 
-- First, a probe on the test bed, with the exact definitions for `off`, `on`, `setup` and the sealed form: libvirt
-  accepts an `<nvram>` path in the pool under autoselection and creates the file from the descriptor's template at first
-  start, QEMU writes it (a variable set in the guest survives a restart), `delete_vm` and an expiry remove it, the
-  volume copies with libvirt's storage calls, and a VM backing onto a `tpl@` volume starts under the AppArmor profile
-  libvirt generates. The probe also confirms that q35's SATA controller has 6 ports.
+- `delete_vm` and an expiry remove `<vm>.vars` and `<vm>.tpm`, and a VM the server keeps through an undefine keeps
+  `<vm>.tpm`.
 - A Windows 11 VM installed fresh through `create_vm`, with every update applied, shows Microsoft's 2023 certificate in
   its firmware database; it is sealed, and a VM from the template boots with Secure Boot on, before and after
   `reset_vm`. `t-win11` cannot be sealed, because its variables are not in the pool.
@@ -375,7 +427,9 @@ advertised when the resolver finds any template source: a config template, or `a
 - One imported image boots in three VMs: BIOS, UEFI without Secure Boot, and UEFI in setup mode with a TPM, where
   `sbctl status` reports setup mode.
 - A shut-off UEFI VM's snapshot keeps a boot entry made after it: after the revert, the entry is gone.
-- `reset_vm` leaves an empty TPM, and one with `keep_tpm` keeps a sealed TPM object.
+- `reset_vm` leaves an empty TPM and the same UUID, and one with `keep_tpm` keeps a sealed TPM object.
+- A revert to a shut-off VM's snapshot removes a TPM object made after the snapshot.
+- A start without the AppArmor rule is refused with a message that names it.
 - A VM with `hibernate` resumes a process after `systemctl hibernate` and `start_vm`, and `vm_events` shows what libvirt
   reported.
 - A Linux VM from a template shows `/dev/kvm`.

@@ -323,7 +323,7 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 5 comes next, on its accepted design, starting with the probes that settle its two provisional decisions. Then
+Outcome 5 comes next, on its accepted design, whose probes have settled its provisional decisions. Then
 comes outcome 6, which needs a design that settles the open question above. Of the other open follow-ups, 36 needs a
 short design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`, 32 lands with the next change to the
 event worker, and 37 waits until an agent without a shell needs it.
