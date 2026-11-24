@@ -23,6 +23,7 @@ mod start;
 mod stats;
 mod sweep;
 mod transfer;
+mod volnames;
 mod wait;
 mod winsteps;
 

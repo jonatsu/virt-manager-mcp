@@ -26,6 +26,7 @@ use virt::sys;
 use crate::config::{Firmware, GuestOs, Manage, OnCrash, is_hostname};
 use crate::hypervisor::{self, Hypervisor};
 use crate::seed;
+use crate::volnames;
 
 /// XML namespace of the metadata element that marks VMs created by this server.
 const OWNER_NS: &str = "http://virtmanager-mcp/owner/1";
@@ -206,7 +207,7 @@ pub struct NewVm {
 
 pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
     let m = &hv.config.manage;
-    check_name(&vm.name, "VM name")?;
+    check_vm_name(&vm.name, "VM name")?;
     check_vcpus(m, vm.vcpus)?;
     check_memory(m, vm.memory_mib)?;
     check_disk(m, vm.disk_gib)?;
@@ -480,6 +481,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
              with a letter, not ending with a hyphen, at most 63 characters"
         );
     }
+    check_vm_name(&vm.name, "VM name")?;
     let t = m.templates.get(&vm.template).ok_or_else(|| {
         anyhow!(
             "no template named '{}'; list_templates shows them",
@@ -1470,7 +1472,7 @@ pub fn list_isos(m: &Manage) -> Vec<IsoFile> {
 
 // ---- helpers ------------------------------------------------------------------
 
-fn check_name(name: &str, what: &str) -> Result<()> {
+pub(crate) fn check_name(name: &str, what: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name
@@ -1481,6 +1483,15 @@ fn check_name(name: &str, what: &str) -> Result<()> {
         bail!(
             "{what} must be 1-64 characters of A-Z, a-z, 0-9, '.', '_', '-' and not start with '.' or '-'"
         );
+    }
+    Ok(())
+}
+
+/// Checks the name of a new VM: `check_name`, and not `tpl`, which `volnames` keeps for template volumes.
+pub(crate) fn check_vm_name(name: &str, what: &str) -> Result<()> {
+    check_name(name, what)?;
+    if name == volnames::RESERVED_VM_NAME {
+        bail!("{what} cannot be '{name}', which names the template volumes");
     }
     Ok(())
 }
@@ -2238,6 +2249,26 @@ mod tests {
         assert!(check_name("test-vm_1.2", "n").is_ok());
         for bad in ["", "-x", ".x", "a b", "a/b", "a'b", &"x".repeat(65)] {
             assert!(check_name(bad, "n").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn snapshot_and_vm_names_cannot_hold_the_volume_separator() {
+        for bad in ["a@b", "@", "@@revert@s", "tpl@s1"] {
+            assert!(check_name(bad, "n").is_err(), "{bad}");
+            assert!(check_vm_name(bad, "n").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn check_vm_name_refuses_tpl_only() {
+        let err = check_vm_name("tpl", "VM name").unwrap_err().to_string();
+        assert!(err.contains("tpl"), "{err}");
+        for ok in ["tpl2", "my-tpl", "Tpl", "tpl.1", "tpl_", "t", "test-vm_1.2"] {
+            assert!(check_vm_name(ok, "n").is_ok(), "{ok}");
+        }
+        for bad in ["", "-x", ".x", "a b", &"x".repeat(65)] {
+            assert!(check_vm_name(bad, "n").is_err(), "{bad}");
         }
     }
 

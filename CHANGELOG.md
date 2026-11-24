@@ -5,6 +5,12 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+### Changed
+
+- `create_vm` and `create_vm_from_template` refuse the VM name `tpl`, which the server keeps for the names of
+  template volumes. Name the VM anything else; `tpl2` and `my-tpl` are fine, and VMs already named `tpl` stay as they
+  are.
+
 ## 0.4.0
 
 ### Changed

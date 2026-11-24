@@ -820,6 +820,7 @@ mod tests {
             "vm-",
             "vm_1",
             "vm.1",
+            "vm@1",
             "vm 1",
             &"a".repeat(64),
         ] {
