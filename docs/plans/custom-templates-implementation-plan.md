@@ -1090,7 +1090,7 @@ The run's goal:
 | Unit | Commits | Evidence | Review |
 | -- | -- | -- | -- |
 | 1 Probes | `7820b5d` | [Build probes](../research/2026-11-24-custom-templates-build-probes.md): autoselection refuses a user `<nvram template>` (unit 21 uses the explicit form); autoselection also refuses `<suspend-to-disk>` (unit 5 waits for a decision); `vol-clone` gives a flat qcow2 but `vol-dumpxml` shows a stale `<backingStore>` until `pool-refresh` (unit 19); `<mtime>` moves and must be read after shut-off (unit 19); no volume can be cloned or created over an existing name, so revert and reset delete and recreate (units 23, 24); the FFI calls and the sparse upload work (units 7, 15, 19) | Read by the main session |
-| 2 Volume names |  |  |  |
+| 2 Volume names | `805602b` | Gate green, 446 tests; `check_vm_name` refuses `tpl`, tested at the function, not through `create`, which needs libvirt | Self-review by the main session |
 | 3 `secure_boot` modes |  |  |  |
 | 4 More CD-ROMs |  |  |  |
 | 5 Hibernation |  |  |  |
