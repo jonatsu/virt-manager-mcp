@@ -15,11 +15,13 @@ the outcomes. Each item is done when its evidence holds.
 flowchart LR
   B[Baseline and defects: done] --> O1[1. Clean VM in seconds: done]
   O1 --> O2[2. Reliable interaction: done]
-  O2 --> O3[3. Code and results in and out]
-  O3 --> O4[4. Seeing what happened]
-  O4 --> O5[5. Several VMs together]
-  O5 --> O6[6. Operator trust and control]
+  O2 --> O3[3. Code and results in and out: done]
+  O3 --> O4[4. Seeing what happened: done]
+  O4 --> O5[5. Custom templates and images]
+  O5 --> O6[6. Several VMs together]
+  O6 --> O7[7. Operator trust and control]
   O1 -. builds on .-> O5
+  O5 -. builds on .-> O6
   B --> A[Tool annotations: done]
   B --> IT[Integration tests: done]
 ```
@@ -196,6 +198,33 @@ Reviews of earlier work found these. None blocks the server's use.
     restarts. Third, no test covers a waiting event from an earlier pass followed by its VM's undefine. The fixes are
     to publish the batch as in flight under the queue's lock, to drop a not-found event without caching it, and to add
     the test. They land with the next change to `src/events/worker.rs`, after the 0.3.0 release.
+33. **A cap on the memory of all the server's VMs together.** A Windows test VM needs 12 GiB, 6 vCPUs and an 80 GiB
+    disk, and the 30 GiB host also runs builds and has run out of memory before, so `max_vms` times `max_memory_mib` is
+    a poor guard. `max_total_memory_mib` caps the memory of every VM the server created, checked at `create_vm`,
+    `create_vm_from_template`, `start_vm` and `configure_vm`, and a refusal names the numbers. Once it lands, the live
+    config sets `max_total_memory_mib = 16384`, `max_memory_mib = 12288`, `max_vcpus = 6`, `max_disk_gib = 80` and
+    `max_vms = 2`: one Windows VM and one small Linux VM fit together, and two desktop VMs do not.
+34. **A console log that outlives its VM.** The console captured from boot lives in the server's memory, at most
+    `limits.console_buffer_bytes` (256 KiB), and goes with `delete_vm`, so an agent that tears a VM down after a failed
+    boot loses the log before anyone reads it. The server writes each run's console output to a file in
+    `host_pull_dirs` as well, and the result of the boot names the file.
+35. **Windows guests with networking are proven.** `t-win11` has no network interface, so no test shows a Windows
+    guest's address in `vm_addresses`, SSH from the host to it, WSL 2 nested inside it, or a revert of a shut-off
+    UEFI VM with a TPM. A Windows install through `create_vm` on the `default` network, with virtio-win as the driver
+    ISO and the answer files merged into it, proves all four, and a test-bed case keeps the address and SSH checks.
+    It waits on follow-up 33.
+36. **Host devices for VMs.** An agent testing hardware needs a USB-to-serial adapter or a whole USB device in a
+    guest. The operator names each allowed device under `[manage.devices.<name>]`, either `serial` (a host serial
+    device path such as `/dev/serial/by-id/…`, shown to the guest as a serial port and attached while the VM is shut
+    off) or `usb` (vendor, product and an optional serial number, resolved to the device's bus address at each attach).
+    `list_devices`, `attach_device` and `detach_device` act on owned VMs with `manage.reconfigure`; one VM holds a
+    device at a time across the host; templates never carry devices. It needs a short design and a USB-to-serial
+    adapter and a spare USB device on the test bed. PCI passthrough stays a parked idea.
+37. **Importing an ISO for agents without a shell.** libvirt gives an ISO to `libvirt-qemu:kvm` at first use and keeps
+    it, so it cannot be overwritten, but the owner of the ISO directory can delete it and copy the new file under the
+    same name once no VM holds it in a CD-ROM; the how-to guide says so. An agent that reaches the host only through
+    MCP has no way to do that, and a tool that copies an ISO from `host_share_dirs` into an ISO directory would give it
+    one. Low priority.
 
 ## Outcomes
 
@@ -227,7 +256,7 @@ it is built.
    without passing them through its context, and reaches services in the guest at its address. Design:
    [`guest-transfer-design.md`](guest-transfer-design.md), accepted. It covers pulling files and directories into
    operator-set pull directories, pushing directories, background copies, and `vm_addresses`, in two runs. Port
-   forwarding is left to outcomes 5 and 6, where the host cannot route to a guest.
+   forwarding is left to outcomes 6 and 7, where the host cannot route to a guest.
    - Done: [run 1](guest-transfer-run-1-implementation-plan.md) built `copy_from_vm`, `copy_dir_to_vm`,
      `copy_dir_from_vm`, background copies with `transfer_done`, and `vm_addresses`, for Linux guests. On `t-win11`
      the file tools work, and `vm_addresses` returns an empty list because that guest has no network interface. Its
@@ -244,14 +273,28 @@ it is built.
    Design: [`seeing-what-happened-design.md`](seeing-what-happened-design.md). Its
    [plan](seeing-what-happened-implementation-plan.md)'s execution record holds each unit's commits, test-bed results
    and reviews, with the [crash and events probe](../research/2026-11-23-crash-and-events-probe.md).
-5. **Several VMs together.** An agent can test small networks, such as a client and a server. It builds on outcome 1,
-   and it needs a network policy for each VM, which outcome 6 would otherwise bring.
-6. **Operator trust and control.** An operator can let agents run with less supervision. This covers an audit log of
+5. **Custom templates and images.** An agent tests images built anywhere, such as installer ISOs and disk images from
+   a Nix build, and keeps a prepared VM as a template: a fully updated Windows 11 with WSL, or a desktop to compare
+   settings against. A template is a VM's disk together with its UEFI variables, so a Secure Boot certificate update
+   carries into every VM made from it and survives `reset_vm`. Behind `manage.agent_templates`, agents seal a shut-off
+   VM the server created into a template or import a disk image from `host_share_dirs`, and delete the templates
+   agents made. `create_vm` boots a built image with `disk_image` and takes `extra_isos`; `secure_boot` gains a setup
+   mode with no keys enrolled, for enrolling one's own keys; snapshots of a shut-off UEFI VM keep its variables; and a
+   VM may hibernate. It takes in the parked idea of agents promoting a VM to a template. Design:
+   [`custom-templates-design.md`](custom-templates-design.md), awaiting approval.
+6. **Several VMs together.** An agent can test small networks, such as a client and a server, including mDNS between
+   guests. It builds on outcomes 1 and 5. The server creates and deletes networks of its own, owned and capped like
+   VMs, limited to a configured name prefix and address range, as NAT or isolated networks with multicast between
+   guests; only networks listed in `manage.networks` are usable today.
+7. **Operator trust and control.** An operator can let agents run with less supervision. This covers an audit log of
    mutating calls (following `akarasulu/nested-mcp-server`), network policies for each VM, scoping per session, and
    tested `qemu:///session` support. The survey rates session scope as the strongest guardrail, because VMs there
-   cannot reach the system VMs at all. `uri` is already a config key, but untested. Done ahead of the rest: `max_vms`
-   holds across every server process of one account through a lock file, and `manage-lock.json` shows a create
-   waiting on another process.
+   cannot reach the system VMs at all. Session mode runs as a second server beside the `qemu:///system` one, which
+   stays the main mode: the Windows and Nix tests need guests the host reaches by address and multicast between
+   guests, and on this host passt gave a Windows guest no address and AppArmor kept libvirt from stopping it, while
+   user-mode networking broke a nixos-anywhere install after its kexec. `uri` is already a config key, but untested.
+   Done ahead of the rest: `max_vms` holds across every server process of one account through a lock file, and
+   `manage-lock.json` shows a create waiting on another process.
 
 Two items stand outside the outcomes:
 
@@ -263,18 +306,18 @@ Two items stand outside the outcomes:
   `mcp_call.py --check` enforces. `tests/testbed/run-all.sh` runs every case, and skips cleanly without the test bed.
   Only the root-only expiry check stays manual.
 
-Open question for the designs: should outcome 5 bring its own network policy, or wait for outcome 6?
+Open question for the designs: should outcome 6 bring its own network policy, or wait for outcome 7?
 
 Parked ideas, which no outcome includes yet:
 
-- **Agents promote a configured VM to a template.** It builds on outcome 1, but adds a trust boundary, because a bad
-  template spreads to every VM built on it.
 - **The server builds templates from a cloud image URL and checksum.** It means trusting outside images, and the first
   boot needs network access.
+- **PCI device passthrough.** Follow-up 36 covers serial and USB devices only.
 
 ## Next
 
-Outcome 5, several VMs together, comes next. It needs a design first, and that design settles the open question
-above: whether outcome 5 brings its own network policy for each VM or waits for outcome 6. Of the open follow-ups, 23
-has its approach decided and needs a short design, 16 waits on a newer `virtio-win`, and 27 waits on `rmcp` and
-`schemars`.
+Follow-ups 33 and 34 come first: the memory cap lets the live server run a Windows VM, and the console log keeps a
+failed boot's output. Follow-up 35's Windows install comes next. Outcome 5 follows once its design is approved, then
+outcome 6, which needs a design that settles the open question above. Of the other open follow-ups, 36 needs a short
+design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`, 32 lands with the next change to the
+event worker, and 37 waits until an agent without a shell needs it.

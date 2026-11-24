@@ -21,7 +21,7 @@ directory transfers on Windows guests.
 | Decision | Chosen | Why | Status |
 | -- | -- | -- | -- |
 | Scope | Pull one file, push a directory, pull a directory, list a VM's addresses | The host already routes to guests on libvirt's NAT network, so a guest's services are reachable at its address | resolved |
-| Port forwarding | Not in this outcome | Needed only where the host cannot route to the guest: `qemu:///session` VMs on user-mode networking (outcome 6), isolated networks (outcome 5), or a remote HTTP client | resolved |
+| Port forwarding | Not in this outcome | Needed only where the host cannot route to the guest: `qemu:///session` VMs on user-mode networking (outcome 7), isolated networks (outcome 6), or a remote HTTP client | resolved |
 | Where pulls land | Only in a new `host_pull_dirs`, separate from the read-only `host_share_dirs`; no option to pull into the project directory | A guest that writes into a working tree can plant files the host later runs: `.git/hooks/*`, `.envrc`, a `Makefile`, CI configuration | resolved |
 | Pulled modes | Files 644 and directories 755, always | A planted executable is the step before code running on the host; a deliberate `chmod` costs little | resolved |
 | Directory transport | `tar` over the guest agent, built and unpacked by the server | Needs no network, SSH keys or host packages; 20 MiB/s in the probe. A virtiofs share needs `virtiofsd` on the host and, when writable, lets the guest write host files past every rule here; `rsync` needs `sshd` and keys; one file at a time costs several agent calls per file | resolved |
