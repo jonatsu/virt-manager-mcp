@@ -53,7 +53,7 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["hibernate"]="hibernate hibernate-after"
-  ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-virsh uefi-vars-virsh-after uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
+  ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-reset uefi-vars-virsh uefi-vars-virsh-after uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
   ["tpm"]="tpm-state tpm-state-delete tpm-leftover tpm-leftover-after tpm-refused"
   ["jobs"]="jobs jobs-reopen"
   ["diag-stats"]="diag-stats diag-stats-read-only diag-stats-after"
@@ -364,7 +364,8 @@ check_no_firmware_record() { # vm mode case
 # create_vm_from_template refuse t-lv for UEFI, names it and the command that removes it, and a create works once it
 # is removed. The owner element of t-uv, made by create_vm, holds its Secure Boot mode and no firmware record before its
 # first start; the server's start adds the record, whose hash equals `sha256sum` of the code file, and t-uvg, from a
-# template, gets one too. t-uvv is started first with `virsh start`, so the server's later start of it records nothing.
+# template, gets one too, and keeps it through a `reset_vm` of the running VM. t-uvv is started first with `virsh
+# start`, so the server's later start of it records nothing.
 # The case runs under config-templates.toml with max_vms = 4, because the kept t-win11net counts toward max_vms.
 unit_uefi_vars() {
   local config=${WORK}/config-uefi-vars.toml xml=${WORK}/t-uv.inactive.xml vm avail left
@@ -400,6 +401,12 @@ unit_uefi_vars() {
   has_vol t-uvg.vars || record uefi-vars-guest failed "t-uvg.vars is not in the pool listing after the first start"
   owned_by_qemu t-uvg.vars || record uefi-vars-guest failed "t-uvg.vars is not owned by the QEMU user"
   check_firmware_record t-uvg on uefi-vars-guest
+  run_case uefi-vars-reset "${config}"
+  # A reset of the running, recorded t-uvg rewrites its owner element from the persistent definition, so the record
+  # survives and only the generation moves on.
+  check_firmware_record t-uvg on uefi-vars-reset
+  [[ $(owner_attr t-uvg generation) == 2 ]] \
+    || record uefi-vars-reset failed "t-uvg's owner element does not say generation='2' after the reset"
   run_case uefi-vars-virsh "${config}"
   check_no_firmware_record t-uvv setup uefi-vars-virsh
   if vsh start t-uvv > /dev/null; then

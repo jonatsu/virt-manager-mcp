@@ -1,0 +1,37 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-uvg",
+      "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": [
+        "VM 't-uvg': started",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "reset_vm",
+    "args": {
+      "vm": "t-uvg"
+    },
+    "expect": {
+      "contains": [
+        "reset VM 't-uvg' to template 'debian13-uefi' (generation 2)",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-uvg",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-uvg' is shut off"
+    }
+  }
+]
