@@ -322,8 +322,8 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Follow-ups 33 and 34 come first: the memory cap lets the live server run a Windows VM, and the console log keeps a
-failed boot's output. Follow-up 35's Windows install comes next. Outcome 5 follows once its design is approved, then
-outcome 6, which needs a design that settles the open question above. Of the other open follow-ups, 36 needs a short
-design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`, 32 lands with the next change to the
-event worker, and 37 waits until an agent without a shell needs it.
+Follow-up 35's Windows install comes next. It needs the live server to run a release with the memory cap of follow-up
+33, because the installed server refuses the new key. Outcome 5 follows on its accepted design, starting with the probes
+that settle its two provisional decisions, then outcome 6, which needs a design that settles the open question above. Of
+the other open follow-ups, 36 needs a short design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`,
+32 lands with the next change to the event worker, and 37 waits until an agent without a shell needs it.
