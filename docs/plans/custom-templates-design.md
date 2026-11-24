@@ -1,7 +1,8 @@
 # Custom templates and images: design
 
 Status: draft, awaiting approval. Its decisions came from an interview, and two of them are provisional until the
-test-bed probes under Checks settle them. Once built, the code wins and this design follows it.
+test-bed probes under Checks settle them. The text is revised for a plan-critic review and its scoped re-review, whose
+findings changed no decision. Once built, the code wins and this design follows it.
 Basis: roadmap outcome 5 in [`fork-roadmap.md`](fork-roadmap.md). It extends
 [`disposable-vms-design.md`](disposable-vms-design.md), whose overlays, seeds, reset, expiry and invariants still hold
 unless this design changes them. The terms image, volume and template are used as the
@@ -35,7 +36,7 @@ Device passthrough was settled in the same interview but is its own roadmap item
 | Seal in the call or in the background | Background: `template_create` returns a transfer ID, the agent waits with `wait_for` `transfer_done`; the template is listed only when complete; a failure deletes the partial volumes; starting the VM being sealed is refused | As recommended | A copy of 30 GB or more can outlast an MCP client's call timeout | resolved |
 | Host device passthrough | Its own roadmap item, outside this design: operator-named devices in `[manage.devices.<name>]`, either `serial` (a host serial device such as a `/dev/serial/by-id/` path, shown to the guest as a serial port, attach while shut off) or `usb` (vendor, product, optional serial number resolved to the bus address at each attach, hot-pluggable); `list_devices`, `attach_device`, `detach_device` on owned VMs with `manage.reconfigure`; one VM per device across the host; templates never carry devices; tested with a USB-to-serial adapter and a spare USB device; PCI passthrough stays parked | As recommended | A guest driving physical hardware is a new trust boundary, so each device is named by the operator with no wildcards | resolved |
 | Tying a template to its firmware build | Variables stored as `tpl@<name>.vars`; each VM names the sealed VM's firmware code file and starts from a copy through `<nvram template=…>`; the code file's path is pinned and its hash recorded; a changed hash warns in the reply and the VM still starts | As recommended | A routine `ovmf` upgrade must not break every template, and the variable store format is stable; the Secure Boot template test catches a breaking firmware change | resolved |
-| Where VM variables live, and snapshots | Each UEFI VM the server creates keeps its variables as `<vm>.vars` in `disk_pool`, named in `<nvram template=…>`; seal copies it to `tpl@<name>.vars`; a snapshot of a shut-off UEFI VM copies it to `<vm>@<snapshot>.vars`, revert copies it back, snapshot and VM deletion delete the copies; UEFI VMs made earlier cannot be sealed and their snapshots stay without variables | As recommended | libvirt's own NVRAM path is root-owned and has no API to read or write it, so the server could neither seal nor snapshot variables there | provisional: a test-bed probe must show that libvirt accepts a variable file in the pool, copies the template into it, and that the per-VM AppArmor profile lets QEMU write it; a failure returns the design to the owner |
+| Where VM variables live, and snapshots | Each UEFI VM the server creates keeps its variables as `<vm>.vars` in `disk_pool`, which the server creates from the firmware descriptor's variables file (or the template's) and names in `<nvram>`; seal copies it to `tpl@<name>.vars`; a snapshot of a shut-off UEFI VM copies it to `<vm>@<snapshot>.vars`, revert copies it back, snapshot and VM deletion delete the copies; UEFI VMs made earlier cannot be sealed and their snapshots stay without variables | As recommended | libvirt's own NVRAM path is root-owned and has no API to read or write it, so the server could neither seal nor snapshot variables there | provisional: the first probe under Checks must show that libvirt uses a variable file the server created in the pool without overwriting it, and that the per-VM AppArmor profile lets QEMU write it; a failure returns the design to the owner |
 | Hardware a template records, and per-VM overrides | A template records OS, firmware, Secure Boot mode (off, Microsoft keys, setup), TPM, memory and vCPUs (disk size from the volume); seal takes them from the VM, import from the call, config templates may set them; a VM defaults to them and may override memory and vCPUs within limits, grow the disk, add or drop the TPM; firmware and Secure Boot are fixed for a sealed template and chosen per VM for an imported or config template; values above a limit are refused with the limit named | As recommended | The Windows template needs its build hardware back, one imported image must boot in every mode, and a sealed template's variables belong to one firmware | resolved |
 | Cloud-init seed per template | `seed = "nocloud"` or `"none"`, default `nocloud` for Linux and `none` for Windows, set at seal, import or in the config; with `none` the VM keeps the template's hostname and identity and `user_data` is refused; `nocloud` on Windows is the cloudbase-init opt-in, which its first user verifies | As recommended | Windows shows the seed as a stray drive, and images without cloud-init gain nothing from it | resolved |
 | Importing an image, and `disk_image` | Source inside `host_share_dirs`, resolved like `copy_to_vm` (a `/nix/store` result is copied in with `cp -L`); raw or qcow2 kept as-is, so a template may be raw; a qcow2 naming a backing file or an external data file is refused; virtual size within `max_disk_gib`, space counted toward the template cap; runs in the background with a transfer ID; `create_vm` `disk_image` makes the copy the VM's own disk, deleted with it, with `disk_bus` `virtio` (default), `sata` or `usb`; every upload is sparse: zero runs and holes go as holes through `virStreamSendHole` with `VIR_STORAGE_VOL_UPLOAD_SPARSE_STREAM`, and a seal's `qemu-img convert` copy already skips zeros; non-sparse sources are accepted | As recommended, with sparse uploads | One copy path serves both uses; a backing reference would let QEMU open host files; sparse uploads keep raw images small without asking agents to prepare them | resolved |
@@ -66,7 +67,8 @@ one name space covers config and agent-made templates.
 ### The record
 
 The record is a JSON document padded to a fixed 64 KiB, with its SHA-256 inside, written in one upload. It holds the
-template's origin (`sealed` or `imported`), its state (`building` or `ready`), OS, machine type, disk bus, firmware,
+template's origin (`sealed` or `imported`), its state (`building` or `ready`), the seal's ID and the sealed VM's
+UUID, OS, machine type, disk bus, firmware,
 firmware code file path and SHA-256, Secure Boot mode, TPM, memory, vCPUs, seed choice, hibernation setting and creation
 time. The server never trusts it further than it must:
 
@@ -103,11 +105,15 @@ flowchart LR
    `max_template_gib` or the pool's free space. The space estimate is the boot disk's allocated size, its chain
    included.
 2. The mark is a `sealing` attribute on the VM's owner element, holding the seal's ID and start time. Every management
-   call that changes a VM refuses a marked one, in `manage_domain`, and so does the expiry sweep. Only the server writes
+   call that changes a VM refuses a marked one, in both `manage_domain` and `power_domain`, so `start_vm` and
+   `stop_vm` refuse it too, and so does the expiry sweep. Only the server writes
    owner attributes, as for `generation` and `expires`.
 3. The record is created with state `building` and the volume-existence check, which claims the name. A seal cut short
-   by a crash leaves a `building` record. `template_delete` of it deletes its volumes and clears the mark on the VM, and
-   a mark whose seal ID names a record that is not `building` is stale and ignored.
+   by a crash leaves a `building` record. While the copy runs, its process holds an advisory lock on
+   `~/.cache/virtmanager-mcp/seal-<name>.lock`, beside the manage lock. `template_delete` of a `building` record
+   refuses while that lock is held, so it never deletes under a running copy; once the lock is free, it deletes the
+   volumes and clears the mark on the VM the record names. A mark whose seal ID names a record that is not `building`
+   is stale and ignored.
 4. The boot disk is copied with libvirt's volume copy into a standalone qcow2, which merges the overlay chain, drops
    internal snapshots and skips zero blocks. The seed disk and CD-ROMs are not copied.
 5. `<vm>.vars` is copied to `tpl@<name>.vars`, and the record takes the hardware, machine type and disk bus from the
@@ -125,9 +131,10 @@ seal and runs in the background the same way, with the template name as the tran
 
 - The source is resolved with `Config::share_file`, which follows symlinks and checks `host_share_dirs`, and is
   refused when it resolves into a storage pool's directory.
-- The server opens the file once, reads its first cluster, checks that buffer, and sends the same buffer as the first
-  part of the upload, so the file cannot change between the check and the copy. A qcow2 image is refused when it names
-  a backing file, sets the external-data-file feature bit or carries a data-file header extension, or is encrypted. A
+- The server opens the file once, reads its first cluster, at least 4 KiB, checks that buffer, and sends the same
+  buffer as the first part of the upload, so the file cannot change between the check and the copy. A qcow2 image is
+  refused when it names a backing file, sets the external-data-file feature bit or carries a data-file header
+  extension, or is encrypted. A
   raw image that begins with the qcow2 magic is refused, because libvirt would probe it as qcow2. Any other format is
   refused.
 - The virtual size must fit `max_disk_gib`, and the data size the caps and the pool's free space.
@@ -143,22 +150,29 @@ seal and runs in the background the same way, with the template name as the tran
 
 ### Firmware in a VM's definition
 
-Before it defines a UEFI VM, the server creates `<vm>.vars` itself, with the volume-existence check, from the variables
-file of the firmware descriptor libvirt would choose, or from `tpl@<name>.vars` for a sealed template. libvirt then
-finds the file in place and does not copy one, and a leftover file of the same name fails the create loudly instead of
-being reused.
+No VM relies on libvirt's firmware autoselection. The server reads the host's firmware descriptors in
+`/usr/share/qemu/firmware` and picks one for the mode's features, in the descriptors' priority order, as libvirt would:
 
-- **`create_vm`, imported and config templates:** `firmware='efi'` with the descriptor features as today, plus
-  `<nvram>` naming `<vm>.vars`. On this host, `secure-boot` and `enrolled-keys` both on select `OVMF_CODE_4M.ms.fd`,
-  `secure-boot` on with `enrolled-keys` off selects `OVMF_CODE_4M.secboot.fd` with the empty `OVMF_VARS_4M.fd`, and
-  both off select `OVMF_CODE_4M.fd`.
-- **Sealed templates:** no firmware autoselection, because libvirt rejects a user `<nvram template>` that no descriptor
-  names. The VM gets `<loader readonly='yes' secure='yes|no' type='pflash' format='raw'>` with the recorded code file,
-  `<nvram template='…/tpl@<name>.vars' templateFormat='raw' format='raw'>` naming `<vm>.vars`, and
-  `<smm state='on'/>` when `secure` is yes. A recorded code file that no longer exists refuses the create.
+| Mode | Features | Code file on this host | Variables file |
+| -- | -- | -- | -- |
+| `off` | neither | `OVMF_CODE_4M.fd` | `OVMF_VARS_4M.fd` |
+| `on` | `secure-boot`, `enrolled-keys` | `OVMF_CODE_4M.ms.fd` | `OVMF_VARS_4M.ms.fd` |
+| `setup` | `secure-boot` without `enrolled-keys` | `OVMF_CODE_4M.secboot.fd` | `OVMF_VARS_4M.fd` |
 
-`reset_start`, `describe_vm` and the Secure Boot reader recognise both forms, so a VM from a sealed template gets
-`VIR_DOMAIN_START_RESET_NVRAM` on reset like any other UEFI VM.
+The VM gets `<loader readonly='yes' secure='yes|no' type='pflash' format='raw'>` with the descriptor's code file,
+`<nvram template='…' templateFormat='raw' format='raw'>` naming `<vm>.vars` with the descriptor's variables file as
+its template, and `<smm state='on'/>` when `secure` is yes. Before it defines the VM, the server creates `<vm>.vars`
+itself, with the volume-existence check, from that same variables file, so code and variables always come from one
+descriptor, and a leftover file of the same name fails the create loudly instead of being reused. libvirt finds the
+file in place and does not copy one.
+
+A VM from a sealed template gets the recorded code file instead, `tpl@<name>.vars` as its `<nvram>` template, and a
+`<vm>.vars` created from it. A recorded code file that no longer exists, or that no descriptor names, refuses the
+create.
+
+`reset_start`, `describe_vm` and the Secure Boot reader read the loader and nvram elements, so every UEFI VM gets
+`VIR_DOMAIN_START_RESET_NVRAM` on reset, which copies its `<nvram>` template again: the template's variables for a VM
+from a sealed template, the descriptor's for any other.
 
 ### Creating VMs
 
@@ -195,11 +209,11 @@ combines with `tpm: true`, and keys a guest enrolls stay in its variables, so a 
 
 A snapshot of a shut-off UEFI VM takes libvirt's snapshot, then copies `<vm>.vars` to `<vm>@<snapshot>.vars`; a failed
 copy deletes the snapshot again. Snapshot names of UEFI VMs follow `check_name`. `snapshot_revert` first saves the
-current variables as `<vm>@revert.vars`, then copies the snapshot's variables in, then reverts the disk; a failed disk
-revert copies the saved variables back. `snapshot_delete` deletes the copy, and `delete_vm`, `reset_vm` and the expiry
-sweep delete every copy. A running UEFI VM still cannot be snapshotted on hosts whose firmware variables are raw files,
-as today. A UEFI VM made before this design keeps its variables where libvirt put them; its snapshots stay without
-them, and the result says so.
+current variables as `<vm>@@revert.vars`, which no snapshot name can produce, then copies the snapshot's variables in,
+then reverts the disk; a failed disk revert copies the saved variables back. `snapshot_delete` deletes the copy, and
+`delete_vm`, `reset_vm` and the expiry sweep delete every copy. A running UEFI VM still cannot be snapshotted on hosts
+whose firmware variables are raw files, as today. A UEFI VM made before this design keeps its variables where libvirt
+put them; its snapshots stay without them, and the result says so.
 
 ### TPM state
 
@@ -236,7 +250,7 @@ new `create_vm` options and the variables volume of new UEFI VMs.
 - An agent-made template comes only from a copy of an owned VM's disk or of a file in `host_share_dirs`, into new
   volumes. No call turns an existing volume into a template.
 - No imported image or `disk_image` names a backing file or an external data file, before or after its upload.
-- No VM or snapshot name can produce a template's volume name.
+- No VM or snapshot name can produce a template's volume name or another VM's or snapshot's variables volume.
 - A template is usable only when its record says `ready`, its checksum holds, and every volume it needs exists.
 - Templates never carry TPM state or host devices.
 - A VM being sealed is refused by every management call that changes it and by the expiry sweep.
@@ -273,7 +287,9 @@ new `create_vm` options and the variables volume of new UEFI VMs.
 
 - First, a probe on the test bed, with the exact definitions for `off`, `on`, `setup` and the sealed form: a UEFI VM
   whose `<vm>.vars` the server created boots, QEMU writes it (a variable set in the guest survives a restart), libvirt
-  does not overwrite the file at start, and the volume copies with libvirt's storage calls.
+  does not overwrite the file at start, the volume copies with libvirt's storage calls, and a VM backing onto a
+  `tpl@` volume starts under the AppArmor profile libvirt generates. The probe also confirms that q35's SATA controller
+  has 6 ports.
 - A Windows 11 VM installed fresh through `create_vm`, with every update applied, shows Microsoft's 2023 certificate in
   its firmware database; it is sealed, and a VM from the template boots with Secure Boot on, before and after
   `reset_vm`. `t-win11` cannot be sealed, because its variables are not in the pool.
