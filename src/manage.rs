@@ -23,7 +23,7 @@ use virt::storage_vol::StorageVol;
 use virt::stream::Stream;
 use virt::sys;
 
-use crate::config::{Firmware, GuestOs, Manage, OnCrash, is_hostname};
+use crate::config::{Firmware, GuestOs, Manage, OnCrash, SecureBoot, is_hostname};
 use crate::hypervisor::{self, Hypervisor};
 use crate::seed;
 use crate::volnames;
@@ -198,8 +198,8 @@ pub struct NewVm {
     pub disk_gib: u64,
     pub uefi: bool,
     pub tpm: bool,
-    /// False turns Secure Boot off; only a UEFI VM may have it false.
-    pub secure_boot: bool,
+    /// Only a UEFI VM may have it off or in setup mode.
+    pub secure_boot: SecureBoot,
     pub iso: Option<String>,
     pub driver_iso: Option<String>,
     pub network: Option<String>,
@@ -276,8 +276,9 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             vol_name,
             match (vm.uefi, vm.secure_boot) {
                 (false, _) => "BIOS",
-                (true, true) => "UEFI",
-                (true, false) => "UEFI without Secure Boot",
+                (true, SecureBoot::On) => "UEFI",
+                (true, SecureBoot::Off) => "UEFI without Secure Boot",
+                (true, SecureBoot::Setup) => "UEFI with Secure Boot in setup mode, no keys enrolled",
             },
             if vm.tpm { ", TPM" } else { "" },
         );
@@ -335,7 +336,8 @@ pub fn list_templates(hv: &Hypervisor) -> Result<Vec<Value>> {
                 "description": t.description,
                 "os": match t.os { GuestOs::Linux => "linux", GuestOs::Windows => "windows" },
                 "firmware": match t.firmware { Firmware::Bios => "bios", Firmware::Uefi => "uefi" },
-                "secure_boot": t.firmware == Firmware::Uefi && t.secure_boot,
+                "secure_boot": t.firmware == Firmware::Uefi && t.secure_boot == SecureBoot::On,
+                "secure_boot_mode": if t.firmware == Firmware::Uefi { t.secure_boot.as_str() } else { "off" },
                 "vms_using_it": used_by,
             }));
         }
@@ -987,12 +989,7 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
     let os = child(root, "os");
     let uefi =
         os.is_some_and(|o| o.attribute("firmware") == Some("efi") || child(o, "loader").is_some());
-    // A BIOS VM has no Secure Boot; for a UEFI VM, null means its XML does not say.
-    let secure_boot = if uefi {
-        os.and_then(secure_boot_state)
-    } else {
-        Some(false)
-    };
+    let (secure_boot, secure_boot_mode) = secure_boot_fields(uefi, os);
     let devices = child(root, "devices");
     let has = |tag: &str| devices.is_some_and(|d| child(d, tag).is_some());
 
@@ -1020,6 +1017,7 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
         "memory_mib": kib_text(&xml, "currentMemory").or_else(|| kib_text(&xml, "memory")).map(|k| k / 1024),
         "firmware": if uefi { "uefi" } else { "bios" },
         "secure_boot": secure_boot,
+        "secure_boot_mode": secure_boot_mode,
         "tpm": has("tpm"),
         "disks": disks,
         "interfaces": parse_nics(&xml)?,
@@ -1602,28 +1600,45 @@ fn check_disk(m: &Manage, gib: u64) -> Result<()> {
     Ok(())
 }
 
-/// Whether a UEFI domain's `<os>` has Secure Boot on, from its `secure-boot` firmware feature or its loader's `secure`
-/// attribute, which libvirt fills in when it picks the firmware. `None` when neither says, as for a loader named by
-/// path alone.
-fn secure_boot_state(os: roxmltree::Node<'_, '_>) -> Option<bool> {
-    let feature = child(os, "firmware").and_then(|f| {
-        f.children()
-            .find(|n| n.has_tag_name("feature") && n.attribute("name") == Some("secure-boot"))
-            .and_then(|n| n.attribute("enabled"))
-    });
+/// A UEFI domain's Secure Boot mode, from its `secure-boot` and `enrolled-keys` firmware features or, when they are
+/// absent, from its loader's `secure` attribute, which libvirt fills in when it picks the firmware. Secure Boot
+/// without enrolled keys is setup mode. `None` when nothing says, as for a loader named by path alone.
+fn secure_boot_state(os: roxmltree::Node<'_, '_>) -> Option<SecureBoot> {
+    let feature = |name: &str| {
+        child(os, "firmware").and_then(|f| {
+            f.children()
+                .find(|n| n.has_tag_name("feature") && n.attribute("name") == Some(name))
+                .and_then(|n| n.attribute("enabled"))
+        })
+    };
     let loader = child(os, "loader").and_then(|l| l.attribute("secure"));
-    match feature.or(loader)? {
-        "yes" => Some(true),
-        "no" => Some(false),
+    match feature("secure-boot").or(loader)? {
+        "yes" if feature("enrolled-keys") == Some("no") => Some(SecureBoot::Setup),
+        "yes" => Some(SecureBoot::On),
+        "no" => Some(SecureBoot::Off),
         _ => None,
     }
 }
 
-fn check_secure_boot(uefi: bool, secure_boot: bool) -> Result<()> {
-    if !uefi && !secure_boot {
-        bail!(
-            "secure_boot: false needs firmware \"uefi\"; a BIOS VM has no Secure Boot to turn off"
-        );
+/// The `secure_boot` boolean and the `secure_boot_mode` word `describe_vm` reports. Setup mode reads as false in the
+/// boolean, which says whether the VM's keys are enrolled. A BIOS VM has no Secure Boot; for a UEFI VM, `None` means
+/// the XML does not say.
+fn secure_boot_fields(
+    uefi: bool,
+    os: Option<roxmltree::Node<'_, '_>>,
+) -> (Option<bool>, Option<&'static str>) {
+    if !uefi {
+        return (Some(false), Some(SecureBoot::Off.as_str()));
+    }
+    match os.and_then(secure_boot_state) {
+        Some(mode) => (Some(mode == SecureBoot::On), Some(mode.as_str())),
+        None => (None, None),
+    }
+}
+
+fn check_secure_boot(uefi: bool, secure_boot: SecureBoot) -> Result<()> {
+    if !uefi && secure_boot != SecureBoot::On {
+        bail!("secure_boot \"off\" and \"setup\" need firmware \"uefi\"");
     }
     Ok(())
 }
@@ -1930,8 +1945,8 @@ struct DomainSpec<'a> {
     memory_mib: u64,
     uefi: bool,
     tpm: bool,
-    /// With `uefi`, false turns the firmware's Secure Boot and enrolled keys off.
-    secure_boot: bool,
+    /// With `uefi`, the Secure Boot features the firmware is asked for.
+    secure_boot: SecureBoot,
     /// The domain's `<on_crash>` action.
     on_crash: OnCrash,
     /// In order: the first writable disk boots first, the first CD-ROM second.
@@ -2068,14 +2083,21 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
         vcpus = spec.vcpus,
         on_crash = spec.on_crash.as_xml(),
         firmware = if spec.uefi { " firmware='efi'" } else { "" },
-        // Without features, libvirt picks the host's preferred descriptor, often one with Secure Boot on. With them
-        // alone it may pick a stateless ROM build such as OVMF.amdsev.fd, which keeps no boot entries, so the loader
-        // type asks for flash with its own variables.
-        firmware_features = if spec.uefi && !spec.secure_boot {
-            "<firmware><feature enabled='no' name='secure-boot'/><feature enabled='no' name='enrolled-keys'/></firmware>\
-             <loader type='pflash'/>"
+        // Without features, libvirt picks the host's preferred descriptor, which may not be the mode asked for. With
+        // them alone it may pick a stateless ROM build such as OVMF.amdsev.fd, which keeps no boot entries, so the
+        // loader type asks for flash with its own variables.
+        firmware_features = if spec.uefi {
+            let (secure, keys) = match spec.secure_boot {
+                SecureBoot::Off => ("no", "no"),
+                SecureBoot::On => ("yes", "yes"),
+                SecureBoot::Setup => ("yes", "no"),
+            };
+            format!(
+                "<firmware><feature enabled='{secure}' name='secure-boot'/>\
+                 <feature enabled='{keys}' name='enrolled-keys'/></firmware><loader type='pflash'/>"
+            )
         } else {
-            ""
+            String::new()
         },
         devices = devices.concat(),
     )
@@ -2280,7 +2302,7 @@ mod tests {
             memory_mib: 2048,
             uefi: false,
             tpm: false,
-            secure_boot: true,
+            secure_boot: SecureBoot::On,
             on_crash: OnCrash::Preserve,
             disks,
             network: Some("net"),
@@ -2306,8 +2328,15 @@ mod tests {
             .collect()
     }
 
+    fn features(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, enabled)| ((*name).into(), (*enabled).into()))
+            .collect()
+    }
+
     #[test]
-    fn domain_xml_turns_secure_boot_off_only_when_asked() {
+    fn domain_xml_writes_the_firmware_features_of_each_secure_boot_mode() {
         let uefi = |secure_boot| {
             domain_xml(&DomainSpec {
                 uefi: true,
@@ -2315,24 +2344,34 @@ mod tests {
                 ..spec(vec![Disk::Qcow2("/pool/t.qcow2")])
             })
         };
-        assert!(firmware_features(&uefi(true)).is_empty());
-        let off = uefi(false);
-        assert_eq!(
-            firmware_features(&off),
-            [
-                ("secure-boot".into(), "no".into()),
-                ("enrolled-keys".into(), "no".into())
-            ]
-        );
-        let doc = roxmltree::Document::parse(&off).unwrap();
-        let os = child(doc.root_element(), "os").unwrap();
-        assert_eq!(os.attribute("firmware"), Some("efi"));
-        assert_eq!(
-            child(os, "loader").and_then(|l| l.attribute("type")),
-            Some("pflash")
-        );
-        assert_eq!(secure_boot_state(os), Some(false));
-
+        for (mode, expected) in [
+            (
+                SecureBoot::Off,
+                features(&[("secure-boot", "no"), ("enrolled-keys", "no")]),
+            ),
+            (
+                SecureBoot::On,
+                features(&[("secure-boot", "yes"), ("enrolled-keys", "yes")]),
+            ),
+            (
+                SecureBoot::Setup,
+                features(&[("secure-boot", "yes"), ("enrolled-keys", "no")]),
+            ),
+        ] {
+            let xml = uefi(mode);
+            assert_eq!(firmware_features(&xml), expected, "{mode:?}");
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let os = child(doc.root_element(), "os").unwrap();
+            assert_eq!(os.attribute("firmware"), Some("efi"), "{mode:?}");
+            assert_eq!(
+                child(os, "loader").and_then(|l| l.attribute("type")),
+                Some("pflash"),
+                "{mode:?}"
+            );
+            // What the reader says about the definition the server wrote.
+            assert_eq!(secure_boot_state(os), Some(mode), "{mode:?}");
+        }
+        // BIOS has no firmware element, whatever the mode says.
         assert!(firmware_features(&domain_xml(&spec(vec![Disk::Qcow2("/p/t.qcow2")]))).is_empty());
     }
 
@@ -2349,11 +2388,28 @@ mod tests {
                 "<firmware><feature enabled='yes' name='secure-boot'/></firmware>\
                  <loader secure='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>"
             ),
-            Some(true)
+            Some(SecureBoot::On)
         );
         assert_eq!(
             state("<loader secure='no' type='pflash'>/x.fd</loader>"),
-            Some(false)
+            Some(SecureBoot::Off)
+        );
+        // Secure Boot firmware without enrolled keys is setup mode, even when libvirt added the loader's own flag.
+        assert_eq!(
+            state(
+                "<firmware><feature enabled='yes' name='secure-boot'/>\
+                 <feature enabled='no' name='enrolled-keys'/></firmware>\
+                 <loader secure='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>"
+            ),
+            Some(SecureBoot::Setup)
+        );
+        // Without Secure Boot, the keys do not matter.
+        assert_eq!(
+            state(
+                "<firmware><feature enabled='no' name='secure-boot'/>\
+                 <feature enabled='yes' name='enrolled-keys'/></firmware>"
+            ),
+            Some(SecureBoot::Off)
         );
         // A loader named by path alone, as virt-manager writes, says nothing.
         assert_eq!(
@@ -2364,12 +2420,50 @@ mod tests {
     }
 
     #[test]
-    fn secure_boot_off_needs_uefi() {
-        assert!(check_secure_boot(true, false).is_ok());
-        assert!(check_secure_boot(true, true).is_ok());
-        assert!(check_secure_boot(false, true).is_ok());
-        let err = check_secure_boot(false, false).unwrap_err().to_string();
-        assert!(err.contains("needs firmware \"uefi\""), "{err}");
+    fn describe_keeps_the_boolean_and_adds_the_mode() {
+        let fields = |uefi, os_inner: &str| {
+            let xml = format!("<domain><os firmware='efi'>{os_inner}</os></domain>");
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            secure_boot_fields(uefi, child(doc.root_element(), "os"))
+        };
+        let feature = |secure: &str, keys: &str| {
+            format!(
+                "<firmware><feature enabled='{secure}' name='secure-boot'/>\
+                 <feature enabled='{keys}' name='enrolled-keys'/></firmware>"
+            )
+        };
+        assert_eq!(
+            fields(true, &feature("yes", "yes")),
+            (Some(true), Some("on"))
+        );
+        assert_eq!(
+            fields(true, &feature("no", "no")),
+            (Some(false), Some("off"))
+        );
+        // Setup mode has Secure Boot firmware, but no keys, so the boolean reads false.
+        assert_eq!(
+            fields(true, &feature("yes", "no")),
+            (Some(false), Some("setup"))
+        );
+        // The XML does not say: both fields are unknown.
+        assert_eq!(fields(true, ""), (None, None));
+        // A BIOS VM has no Secure Boot.
+        assert_eq!(fields(false, ""), (Some(false), Some("off")));
+    }
+
+    #[test]
+    fn secure_boot_off_and_setup_need_uefi() {
+        for mode in [SecureBoot::On, SecureBoot::Off, SecureBoot::Setup] {
+            assert!(check_secure_boot(true, mode).is_ok(), "{mode:?}");
+        }
+        assert!(check_secure_boot(false, SecureBoot::On).is_ok());
+        for mode in [SecureBoot::Off, SecureBoot::Setup] {
+            let err = check_secure_boot(false, mode).unwrap_err().to_string();
+            assert_eq!(
+                err, "secure_boot \"off\" and \"setup\" need firmware \"uefi\"",
+                "{mode:?}"
+            );
+        }
     }
 
     /// The crash action, the panic models and the balloon's stats period in a domain's XML.
@@ -2396,7 +2490,7 @@ mod tests {
     #[test]
     fn created_vms_get_a_panic_device_stats_and_the_crash_action() {
         for (windows, model) in [(false, "isa"), (true, "hyperv")] {
-            for secure_boot in [true, false] {
+            for secure_boot in [SecureBoot::On, SecureBoot::Off, SecureBoot::Setup] {
                 for on_crash in [OnCrash::Preserve, OnCrash::Destroy] {
                     let xml = domain_xml(&DomainSpec {
                         windows,
@@ -2412,10 +2506,11 @@ mod tests {
                             vec![model.into()],
                             Some("5".into())
                         ),
-                        "windows {windows}, secure_boot {secure_boot}"
+                        "windows {windows}, secure_boot {secure_boot:?}"
                     );
-                    let off = firmware_features(&xml).iter().any(|(_, v)| v == "no");
-                    assert_eq!(off, !secure_boot);
+                    let doc = roxmltree::Document::parse(&xml).unwrap();
+                    let os = child(doc.root_element(), "os").unwrap();
+                    assert_eq!(secure_boot_state(os), Some(secure_boot));
                 }
             }
         }

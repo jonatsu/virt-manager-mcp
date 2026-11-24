@@ -12,7 +12,23 @@
     },
     "expect": {
       "error": true,
-      "contains": "secure_boot: false needs firmware \"uefi\""
+      "contains": "secure_boot \"off\" and \"setup\" need firmware \"uefi\""
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-sb",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "secure_boot": "setup"
+    },
+    "expect": {
+      "error": true,
+      "contains": "secure_boot \"off\" and \"setup\" need firmware \"uefi\""
     }
   },
   {
@@ -38,7 +54,8 @@
     "expect": {
       "contains": [
         "\"firmware\": \"uefi\"",
-        "\"secure_boot\": false"
+        "\"secure_boot\": false",
+        "\"secure_boot_mode\": \"off\""
       ]
     }
   },
@@ -116,7 +133,8 @@
     "expect": {
       "contains": [
         "\"firmware\": \"uefi\"",
-        "\"secure_boot\": true"
+        "\"secure_boot\": true",
+        "\"secure_boot_mode\": \"on\""
       ]
     }
   },
@@ -169,6 +187,65 @@
     },
     "expect": {
       "contains": "deleted VM 't-sbu'"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-sbs",
+      "template": "debian13-uefi-setup"
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-sbs' from template 'debian13-uefi-setup'",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-sbs"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"uefi\"",
+        "\"secure_boot\": false",
+        "\"secure_boot_mode\": \"setup\""
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-sbs",
+      "command": "test -d /sys/firmware/efi && echo uefi-booted; for n in SetupMode SecureBoot; do v=/sys/firmware/efi/efivars/$n-8be4df61-93ca-11d2-aa0d-00e098032b8c; if [ -e \"$v\" ]; then echo \"$n=$(od -An -tu1 \"$v\" | awk '{print $NF}')\"; else echo \"$n=absent\"; fi; done"
+    },
+    "expect": {
+      "contains": [
+        "uefi-booted",
+        "SetupMode=1",
+        "SecureBoot=0"
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-sbs",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-sbs' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-sbs"
+    },
+    "expect": {
+      "contains": "deleted VM 't-sbs'"
     }
   }
 ]

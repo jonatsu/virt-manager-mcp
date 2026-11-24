@@ -160,7 +160,7 @@
     "tool": "list_templates",
     "args": {},
     "expect": {
-      "matches": "\"name\": \"debian13\",\\s+\"os\": \"linux\",\\s+\"secure_boot\": false,\\s+\"vms_using_it\": 2.*\"name\": \"debian13-uefi\",\\s+\"os\": \"linux\",\\s+\"secure_boot\": true,\\s+\"vms_using_it\": 1"
+      "matches": "\"name\": \"debian13\",\\s+\"os\": \"linux\",\\s+\"secure_boot\": false,\\s+\"secure_boot_mode\": \"off\",\\s+\"vms_using_it\": 2.*\"name\": \"debian13-uefi\",\\s+\"os\": \"linux\",\\s+\"secure_boot\": true,\\s+\"secure_boot_mode\": \"on\",\\s+\"vms_using_it\": 1"
     }
   },
   {

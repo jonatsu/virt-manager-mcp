@@ -99,9 +99,10 @@ pub struct Template {
     pub os: GuestOs,
     #[serde(default)]
     pub firmware: Firmware,
-    /// UEFI only. False turns Secure Boot off, for a template whose boot loader is not signed.
-    #[serde(default = "yes")]
-    pub secure_boot: bool,
+    /// UEFI only. `"off"` (or false) turns Secure Boot off, for a template whose boot loader is not signed; `"setup"`
+    /// has Secure Boot firmware with no keys enrolled.
+    #[serde(default)]
+    pub secure_boot: SecureBoot,
     #[serde(default)]
     pub description: String,
     /// cloud-config file put into each new VM's seed. It must start with a `#cloud-config` line.
@@ -124,8 +125,75 @@ pub enum Firmware {
     Uefi,
 }
 
-fn yes() -> bool {
-    true
+/// How a VM's UEFI firmware treats Secure Boot. Read from a boolean, where true is `On` and false is `Off`, or from
+/// one of the words `"off"`, `"on"` and `"setup"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SecureBoot {
+    /// Secure Boot and the enrolled keys are both off.
+    Off,
+    /// Secure Boot with Microsoft's keys enrolled, which refuses an unsigned boot loader.
+    #[default]
+    On,
+    /// Secure Boot firmware with no keys enrolled, so the guest can enrol its own.
+    Setup,
+}
+
+impl SecureBoot {
+    /// The word an agent or an operator writes for this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Setup => "setup",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SecureBoot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = SecureBoot;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("true, false, \"off\", \"on\" or \"setup\"")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<SecureBoot, E> {
+                Ok(if v { SecureBoot::On } else { SecureBoot::Off })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<SecureBoot, E> {
+                match v {
+                    "off" => Ok(SecureBoot::Off),
+                    "on" => Ok(SecureBoot::On),
+                    "setup" => Ok(SecureBoot::Setup),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(v), &self)),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl schemars::JsonSchema for SecureBoot {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SecureBoot".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "UEFI only. true or \"on\" (the default): Secure Boot with Microsoft's keys enrolled, which \
+                refuses an unsigned boot loader. false or \"off\": no Secure Boot, for installers that are not signed. \
+                \"setup\": Secure Boot firmware with no keys enrolled, for a guest that enrols its own.",
+            "oneOf": [
+                { "type": "boolean" },
+                { "type": "string", "enum": ["off", "on", "setup"] }
+            ]
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -352,8 +420,10 @@ impl Config {
                     "manage.templates.{name}.volume must name a volume in manage.disk_pool, not a path"
                 );
             }
-            if t.firmware == Firmware::Bios && !t.secure_boot {
-                bail!("manage.templates.{name}: secure_boot = false needs firmware = \"uefi\"");
+            if t.firmware == Firmware::Bios && t.secure_boot != SecureBoot::On {
+                bail!(
+                    "manage.templates.{name}: secure_boot \"off\" and \"setup\" need firmware = \"uefi\""
+                );
             }
         }
         if self.share_project_dir {
@@ -721,15 +791,64 @@ mod tests {
                 plain.secure_boot,
                 plain.user_data.as_ref()
             ),
-            (GuestOs::Linux, Firmware::Bios, true, None)
+            (GuestOs::Linux, Firmware::Bios, SecureBoot::On, None)
         );
         let uefi = &m.templates["debian13-uefi"];
-        assert_eq!((uefi.firmware, uefi.secure_boot), (Firmware::Uefi, true));
-        assert!(!m.templates["cachyos"].secure_boot);
+        assert_eq!(
+            (uefi.firmware, uefi.secure_boot),
+            (Firmware::Uefi, SecureBoot::On)
+        );
+        assert_eq!(m.templates["cachyos"].secure_boot, SecureBoot::Off);
         assert_eq!(
             uefi.user_data.as_deref(),
             Some(Path::new("/etc/virtmanager-mcp/debian13.yaml"))
         );
+    }
+
+    #[test]
+    fn secure_boot_takes_booleans_and_the_three_words() {
+        let json = |v: serde_json::Value| serde_json::from_value::<SecureBoot>(v);
+        for (value, mode) in [
+            (serde_json::json!(true), SecureBoot::On),
+            (serde_json::json!(false), SecureBoot::Off),
+            (serde_json::json!("on"), SecureBoot::On),
+            (serde_json::json!("off"), SecureBoot::Off),
+            (serde_json::json!("setup"), SecureBoot::Setup),
+        ] {
+            assert_eq!(json(value.clone()).unwrap(), mode, "{value}");
+        }
+        for value in [
+            serde_json::json!("yes"),
+            serde_json::json!("true"),
+            serde_json::json!("ON"),
+            serde_json::json!(""),
+            serde_json::json!(1),
+            serde_json::json!(0),
+            serde_json::json!(null),
+            serde_json::json!(["on"]),
+        ] {
+            let err = json(value.clone()).unwrap_err().to_string();
+            assert!(err.contains("\"setup\""), "{value}: {err}");
+        }
+        assert_eq!(SecureBoot::default(), SecureBoot::On);
+    }
+
+    #[test]
+    fn a_template_takes_each_secure_boot_form() {
+        let mode = |value: &str| {
+            let config = parse(&format!(
+                "[manage]\ndisk_pool = \"p\"\n[manage.templates.t]\nvolume = \"v.qcow2\"\n\
+                 firmware = \"uefi\"\n{value}"
+            ))
+            .unwrap();
+            config.manage.templates["t"].secure_boot
+        };
+        assert_eq!(mode(""), SecureBoot::On);
+        assert_eq!(mode("secure_boot = true"), SecureBoot::On);
+        assert_eq!(mode("secure_boot = false"), SecureBoot::Off);
+        assert_eq!(mode("secure_boot = \"on\""), SecureBoot::On);
+        assert_eq!(mode("secure_boot = \"off\""), SecureBoot::Off);
+        assert_eq!(mode("secure_boot = \"setup\""), SecureBoot::Setup);
     }
 
     #[test]
@@ -777,6 +896,17 @@ mod tests {
             (table("os = \"bsd\""), "unknown os"),
             (table("colour = \"blue\""), "unknown key"),
             (table("secure_boot = false"), "Secure Boot off on BIOS"),
+            (table("secure_boot = \"off\""), "Secure Boot off on BIOS"),
+            (
+                table("secure_boot = \"setup\""),
+                "Secure Boot setup on BIOS",
+            ),
+            (table("firmware = \"uefi\"\nsecure_boot = \"yes\""), "yes"),
+            (table("firmware = \"uefi\"\nsecure_boot = 1"), "integer"),
+            (
+                table("firmware = \"uefi\"\nsecure_boot = \"On\""),
+                "wrong case",
+            ),
             (
                 "[manage.templates.Debian]\nvolume = \"t.qcow2\"".into(),
                 "uppercase name",

@@ -63,7 +63,8 @@ on_crash = "preserve"       # or "destroy": what a crashed VM made by this serve
 # volume = "tpl-debian13.qcow2"                    # qcow2 volume in disk_pool; never change it while VMs use it
 # os = "linux"                                     # or "windows"
 # firmware = "bios"                                # or "uefi"
-# secure_boot = false                              # UEFI only: for a boot loader that is not signed
+# secure_boot = "off"                              # UEFI only: "on" (default), "off" for a boot loader that is not
+#                                                  # signed, or "setup" for firmware with no keys enrolled
 # description = "Debian 13 with qemu-guest-agent"
 # user_data = "/etc/virtmanager-mcp/debian13.yaml" # optional; must start with a #cloud-config line
 

@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agent::{self, Agent, ExecSpec, Shell, shell_spec};
-use crate::config::Config;
+use crate::config::{Config, SecureBoot};
 use crate::console::{
     CLOSED_BY_CONSOLE_CLOSE, Consoles, LibvirtOpener, OpenRequest, Pacing, Run, VmId,
 };
@@ -534,10 +534,11 @@ pub struct CreateVmParams {
     /// Add an emulated TPM 2.0 (needed by Windows 11).
     #[serde(default)]
     pub tpm: bool,
-    /// UEFI only. Default true: the host's firmware with Secure Boot and enrolled keys, which refuses an unsigned
-    /// boot loader. False turns Secure Boot off, for installers that are not signed.
-    #[serde(default = "yes")]
-    pub secure_boot: bool,
+    /// UEFI only. Default `true`, or `"on"`: the host's firmware with Secure Boot and Microsoft's keys enrolled, which
+    /// refuses an unsigned boot loader. `false` or `"off"` turns Secure Boot off, for installers that are not signed.
+    /// `"setup"` has Secure Boot firmware with no keys enrolled, for a guest that enrols its own.
+    #[serde(default)]
+    pub secure_boot: SecureBoot,
     /// Install ISO (absolute host path from list_isos), attached as a bootable CD-ROM.
     pub iso: Option<String>,
     /// Second ISO attached as another CD-ROM, e.g. virtio-win.iso so a Windows installer can load
@@ -2921,6 +2922,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["move", "click", "double_click", "drag", "scroll"]
         );
+    }
+
+    #[test]
+    fn create_vm_secure_boot_takes_booleans_and_words_and_advertises_them() {
+        let base = |secure_boot: Option<Value>| {
+            let mut params = json!({
+                "name": "t-x", "os": "linux", "vcpus": 1, "memory_mib": 512, "disk_gib": 1
+            });
+            if let Some(v) = secure_boot {
+                params["secure_boot"] = v;
+            }
+            serde_json::from_value::<CreateVmParams>(params)
+        };
+        assert_eq!(base(None).unwrap().secure_boot, SecureBoot::On);
+        assert_eq!(
+            base(Some(json!(false))).unwrap().secure_boot,
+            SecureBoot::Off
+        );
+        assert_eq!(
+            base(Some(json!("setup"))).unwrap().secure_boot,
+            SecureBoot::Setup
+        );
+        for bad in [json!("yes"), json!(1), json!("Setup")] {
+            assert!(base(Some(bad.clone())).is_err(), "{bad} was accepted");
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(CreateVmParams)).unwrap();
+        let text = schema["properties"]["secure_boot"].to_string() + &schema["$defs"].to_string();
+        for offered in ["boolean", "off", "on", "setup"] {
+            assert!(text.contains(offered), "{offered} missing from {text}");
+        }
     }
 
     #[test]

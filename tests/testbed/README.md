@@ -11,7 +11,7 @@ used the same setup.
 | `mcp_call.py` | MCP stdio client using only the standard library. It runs a JSON list of tool calls and prints each reply. |
 | `run-all.sh` | Runs every case with `--check`, with the `virsh` steps between them. See "Check a run". |
 | `config.toml` | Server config that allows only `trial-deb13`, caps created VMs at one, and uses `agent-vms`. |
-| `config-templates.toml` | Server config for VMs made from templates: no `trial-deb13`, at most three 1 GiB VMs, four templates. |
+| `config-templates.toml` | Server config for VMs made from templates: no `trial-deb13`, at most three 1 GiB VMs, five templates. |
 | `preseed.cfg` | Unattended Debian 13 install with `qemu-guest-agent` and a serial getty on `ttyS0`. |
 | `t-inst.xml`, `t-win.xml` | Installer guests for the screen cases. See "The installer guests". |
 | `t-owrt.xml` | Serial-only OpenWrt appliance. See "The OpenWrt appliance". |
@@ -57,7 +57,7 @@ The template cases run with `config-templates.toml`. They need the template volu
 | `templates-create.json` | `list_templates` hides a missing volume. Three VMs come from templates, one of them UEFI, each timed to a responding agent. Hostname, size and lifetime refusals and `max_vms` follow, then deletion of overlays, seeds and attached disks. |
 | `templates-reset.json` | Resets a VM that holds a marker file, a snapshot and an attached disk. Refuses the unowned `t-listed`, a `create_vm` VM and `trial-deb13`. Leaves `t-s` running on the `scratch` template. |
 | `templates-reset-missing.json` | Run it after `virsh vol-delete --pool agent-vms tpl-scratch.qcow2`. The reset of `t-s` fails with its disks in place, then the case deletes its VMs. |
-| `firmware-secure-boot.json` | `create_vm` refuses `secure_boot: false` with BIOS, and creates, describes and starts `t-sb` under UEFI without Secure Boot. `t-sbt`, from `debian13-uefi-nosb`, boots under UEFI with no Secure Boot; `t-sbu`, from `debian13-uefi`, reports `SecureBoot` 1. All three are deleted. |
+| `firmware-secure-boot.json` | `create_vm` refuses `secure_boot: false` and `"setup"` with BIOS, and creates, describes and starts `t-sb` under UEFI without Secure Boot, where `describe_vm` reports `secure_boot_mode` `off`. `t-sbt`, from `debian13-uefi-nosb`, boots under UEFI with no Secure Boot; `t-sbu`, from `debian13-uefi`, reports mode `on` and `SecureBoot` 1; `t-sbs`, from `debian13-uefi-setup`, reports mode `setup`, `secure_boot` false, and `SetupMode` 1 with `SecureBoot` 0 in the guest's `efivars`. All four are deleted. |
 | `templates-reset-uefi.json` | Creates `t-u` from `debian13-uefi` and resets it. The reset moves the console capture before it to the previous run, a read from offset 0 holds the new boot from the firmware's first line, and the VM boots under UEFI without its marker file. |
 | `templates-reset-saved.json` | Run it after `virsh managedsave t-u`. The reset discards the saved state and boots fresh. A `create_vm` VM named `t-u-g4` then holds the next disk name, so the next reset refuses and changes nothing. The console opened before that reset still reads output. Both VMs are then deleted. |
 | `templates-expiry.json` | Creates `t-exp` with a 1-minute lifetime and an attached disk, and `t-keep` without a lifetime. After 130 s the server's sweep has deleted `t-exp` and its volumes, and `t-keep` and `t-listed` remain. |

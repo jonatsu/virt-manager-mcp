@@ -38,6 +38,12 @@ firmware = "uefi"
 secure_boot = false
 description = "Debian 13, UEFI boot without Secure Boot"
 
+[manage.templates.debian13-uefi-setup]
+volume = "tpl-debian13.qcow2"
+firmware = "uefi"
+secure_boot = "setup"
+description = "Debian 13, UEFI boot in Secure Boot setup mode"
+
 # A virsh vol-clone of tpl-debian13.qcow2 that failure cases may delete.
 [manage.templates.scratch]
 volume = "tpl-scratch.qcow2"
