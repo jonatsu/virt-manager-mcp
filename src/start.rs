@@ -193,13 +193,14 @@ struct LibvirtBoot<'a> {
 
 impl Boot for LibvirtBoot<'_> {
     fn start_paused(&self, flags: u32) -> Result<()> {
-        // The lock covers the seal check, the memory check and libvirt's create call, not the rest of the boot.
+        // The lock covers the seal check, the memory check and libvirt's create call, not the rest of the boot. A VM
+        // without an owner element takes no lock here, and `start_guard` takes none for it either.
         let changing = manage::lock_for_change(
             self.hv,
             manage::Target::Domain(self.dom),
             manage::Checks::Mark,
         )?;
-        let _memory = manage::start_guard(self.hv, self.dom, None, Some(&changing.guard))?;
+        let _memory = manage::start_guard(self.hv, self.dom, None, changing.guard.as_ref())?;
         self.dom
             .create_with_flags(flags | sys::VIR_DOMAIN_START_PAUSED)
             .map_err(|e| {
@@ -233,18 +234,19 @@ impl Boot for LibvirtBoot<'_> {
     }
 }
 
-/// Runs `run` with the management lock that `held` carries, and lets go of the lock when it returns, so the rest of a
-/// boot, such as the console open, runs without it. The guard is single use.
-fn run_under_guard(
-    held: &Mutex<Option<Held>>,
-    run: impl FnOnce(&Held) -> Result<()>,
-) -> Result<()> {
+/// The management lock of a revert, which a VM without an owner element does not need: `None` once used, then
+/// `Some(None)` for such a VM, or `Some(Some(guard))`.
+type RevertLock = Mutex<Option<Option<Held>>>;
+
+/// Runs `run` with the management lock that `held` carries, if any, and lets go of the lock when it returns, so the
+/// rest of a boot, such as the console open, runs without it. The lock is single use.
+fn run_under_guard(held: &RevertLock, run: impl FnOnce(Option<&Held>) -> Result<()>) -> Result<()> {
     let guard = held
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take()
         .ok_or_else(|| anyhow!("the revert's management lock was already used"))?;
-    run(&guard)
+    run(guard.as_ref())
 }
 
 /// The libvirt calls of a revert to a running snapshot, which starts the VM as a boot does.
@@ -254,18 +256,14 @@ struct LibvirtRevert<'a> {
     uuid: &'a str,
     snapshot: &'a str,
     /// The management lock `State::revert` took once; `start_paused` uses it and lets it go.
-    held: Mutex<Option<Held>>,
+    held: RevertLock,
 }
 
 impl Boot for LibvirtRevert<'_> {
     fn start_paused(&self, _flags: u32) -> Result<()> {
         run_under_guard(&self.held, |held| {
-            let _memory = manage::start_guard(
-                self.hv,
-                &self.target.dom,
-                self.target.memory_mib,
-                Some(held),
-            )?;
+            let _memory =
+                manage::start_guard(self.hv, &self.target.dom, self.target.memory_mib, held)?;
             manage::snapshot_revert(self.target, self.snapshot)
         })
     }
@@ -388,7 +386,7 @@ impl State {
             );
             // A revert to a paused snapshot leaves the VM active, so it passes the memory cap like a start.
             let reverted = if target.activates {
-                manage::start_guard(&self.hv, &target.dom, target.memory_mib, Some(&held))
+                manage::start_guard(&self.hv, &target.dom, target.memory_mib, held.as_ref())
                     .and_then(|_memory| manage::snapshot_revert(&target, snapshot))
             } else {
                 manage::snapshot_revert(&target, snapshot)
@@ -506,13 +504,13 @@ mod tests {
             std::env::temp_dir().join(format!("virtmanager-mcp-revert-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let locker = FileLock::at(dir.join("manage.lock"));
-        let held = Mutex::new(Some(locker.acquire().unwrap()));
+        let held = Mutex::new(Some(Some(locker.acquire().unwrap())));
 
         // `start_guard` takes its lock through `guard_for`, which a passed guard turns into no take at all: a second
         // take by the same process would wait and fail.
         let mut seen = Vec::new();
         run_under_guard(&held, |guard| {
-            seen.push(manage::guard_for(Some(guard), &locker).unwrap().is_none());
+            seen.push(manage::guard_for(guard, &locker).unwrap().is_none());
             // The lock is still held while the start runs.
             seen.push(locker.acquire().is_err());
             Ok(())
@@ -525,9 +523,16 @@ mod tests {
         let again = run_under_guard(&held, |_| Ok(())).unwrap_err().to_string();
         assert!(again.contains("already used"), "{again}");
         // A failed start lets go of it as well.
-        *held.lock().unwrap() = Some(locker.acquire().unwrap());
+        *held.lock().unwrap() = Some(Some(locker.acquire().unwrap()));
         assert!(run_under_guard(&held, |_| bail!("refused")).is_err());
         drop(locker.acquire().unwrap());
+        // A VM without an owner element has no lock to hand over; the start runs without one.
+        let none = Mutex::new(Some(None));
+        run_under_guard(&none, |guard| {
+            assert!(guard.is_none());
+            Ok(())
+        })
+        .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -199,12 +199,14 @@ impl Deref for DomRef<'_> {
     }
 }
 
-/// A VM that a call may change: the management lock is held and the VM is under no live seal. A function below the
-/// entry point takes `&Changing`, or `&Held` where the guard is all it needs, as proof of the lock, and never takes
-/// the lock again: a second take in one process waits `LOCK_WAIT` and fails.
+/// A VM that a call may change: it is under no live seal, and the management lock is held when the VM has an owner
+/// element. A function below the entry point takes `&Changing`, or `&Held` where the guard is all it needs, as proof of
+/// the lock, and never takes the lock again: a second take in one process waits `LOCK_WAIT` and fails.
 pub struct Changing<'a> {
     pub dom: DomRef<'a>,
-    pub guard: Held,
+    /// The management lock, or `None` for a VM without an owner element, which the call changes without it. A function
+    /// that needs the lock gets it only by handling the `None`.
+    pub guard: Option<Held>,
 }
 
 /// What `lock_checked` and `check_unlocked` need of a VM, apart so that tests need no libvirt.
@@ -255,15 +257,19 @@ fn seal_state(vm: &impl SealSubject, now: u64, probe: &impl LockProbe) -> Result
 }
 
 /// Takes the lock through `locker`, then refuses a VM under a live seal mark and clears a stale mark. A VM without an
-/// owner element has neither mark nor journal, so it skips both checks. The lock is held for the caller on success and
-/// released on any failure.
+/// owner element has neither mark nor journal, and none can be added to it, so it takes no lock and skips both checks:
+/// the result is `None`. The owner element is read before the lock, to tell the two apart, and again under it. The lock
+/// is held for the caller on success and released on any failure.
 fn lock_checked(
     locker: &impl Locker,
     vm: &impl SealSubject,
     checks: Checks,
     now: u64,
     probe: &impl LockProbe,
-) -> Result<Held> {
+) -> Result<Option<Held>> {
+    if vm.persistent_owner()?.is_none() {
+        return Ok(None);
+    }
     let guard = locker.acquire()?;
     let state = seal_state(vm, now, probe)?;
     if let SealState::Stale = state {
@@ -272,7 +278,7 @@ fn lock_checked(
     if checks == Checks::MarkAndJournal && !matches!(state, SealState::Unowned) {
         check_journal(vm)?;
     }
-    Ok(guard)
+    Ok(Some(guard))
 }
 
 /// Refuses a VM whose last revert left a journal of its variables and TPM state. A revert's journal lands in unit 23;
@@ -359,14 +365,16 @@ pub fn clear_mark(hv: &Hypervisor, _held: &Held, dom: &Domain) -> Result<()> {
     redefine_with_sealing(hv, dom, None)
 }
 
-/// The entry point of a call that changes a VM that exists: looks `target` up, takes the management lock once, refuses
-/// the VM when a live seal mark claims it, clears a stale mark, and returns the VM with the guard. A VM without an
-/// owner element, such as one in `manage_vms` or `power_vms`, has no mark, so the checks pass it.
+/// The entry point of a call that changes a VM that exists: looks `target` up, reads the persistent owner element, and
+/// for a VM that has one takes the management lock once, refuses the VM when a live seal mark claims it, clears a stale
+/// mark, and returns the VM with the guard. A VM without an owner element, such as one in `manage_vms` or `power_vms`
+/// that the server did not create, has no mark, and none can be added to it, so the call takes no lock and the guard is
+/// `None`.
 ///
 /// # Errors
 ///
-/// Fails when the VM cannot be looked up, the lock is not free in time, a live mark claims the VM (`Sealed`), a mark is
-/// unreadable, or libvirt refuses to clear a stale one.
+/// Fails when the VM cannot be looked up or read, the lock is not free in time, a live mark claims the VM (`Sealed`), a
+/// mark is unreadable, or libvirt refuses to clear a stale one.
 pub fn lock_for_change<'a>(
     hv: &Hypervisor,
     target: Target<'a>,
@@ -5553,6 +5561,7 @@ mod tests {
     fn a_stale_mark_goes_on_and_is_cleared() {
         let (vm, locker) = (FakeVm::marked(&seal_mark()), FileLock::new("stale"));
         let guard = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).unwrap();
+        assert!(guard.is_some());
         assert_eq!(vm.cleared.get(), 1);
         assert_eq!(vm.owner.borrow().as_ref().unwrap().sealing, None);
         // The lock is the caller's, held until it drops the guard.
@@ -5586,21 +5595,34 @@ mod tests {
             FakeVm::with(Some(Owner::default())),
             FileLock::new("nomark"),
         );
-        lock_checked(&locker, &vm, Checks::MarkAndJournal, NOW, &SEAL_HELD).unwrap();
+        let guard = lock_checked(&locker, &vm, Checks::MarkAndJournal, NOW, &SEAL_HELD).unwrap();
+        // A VM with an owner element takes the lock whether or not it carries a mark.
+        assert!(guard.is_some());
+        assert!(locker.acquire().is_err());
+        drop(guard);
         assert_eq!(vm.cleared.get(), 0);
         locker.remove();
     }
 
+    /// A locker for a call that must not lock: taking it fails the test.
+    struct NoLock;
+
+    impl Locker for NoLock {
+        fn acquire(&self) -> Result<Held> {
+            panic!("the call took the management lock")
+        }
+    }
+
     #[test]
-    fn a_vm_without_an_owner_element_skips_both_checks_and_is_never_given_a_mark() {
-        let (vm, locker) = (FakeVm::with(None), FileLock::new("unowned"));
+    fn a_vm_without_an_owner_element_takes_no_lock_skips_both_checks_and_is_never_given_a_mark() {
+        let vm = FakeVm::with(None);
         for checks in [Checks::Mark, Checks::MarkAndJournal] {
-            lock_checked(&locker, &vm, checks, NOW, &SEAL_HELD).unwrap();
+            let guard = lock_checked(&NoLock, &vm, checks, NOW, &SEAL_HELD).unwrap();
+            assert!(guard.is_none());
         }
         check_unlocked(&vm, NOW, &SEAL_HELD).unwrap();
         assert_eq!(vm.cleared.get(), 0);
         assert_eq!(*vm.owner.borrow(), None);
-        locker.remove();
     }
 
     #[test]
@@ -5629,7 +5651,9 @@ mod tests {
             FakeVm::with(Some(Owner::default())),
             FileLock::new("nested"),
         );
-        let _guard = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).unwrap();
+        let _guard = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE)
+            .unwrap()
+            .expect("an owned VM takes the lock");
         for second in [
             lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).map(drop),
             lock_open(&locker).map(drop),

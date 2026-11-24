@@ -29,9 +29,11 @@ Each release's section lists what changed for people who run the server and for 
   the seal's lock. Nothing writes a mark yet, so no VM is refused until sealing arrives. A mark that the server cannot
   read refuses the VM until you remove the `sealing` attribute from its owner element with `virsh edit`.
 - `configure_vm`, `attach_nic`, `detach_nic`, `snapshot_create`, `snapshot_delete` and `stop_vm` now take the
-  management lock, as the other changing calls do. While another call holds it, they wait up to 30 seconds and then
-  fail with "another virtmanager-mcp operation has held the management lock". `stop_vm` holds it only while it asks
-  for the shutdown, not while it waits for the guest.
+  management lock on a VM the server created, as the other changing calls do. While another call holds it, they wait
+  up to 30 seconds and then fail with "another virtmanager-mcp operation has held the management lock". `stop_vm`
+  holds it only while it asks for the shutdown, not while it waits for the guest. A call on a VM the server did not
+  create, such as one in `manage_vms` or `power_vms`, takes no lock, so `start_vm` and `stop_vm` on such a VM need
+  neither the lock nor a usable `HOME`.
 
 ## 0.5.0
 

@@ -201,7 +201,7 @@ impl Hypervisor {
     pub fn stop(&self, name: &str, force: bool, wait: Duration) -> Result<bool> {
         // The management lock covers the seal check and the shutdown or destroy call, and is let go before the wait,
         // so a guest slow to shut down does not hold up every other management call. `power_domain` also reaches
-        // VMs in `power_vms` that the server does not manage; they carry no mark, so the check passes them.
+        // VMs in `power_vms` that the server does not manage; they carry no mark and take no lock.
         let manage::Changing { dom, guard } =
             manage::lock_for_change(self, manage::Target::Powered(name), manage::Checks::Mark)?;
         if !dom.is_active()? {

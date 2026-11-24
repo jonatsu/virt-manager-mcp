@@ -117,8 +117,10 @@ max_disk_gib = 32
   running or paused snapshot, which counts the snapshot's memory, and a start that would pass it is refused with the
   running VMs named; a VM larger than the cap is refused at create and reconfigure. Other VMs on the host do not count.
   `max_vms` caps how many VMs created by the server exist at once. It holds across every server process and `sweep`
-  command of one account, such as several Claude Code sessions: management operations take the lock file
-  `~/.cache/virtmanager-mcp/manage.lock`, and wait up to 30 s for another operation to release it. Processes running as
+  command of one account, such as several Claude Code sessions: the calls that make a VM, and the calls that change a
+  VM the server created, take the lock file `~/.cache/virtmanager-mcp/manage.lock`, and wait up to 30 s for another
+  operation to release it. A call that changes a VM the server did not create, such as one in `manage_vms` or
+  `power_vms`, takes no lock, and `start_vm` and `stop_vm` on such a VM need no usable `HOME`. Processes running as
   different accounts, or with a different `HOME`, do not share it.
 
 - **Paths:** ISOs must be inside `iso_dirs` (resolved like `host_share_dirs`, symlinks
