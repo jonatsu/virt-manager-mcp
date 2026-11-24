@@ -207,7 +207,8 @@ Reviews of earlier work found these. None blocks the server's use.
 34. **A console log that outlives its VM.** The console captured from boot lives in the server's memory, at most
     `limits.console_buffer_bytes` (256 KiB), and goes with `delete_vm`, so an agent that tears a VM down after a failed
     boot loses the log before anyone reads it. The server writes each run's console output to a file in
-    `host_pull_dirs` as well, and the result of the boot names the file.
+    `host_pull_dirs` as well, and the result of the boot names the file. Each file is named by VM and run, a later run
+    never overwrites an earlier one, and a file stays until someone deletes it.
 35. **Windows guests with networking are proven.** `t-win11` has no network interface, so no test shows a Windows
     guest's address in `vm_addresses`, SSH from the host to it, WSL 2 nested inside it, or a revert of a shut-off
     UEFI VM with a TPM. A Windows install through `create_vm` on the `default` network, with virtio-win as the driver
@@ -285,7 +286,8 @@ it is built.
 6. **Several VMs together.** An agent can test small networks, such as a client and a server, including mDNS between
    guests. It builds on outcomes 1 and 5. The server creates and deletes networks of its own, owned and capped like
    VMs, limited to a configured name prefix and address range, as NAT or isolated networks with multicast between
-   guests; only networks listed in `manage.networks` are usable today.
+   guests; only networks listed in `manage.networks` are usable today. Guests on one network reach each other, and
+   mDNS on UDP port 5353 is the multicast case its checks test.
 7. **Operator trust and control.** An operator can let agents run with less supervision. This covers an audit log of
    mutating calls (following `akarasulu/nested-mcp-server`), network policies for each VM, scoping per session, and
    tested `qemu:///session` support. The survey rates session scope as the strongest guardrail, because VMs there
