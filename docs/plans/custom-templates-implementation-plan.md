@@ -334,21 +334,27 @@ extras shows targets `sda` to `sde` in `describe_vm`, and a VM from a template g
 ### 5. Hibernation
 
 **Result.** `create_vm` takes `hibernate`, which writes `<suspend-to-disk enabled='yes'/>` and leaves suspend to
-memory off, and `start_vm` handles the state libvirt reports for a hibernated VM. Design: Hibernation.
+memory off, on BIOS and on UEFI. Design: Hibernation; Firmware in a VM's definition.
 
-**Changes.** The unit starts only if unit 1's probe 3 was conclusive. If it was not, this unit, the `hibernate` fields
-of units 11 and 19, and the resume case are left out and recorded in the execution record. Unit 1's hibernation probe
-settled which state libvirt reports for a guest that hibernates and whether it
-emits `pmsuspended`. This unit follows that note:
+**Changes.** Probes 3 and 8 in the
+[build probes](../research/2026-11-24-custom-templates-build-probes.md) settled the behaviour: a hibernated VM is shut
+off, so `start::decide` needs no new arm, and autoselection refuses `<pm>`, so a UEFI VM pins its firmware path.
 
 - `NewVm.hibernate` and `DomainSpec.hibernate` set the `<pm>` element; `describe_vm` shows `hibernate`.
-- `start::decide` gets the arm the probe shows it needs. If libvirt reports a shut-off VM, nothing changes. If it
-  reports a suspended VM with suspend to disk as the reason, `start_vm` boots it and never calls `pm_wakeup`. Unit 1's
-  note says which, and the unit test follows it.
+- A BIOS VM is defined once, with `<pm>`. A UEFI VM is defined by autoselection without `<pm>`; a pure function reads
+  the resolved `<loader>` path, its `secure` attribute and `<nvram template>` from the inactive XML and builds the
+  explicit `<os>`: no `firmware` attribute and no `<firmware>` features, a read-only pflash `<loader>` with that path
+  and `secure` value, and an `<nvram>` with that template and the resolved variables path, all in raw format. The server
+  redefines the same VM with it and `<pm>`. A failed redefine undefines the VM and deletes its disk, as a failed
+  create does today, and the error names the step.
+- `secure_boot_state` and `describe_vm` read the explicit form (unit 3 reads features only), so the mode still shows.
+- `docs/vm-management.md` says that a Linux guest with Secure Boot `on` and kernel lockdown refuses to hibernate.
 
-**Verification.** Unit tests: the `<pm>` XML for both values, and `decide` for the state the probe found, plus the
-existing cases. Test bed: `describe_vm` of a `create_vm` VM with `hibernate: true` shows it. The resume case, a
-process surviving `systemctl hibernate` and `start_vm`, needs a template VM with `hibernate`, so it runs in unit 11.
+**Verification.** Unit tests: the `<pm>` XML for both values; the explicit `<os>` built from inactive XML for each
+mode, with the paths of probe 8 as fixtures, and refused when the loader or template is missing; `describe_vm` of the
+explicit form for each mode. Test bed: `create_vm` with `hibernate: true` on BIOS and on UEFI (Secure Boot off) shows
+`hibernate` and the mode in `describe_vm`, and a UEFI one starts. The resume case, a process surviving
+`systemctl hibernate` and `start_vm`, needs a template VM with `hibernate`, so it runs in unit 11.
 
 **Leaves out.** Templates' `hibernate` field and the resume case (unit 11), and the seal's record of it (unit 19).
 

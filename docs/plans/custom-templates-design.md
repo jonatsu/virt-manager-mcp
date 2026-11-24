@@ -44,7 +44,7 @@ Device passthrough was settled in the same interview but is its own roadmap item
 | Importing an image, and `disk_image` | Source inside `host_share_dirs`, resolved like `copy_to_vm` (a `/nix/store` result is copied in with `cp -L`); raw or qcow2 kept as-is, so a template may be raw; a qcow2 naming a backing file or an external data file is refused; virtual size within `max_disk_gib`, space counted toward the template cap; runs in the background with a transfer ID; `create_vm` `disk_image` makes the copy the VM's own disk, deleted with it, with `disk_bus` `virtio` (default), `sata` or `usb`; every upload is sparse: zero runs and holes go as holes through `virStreamSendHole` with `VIR_STORAGE_VOL_UPLOAD_SPARSE_STREAM`, and a seal's `qemu-img convert` copy already skips zeros; non-sparse sources are accepted | As recommended, with sparse uploads | One copy path serves both uses; a backing reference would let QEMU open host files; sparse uploads keep raw images small without asking agents to prepare them | resolved |
 | Secure Boot setup mode, and TPM state on reset | `secure_boot` takes `"off"`, `"on"` (Microsoft keys) or `"setup"` (no keys enrolled), with `true` and `false` still read as on and off, in `create_vm`, templates and per-VM choices; setup mode combines with `tpm: true`, and keys the guest enrolls live in its variables, so a seal carries them; a VM's TPM state is a file volume `<vm>.tpm` in `disk_pool`, named in the domain XML (libvirt 10.10 or later), which the server generates with `swtpm_setup` and uploads as a volume owned by the host's swtpm user; `reset_vm` gives an empty TPM by deleting and recreating `<vm>.tpm` while the VM is shut off, and keeps it with `keep_tpm: true`; TPM state persists across reboots and shutdowns; the generated state has no endorsement-key (EK) certificate; the host needs `swtpm-tools` and a root-made AppArmor rule for swtpm | As recommended | Lanzaboote and `sbctl` need firmware with no keys; a reset must return to the template, which never carries TPM state, while TPM-bound disks opt in to keep it. In libvirt's own state location nothing clears the state while the UUID stays, short of an undefine and define that leaves a gap or a new UUID; a file in the pool is deleted and recreated in place, and the server can copy it for snapshots | resolved: the TPM probes ([probe note](../research/2026-11-24-custom-templates-probes.md)) showed the file form works with the AppArmor rule, keeps the UUID and never leaves the VM undefined |
 | More CD-ROMs | `create_vm` `extra_isos`: up to 4 ISOs from `iso_dirs`, each a read-only SATA CD-ROM after the installer and driver drives, never booted from; `set_cdrom` on a shut-off VM adds a drive at a free named target | As recommended | An unattended Windows install needs the installer, virtio-win and an answer-file ISO; an existing VM can only gain a drive through `set_cdrom` | resolved |
-| Hibernation per VM | `hibernate` on `create_vm` and templates, off by default, sets `<suspend-to-disk enabled='yes'/>` with suspend to memory still off; a hibernating guest shuts the VM off, `vm_events` records it, `start_vm` resumes it; a seal records it; `vm_events` shows what libvirt reports, since libvirt keeps no hibernated state for a shut-off VM | As recommended | nix-config's hibernate-and-resume path with LUKS swap needs a VM to cover it | resolved |
+| Hibernation per VM | `hibernate` on `create_vm` and templates, off by default, sets `<suspend-to-disk enabled='yes'/>` with suspend to memory still off; a hibernating guest shuts the VM off, `vm_events` records it, `start_vm` resumes it; a seal records it; `vm_events` shows what libvirt reports, since libvirt keeps no hibernated state for a shut-off VM; on UEFI the VM pins its firmware path, because autoselection refuses suspend to disk ([build probes](../research/2026-11-24-custom-templates-build-probes.md), probes 3 and 8) | As recommended; the pinned path follows probe 3 | nix-config's hibernate-and-resume path with LUKS swap needs a VM to cover it | resolved |
 | Nested virtualization | No new setting: `host-passthrough` with the host's `kvm_intel nested=Y` already exposes it; a test-bed check shows `/dev/kvm` in a Linux template VM, and the dotfiles WSL 2 run covers Windows | As recommended | It already works but nothing proves it | resolved |
 
 ## Behaviour
@@ -220,8 +220,14 @@ file, `<nvram template='…/tpl@<name>.vars' templateFormat='raw' format='raw'>`
 variables present. Whether autoselection accepts the template was not tried (see the open questions).
 `templateFormat` needs libvirt 10.10.0 or later, so sealed templates need it, and the server refuses to seal or create
 from one on an older libvirt. A recorded code file that no longer exists,
-or that no descriptor names, refuses the create. Only these VMs pin a firmware path, so an `ovmf` upgrade that renames
-its files affects only sealed templates.
+or that no descriptor names, refuses the create.
+
+A UEFI VM with `hibernate` pins its firmware path too, because autoselection refuses a definition with
+`<suspend-to-disk enabled='yes'/>`: no firmware descriptor on the host declares `acpi-s4`. The server defines the VM
+by autoselection without `<pm>`, reads the resolved `<loader>` and `<nvram template>` from the inactive definition,
+and redefines the same VM with them as an explicit loader and template, plus `<pm>`. The UUID stays, and the files
+match the mode table. Only sealed templates and these VMs pin a firmware path, so an `ovmf` upgrade that renames its
+files affects only them.
 
 `reset_start`, `describe_vm` and the Secure Boot reader read both forms, so every UEFI VM gets
 `VIR_DOMAIN_START_RESET_NVRAM` on reset, which copies its variables template again: the template's for a VM from a
@@ -335,12 +341,14 @@ so, as a seal says for a UEFI VM made earlier.
 
 ### Hibernation
 
-A guest that hibernates shuts its VM off. `start_vm` sees a shut-off VM and starts it, rather than waking it from
-suspend, and the guest resumes from its swap. If libvirt instead reports the VM as suspended with suspend to disk as
-the reason, `start_vm` starts it rather than calling `pm_wakeup`, which cannot resume from disk; the hibernation check
-shows which of the two libvirt does. libvirt keeps no hibernated state for a shut-off VM, so `vm_events` is
-where an agent sees it: the `pmsuspended` event, if libvirt emits one for suspend to disk, which the hibernation check
-confirms. `reset_vm` and `delete_vm` on such a VM discard the saved state without a warning.
+A guest that hibernates shuts its VM off: libvirt reports it as shut off with the reason shutdown. `start_vm` sees a
+shut-off VM and starts it, and the guest resumes from its swap. libvirt keeps no hibernated state for a shut-off VM,
+so `vm_events` is where an agent sees it: libvirt emits `pmsuspended` with the reason disk just before the shutdown.
+`reset_vm` and `delete_vm` on such a VM discard the saved state without a warning.
+
+A UEFI VM hibernates in Secure Boot modes off and setup. In mode `on`, a Linux guest whose kernel enforces lockdown
+refuses to hibernate. The server does not refuse that combination, because another guest may allow it, and the docs say
+so.
 
 ### Deleting templates
 
