@@ -1,0 +1,42 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-tpr",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "tpm": true
+    },
+    "expect": {
+      "contains": "created VM 't-tpr' (1 vCPUs, 512 MiB, 1 GiB disk agent-vms/t-tpr.qcow2, BIOS, TPM"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-tpr",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "cannot start 't-tpr'",
+        "/etc/apparmor.d/local/usr.bin.swtpm",
+        "owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,",
+        "first thing to check"
+      ]
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-tpr"
+    },
+    "expect": {
+      "contains": "deleted VM 't-tpr'"
+    }
+  }
+]

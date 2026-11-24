@@ -26,6 +26,7 @@ use virt::sys;
 use crate::config::{Firmware, GuestOs, Manage, OnCrash, SecureBoot, is_hostname};
 use crate::hypervisor::{self, Hypervisor};
 use crate::seed;
+use crate::tpm::{self, SwtpmIds};
 use crate::volnames;
 
 /// XML namespace of the metadata element that marks VMs created by this server.
@@ -258,10 +259,36 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         if vm.uefi {
             check_no_leftover_vars(hv, &pool, &vm.name)?;
         }
+        // The TPM state is made before anything is created in the pool, so a missing swtpm-tools or swtpm user fails
+        // a create that has nothing to undo.
+        let tpm_state = if vm.tpm {
+            tpm::check_libvirt(conn.get_lib_version()?)?;
+            check_no_leftover_tpm(hv, &pool, &vm.name)?;
+            Some((tpm::swtpm_ids()?, tpm::generate_state()?))
+        } else {
+            None
+        };
         let vol_name = format!("{}.qcow2", vm.name);
         let vol = create_volume(&pool, &vol_name, vm.disk_gib)?;
-        let disk = vol.get_path()?;
+        let tpm_vol = match make_tpm_volume(conn, &pool, &vm.name, tpm_state.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = vol.delete(0);
+                return Err(e);
+            }
+        };
+        let disk = match vol.get_path() {
+            Ok(path) => path,
+            Err(e) => {
+                let _ = vol.delete(0);
+                if let Some(tpm_vol) = &tpm_vol {
+                    let _ = tpm_vol.delete(0);
+                }
+                return Err(e.into());
+            }
+        };
         let nvram = vm.uefi.then(|| vars_path(&disk, &vm.name));
+        let tpm_file = tpm_vol.is_some().then(|| tpm_path(&disk, &vm.name));
         let disks = create_disks(&disk, iso.as_deref(), driver_iso.as_deref(), &extra_isos);
         let spec = DomainSpec {
             name: &vm.name,
@@ -269,7 +296,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             vcpus: vm.vcpus,
             memory_mib: vm.memory_mib,
             uefi: vm.uefi,
-            tpm: vm.tpm,
+            tpm: tpm_file.as_deref(),
             secure_boot: vm.secure_boot,
             hibernate: vm.hibernate,
             pinned: None,
@@ -281,7 +308,9 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             mac: None,
             owner: Owner::default(),
         };
-        define_new_vm(&spec, &mut LibvirtDefiner { conn, name: &vm.name, volumes: vec![&vol] })?;
+        let mut volumes = vec![&vol];
+        volumes.extend(tpm_vol.as_ref());
+        define_new_vm(&spec, &mut LibvirtDefiner { conn, name: &vm.name, volumes })?;
         let mut msg = format!(
             "created VM '{}' ({} vCPUs, {} MiB, {} GiB disk {}/{}, {}{}); it is shut off, start it with start_vm",
             vm.name,
@@ -303,6 +332,19 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         }
         Ok(msg)
     })
+}
+
+/// Makes the volume `<vm>.tpm` from `state`, the swtpm user and the state `create` made, or nothing for a VM without
+/// a TPM.
+fn make_tpm_volume(
+    conn: &Connect,
+    pool: &StoragePool,
+    vm: &str,
+    state: Option<&(SwtpmIds, Vec<u8>)>,
+) -> Result<Option<StorageVol>> {
+    state
+        .map(|(ids, bytes)| tpm::create_volume(conn, pool, vm, bytes, *ids))
+        .transpose()
 }
 
 /// Parameters of a new VM made from a template; `None` takes the default.
@@ -563,7 +605,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                 vcpus,
                 memory_mib,
                 uefi: t.firmware == Firmware::Uefi,
-                tpm: false,
+                tpm: None,
                 secure_boot: t.secure_boot,
                 hibernate: false,
                 pinned: None,
@@ -1664,13 +1706,23 @@ fn secure_boot_fields(
     }
 }
 
-/// The path of a UEFI VM's own variables file: `<vm>.vars` beside the VM's disk volume in `disk_pool`.
-fn vars_path(disk_path: &str, vm: &str) -> String {
-    let name = volnames::vars_name(vm);
+/// The path of the pool file `name` beside the VM's disk volume at `disk_path`.
+fn pool_file_path(disk_path: &str, name: String) -> String {
     match Path::new(disk_path).parent() {
         Some(dir) => dir.join(name).to_string_lossy().into_owned(),
         None => name,
     }
+}
+
+/// The path of a UEFI VM's own variables file: `<vm>.vars` beside the VM's disk volume in `disk_pool`.
+fn vars_path(disk_path: &str, vm: &str) -> String {
+    pool_file_path(disk_path, volnames::vars_name(vm))
+}
+
+/// The path of a VM's TPM state: `<vm>.tpm` beside the VM's disk volume in `disk_pool`. The server builds it, and no
+/// tool parameter can change it.
+fn tpm_path(disk_path: &str, vm: &str) -> String {
+    pool_file_path(disk_path, volnames::tpm_name(vm))
 }
 
 /// What `delete` may do with a disk of a VM.
@@ -1701,6 +1753,15 @@ fn leftover_vars_error(uri: &str, pool: &str, vm: &str) -> anyhow::Error {
     anyhow!(
         "volume '{vars}' already exists in the disk pool '{pool}', so a new VM '{vm}' would start from another VM's \
          firmware variables; nothing was created. Remove it with: virsh -c {uri} vol-delete --pool {pool} {vars}"
+    )
+}
+
+/// The refusal for a create that finds `<vm>.tpm` already in the pool.
+fn leftover_tpm_error(uri: &str, pool: &str, vm: &str) -> anyhow::Error {
+    let tpm = volnames::tpm_name(vm);
+    anyhow!(
+        "volume '{tpm}' already exists in the disk pool '{pool}', so a new VM '{vm}' would start from another VM's \
+         TPM state; nothing was created. Remove it with: virsh -c {uri} vol-delete --pool {pool} {tpm}"
     )
 }
 
@@ -1748,6 +1809,14 @@ fn check_no_leftover(
 fn check_no_leftover_vars(hv: &Hypervisor, pool: &StoragePool, vm: &str) -> Result<()> {
     check_no_leftover(pool, &volnames::vars_name(vm), || {
         leftover_vars_error(&hv.config.uri, &hv.config.manage.disk_pool, vm)
+    })
+}
+
+/// Refuses a create with a TPM while `<vm>.tpm` is in the pool, after `check_no_leftover`'s rescan. The state would
+/// otherwise be another VM's, with its keys.
+fn check_no_leftover_tpm(hv: &Hypervisor, pool: &StoragePool, vm: &str) -> Result<()> {
+    check_no_leftover(pool, &volnames::tpm_name(vm), || {
+        leftover_tpm_error(&hv.config.uri, &hv.config.manage.disk_pool, vm)
     })
 }
 
@@ -1898,7 +1967,7 @@ fn create_raw_volume(
 
 /// Writes `data` to the start of `vol`. Every error path aborts the stream: the `virt` crate's `Stream` panics on
 /// drop when freeing an unfinished stream fails.
-fn upload(conn: &Connect, vol: &StorageVol, data: &[u8]) -> Result<()> {
+pub(crate) fn upload(conn: &Connect, vol: &StorageVol, data: &[u8]) -> Result<()> {
     let stream = Stream::new(conn, 0).map_err(|e| anyhow!("{}", e.message()))?;
     if let Err(e) = vol.upload(&stream, 0, data.len() as u64, 0) {
         let _ = stream.abort();
@@ -2082,7 +2151,7 @@ fn parse_nics(xml: &str) -> Result<Vec<NicInfo>> {
 }
 
 /// Escapes text for use in XML content and single- or double-quoted attributes.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -2110,7 +2179,8 @@ struct DomainSpec<'a> {
     vcpus: u32,
     memory_mib: u64,
     uefi: bool,
-    tpm: bool,
+    /// The file that keeps the VM's TPM 2.0 state, which the server made in the pool. `None` has no TPM.
+    tpm: Option<&'a str>,
     /// With `uefi`, the Secure Boot features the firmware is asked for.
     secure_boot: SecureBoot,
     /// Writes `<suspend-to-disk enabled='yes'/>`.
@@ -2510,8 +2580,8 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
         ]
         .map(String::from),
     );
-    if spec.tpm {
-        devices.push("<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>".into());
+    if let Some(path) = spec.tpm {
+        devices.push(tpm::device_xml(path));
     }
     // A panic device turns a guest crash into libvirt's crashed event: Debian loads the pvpanic driver for `isa`, and
     // Windows reports a stop error through the Hyper-V crash registers.
@@ -2782,7 +2852,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 2048,
             uefi: false,
-            tpm: false,
+            tpm: None,
             secure_boot: SecureBoot::On,
             hibernate: false,
             pinned: None,
@@ -3918,7 +3988,7 @@ mod tests {
         let xml = domain_xml(&DomainSpec {
             windows: true,
             uefi: true,
-            tpm: true,
+            tpm: Some("/pool/t.tpm"),
             ..spec(vec![
                 Disk::Qcow2("/pool/t.qcow2"),
                 Disk::Cdrom(Some(Path::new("/isos/a'b&c.iso"))),
@@ -3948,6 +4018,102 @@ mod tests {
         assert!(child(doc.root_element(), "uuid").is_none());
         assert_eq!(kib_text(&xml, "memory"), Some(2048 * 1024));
         assert_eq!(owner_in_domain_xml(&xml).unwrap(), Some(Owner::default()));
+    }
+
+    #[test]
+    fn a_tpm_is_a_file_source_in_the_pool_and_only_when_asked_for() {
+        let tpm_source = |spec: &DomainSpec<'_>| {
+            let xml = domain_xml(spec);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let tpms: Vec<_> = doc
+                .descendants()
+                .filter(|n| n.has_tag_name("tpm"))
+                .collect();
+            assert!(tpms.len() <= 1, "{xml}");
+            tpms.first().map(|tpm| {
+                let source = doc
+                    .descendants()
+                    .find(|n| n.has_tag_name("source") && n.parent() == child(*tpm, "backend"))
+                    .unwrap_or_else(|| panic!("no file source: {xml}"));
+                (
+                    tpm.attribute("model").map(String::from),
+                    source.attribute("type").map(String::from),
+                    source.attribute("path").map(String::from),
+                )
+            })
+        };
+        let path = "/var/lib/libvirt/images/agent-vms/t.tpm";
+        let disks = || vec![Disk::Qcow2("/var/lib/libvirt/images/agent-vms/t.qcow2")];
+        for uefi in [false, true] {
+            let with = DomainSpec {
+                uefi,
+                tpm: Some(path),
+                ..spec(disks())
+            };
+            assert_eq!(
+                tpm_source(&with),
+                Some((
+                    Some("tpm-crb".into()),
+                    Some("file".into()),
+                    Some(path.into())
+                )),
+                "uefi {uefi}"
+            );
+            let without = DomainSpec {
+                uefi,
+                tpm: None,
+                ..spec(disks())
+            };
+            assert_eq!(tpm_source(&without), None, "uefi {uefi}");
+        }
+        // The hibernation redefinition keeps the TPM beside the pinned firmware.
+        let pinned_spec = DomainSpec {
+            uefi: true,
+            hibernate: true,
+            tpm: Some(path),
+            ..spec(disks())
+        };
+        assert!(domain_xml(&pinned_spec).contains(&format!("path='{path}'")));
+    }
+
+    #[test]
+    fn the_tpm_state_sits_beside_the_disk_volume_in_the_pool() {
+        assert_eq!(
+            tpm_path("/var/lib/libvirt/images/agent-vms/t-x.qcow2", "t-x"),
+            "/var/lib/libvirt/images/agent-vms/t-x.tpm"
+        );
+        assert_eq!(tpm_path("/srv/pool/t.qcow2", "t"), "/srv/pool/t.tpm");
+        // A name that `check_vm_name` accepts holds no separator, so the path stays in the disk's directory.
+        for name in ["a", "a.b", "a_b-c", "..", "x.tpm"] {
+            if check_vm_name(name, "n").is_err() {
+                continue;
+            }
+            let path = tpm_path("/srv/pool/d.qcow2", name);
+            assert_eq!(
+                Path::new(&path).parent(),
+                Some(Path::new("/srv/pool")),
+                "{name}: {path}"
+            );
+            assert_eq!(
+                Path::new(&path).file_name().unwrap().to_str(),
+                Some(format!("{name}.tpm").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn the_tpm_leftover_refusal_names_the_volume_and_the_command_that_removes_it() {
+        let err = leftover_tpm_error("qemu:///system", "agent-vms", "t-lv").to_string();
+        assert!(
+            err.contains("volume 't-lv.tpm' already exists in the disk pool 'agent-vms'"),
+            "{err}"
+        );
+        assert!(
+            err.contains("virsh -c qemu:///system vol-delete --pool agent-vms t-lv.tpm"),
+            "{err}"
+        );
+        assert!(err.contains("nothing was created"), "{err}");
+        assert!(err.contains("TPM state"), "{err}");
     }
 
     #[test]

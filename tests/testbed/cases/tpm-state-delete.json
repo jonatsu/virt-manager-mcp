@@ -1,0 +1,11 @@
+[
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-tp"
+    },
+    "expect": {
+      "contains": "deleted VM 't-tp'"
+    }
+  }
+]

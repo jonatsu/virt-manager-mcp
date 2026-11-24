@@ -1,0 +1,70 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-tp",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi",
+      "tpm": true,
+      "secure_boot": false
+    },
+    "expect": {
+      "contains": "created VM 't-tp' (1 vCPUs, 512 MiB, 1 GiB disk agent-vms/t-tp.qcow2, UEFI without Secure Boot, TPM"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-tp"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"uefi\"",
+        "\"tpm\": true"
+      ]
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-tp",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-tp': started"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-tp",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-tp' is shut off"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-tp",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-tp': started"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-tp",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-tp' is shut off"
+    }
+  }
+]

@@ -16,6 +16,7 @@ use crate::events::{Cause, Events, Kind};
 use crate::hypervisor::{self, Hypervisor};
 use crate::manage::{self, RevertTarget, now_epoch};
 use crate::server::State;
+use crate::tpm;
 
 /// What a start does to a VM in a given state.
 #[derive(Debug, PartialEq, Eq)]
@@ -195,7 +196,18 @@ impl Boot for LibvirtBoot<'_> {
         let _memory = manage::start_guard(self.hv, self.dom, None)?;
         self.dom
             .create_with_flags(flags | sys::VIR_DOMAIN_START_PAUSED)
-            .map_err(|e| anyhow!("cannot start '{}': {}", self.name, e.message()))?;
+            .map_err(|e| {
+                // A start that names a pool `.tpm` file and fails in swtpm_setup is nearly always the AppArmor rule.
+                let refusal = self
+                    .dom
+                    .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+                    .ok()
+                    .and_then(|xml| tpm::start_refusal(&xml, e.message()));
+                match refusal {
+                    Some(text) => anyhow!("cannot start '{}': {text}", self.name),
+                    None => anyhow!("cannot start '{}': {}", self.name, e.message()),
+                }
+            })?;
         Ok(())
     }
 

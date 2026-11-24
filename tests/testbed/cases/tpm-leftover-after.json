@@ -1,0 +1,26 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-tl",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "tpm": true
+    },
+    "expect": {
+      "contains": "created VM 't-tl' (1 vCPUs, 512 MiB, 1 GiB disk agent-vms/t-tl.qcow2, BIOS, TPM"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-tl"
+    },
+    "expect": {
+      "contains": "deleted VM 't-tl'"
+    }
+  }
+]

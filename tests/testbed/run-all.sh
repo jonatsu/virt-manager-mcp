@@ -39,7 +39,7 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
   transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos hibernate uefi-vars templates-expiry
+  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos hibernate uefi-vars tpm templates-expiry
   templates-expiry-command
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
@@ -54,6 +54,7 @@ declare -A MEMBERS=(
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["hibernate"]="hibernate hibernate-after"
   ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
+  ["tpm"]="tpm-state tpm-state-delete tpm-leftover tpm-leftover-after tpm-refused"
   ["jobs"]="jobs jobs-reopen"
   ["diag-stats"]="diag-stats diag-stats-read-only diag-stats-after"
   ["transfer-pull"]="transfer-pull transfer-pull-caps"
@@ -374,6 +375,90 @@ unit_uefi_vars() {
   has_vol t-lv.vars && record uefi-vars-leftover-after failed "t-lv.vars remains after delete_vm"
   vsh pool-refresh "${POOL}" > /dev/null
   has_vol t-lv.vars && record uefi-vars-leftover-after failed "t-lv.vars remains after delete_vm and a refresh"
+}
+
+# Whether pool volume $1 is owned by the user and group swtpm runs as, with mode 0600, which libvirt needs to start a VM
+# whose TPM state is that file.
+owned_by_swtpm() {
+  local ids xml
+  ids=$(getent passwd swtpm | cut -d: -f3,4) && [[ -n ${ids} ]] || return 1
+  xml=$(vsh vol-dumpxml --pool "${POOL}" "$1") || return 1
+  [[ $(xmllint --xpath 'string(//target/permissions/owner)' - <<< "${xml}") == "${ids%%:*}" &&
+  $(xmllint --xpath 'string(//target/permissions/group)' - <<< "${xml}") == "${ids##*:}" &&
+  $(xmllint --xpath 'string(//target/permissions/mode)' - <<< "${xml}") == 0600 ]]
+}
+
+# The result of tests/testbed/tpm-gate.sh, which runs once: empty before it ran, then passed or failed.
+TPM_GATE=
+
+# Runs the TPM gate the first time and records it, and succeeds when a VM with a TPM state file in the pool starts here.
+tpm_gate_passes() {
+  if [[ -z ${TPM_GATE} ]]; then
+    echo "== tpm-gate"
+    if "${TESTBED}/tpm-gate.sh" > "${WORK}/logs/tpm-gate.out" 2>&1; then
+      TPM_GATE=passed
+      record tpm-gate passed
+    else
+      TPM_GATE=failed
+      record tpm-gate skipped "a VM with its TPM state in the pool does not start on this host, see ${WORK}/logs/tpm-gate.out"
+    fi
+  fi
+  [[ ${TPM_GATE} == passed ]]
+}
+
+# TPM state in the pool. The gate decides which cases run. When it passes, create_vm makes the UEFI VM t-tp, whose
+# definition names <pool>/t-tp.tpm, a volume owned by the swtpm user with mode 0600 that exists before the first start;
+# the VM starts twice, and delete_vm leaves no volume. A t-tl.tpm made here with virsh makes create_vm refuse t-tl and
+# name it, and a create works once it is removed. When the gate fails, the refusal case runs instead: create_vm
+# succeeds, start_vm is refused with the AppArmor rule, and delete_vm removes the state. The case runs under
+# config-templates.toml with max_vms = 4, because the kept t-win11net counts toward max_vms.
+unit_tpm() {
+  local config=${WORK}/config-tpm.toml xml=${WORK}/t-tp.inactive.xml avail left reason name
+  if ! sed 's/^max_vms = 3$/max_vms = 4/' "${TESTBED}/config-templates.toml" > "${config}" \
+    || ! grep -qxF 'max_vms = 4' "${config}"; then
+    record tpm-state failed "could not write ${config}"
+    return
+  fi
+  avail=$(avail_mib)
+  if ((avail < 1024)); then
+    record tpm-state failed "needs 1024 MiB of available memory; the host has ${avail} MiB"
+    return
+  fi
+  if ! tpm_gate_passes; then
+    reason="the TPM gate fails on this host"
+    for name in tpm-state tpm-state-delete tpm-leftover tpm-leftover-after; do record "${name}" skipped "${reason}"; done
+    run_case tpm-refused "${config}"
+    vsh pool-refresh "${POOL}" > /dev/null || record tpm-refused failed "could not refresh the pool"
+    has_vol t-tpr.tpm && record tpm-refused failed "t-tpr.tpm remains after delete_vm"
+    return
+  fi
+  record tpm-refused skipped "the TPM gate passes, so there is no refusal to check"
+  run_case tpm-state "${config}"
+  has_vol t-tp.tpm || record tpm-state failed "t-tp.tpm is not in the pool"
+  owned_by_swtpm t-tp.tpm || record tpm-state failed "t-tp.tpm is not owned by the swtpm user with mode 0600"
+  if vsh dumpxml --inactive t-tp > "${xml}"; then
+    [[ $(xmllint --xpath "string(//tpm/backend/source/@type)" "${xml}") == file &&
+    $(xmllint --xpath "string(//tpm/backend/source/@path)" "${xml}") == "$(pool_path)/t-tp.tpm" ]] \
+      || record tpm-state failed "t-tp's TPM state is not t-tp.tpm in the pool, see ${xml}"
+  else
+    record tpm-state failed "could not read the definition of t-tp"
+  fi
+  owned_by_swtpm t-tp.tpm || record tpm-state failed "t-tp.tpm is not owned by the swtpm user with mode 0600 after the starts"
+  run_case tpm-state-delete "${config}"
+  vsh pool-refresh "${POOL}" > /dev/null || record tpm-state-delete failed "could not refresh the pool"
+  has_vol t-tp.tpm && record tpm-state-delete failed "t-tp.tpm remains after delete_vm"
+  if ! vsh vol-create-as "${POOL}" t-tl.tpm 1M --format raw > /dev/null; then
+    record tpm-leftover failed "could not make t-tl.tpm"
+    return
+  fi
+  run_case tpm-leftover "${config}"
+  left=$(vols_named '^t-tl')
+  [[ ${left} == t-tl.tpm ]] || record tpm-leftover failed "volumes of t-tl remain besides t-tl.tpm: ${left//$'\n'/ }"
+  vsh dominfo t-tl > /dev/null 2>&1 && record tpm-leftover failed "a VM named t-tl exists"
+  vsh vol-delete --pool "${POOL}" t-tl.tpm > /dev/null || record tpm-leftover failed "could not delete t-tl.tpm"
+  run_case tpm-leftover-after "${config}"
+  vsh pool-refresh "${POOL}" > /dev/null
+  has_vol t-tl.tpm && record tpm-leftover-after failed "t-tl.tpm remains after delete_vm"
 }
 
 unit_templates_expiry() {
@@ -955,6 +1040,7 @@ run_unit() {
     extra-isos) unit_extra_isos ;;
     hibernate) unit_hibernate ;;
     uefi-vars) unit_uefi_vars ;;
+    tpm) unit_tpm ;;
     templates-expiry) unit_templates_expiry ;;
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;

@@ -1,0 +1,22 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-tl",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "tpm": true
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "volume 't-tl.tpm' already exists in the disk pool 'agent-vms'",
+        "nothing was created",
+        "virsh -c qemu:///system vol-delete --pool agent-vms t-tl.tpm"
+      ]
+    }
+  }
+]

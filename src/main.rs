@@ -22,6 +22,7 @@ mod server;
 mod start;
 mod stats;
 mod sweep;
+mod tpm;
 mod transfer;
 mod volnames;
 mod wait;

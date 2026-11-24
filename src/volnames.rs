@@ -55,7 +55,6 @@ pub fn vars_name(vm: &str) -> String {
 }
 
 /// `<vm>.tpm`, a VM's own TPM state.
-#[cfg_attr(not(test), expect(dead_code, reason = "first caller: unit 7"))]
 pub fn tpm_name(vm: &str) -> String {
     format!("{vm}.tpm")
 }

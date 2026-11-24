@@ -37,6 +37,17 @@ Each release's section lists what changed for people who run the server and for 
   leftover of an earlier VM, because libvirt would reuse its variables. The error names the volume and the command
   that removes it, `virsh -c <uri> vol-delete --pool <disk_pool> <name>.vars`; nothing is created.
   The check rescans the pool first, and a rescan that fails now fails the create instead of passing on a stale listing.
+- `create_vm` with `tpm: true` now keeps the VM's TPM 2.0 state as `<name>.tpm` in `disk_pool` (`manage.disk_pool`), not
+  in libvirt's own `/var/lib/libvirt/swtpm/`. The server makes the state with `swtpm_setup` before it defines the VM,
+  and makes the volume owned by the host's swtpm user with mode 0600, because libvirt starts swtpm as that user and
+  does not change the owner of a pool file. `delete_vm` and expiry delete it with the VM. A VM that exists keeps its
+  state where it is.
+- `tpm: true` now needs the host to have `swtpm-tools` (`swtpm_setup`), the user `swtpm`, libvirt 10.10 or later, and
+  a root-made AppArmor rule, because swtpm's stock profile allows writes only under `/var/lib/libvirt/swtpm/`.
+  Add this line to `/etc/apparmor.d/local/usr.bin.swtpm`, with your pool's directory, and reload the profile:
+  `owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,`. Without the rule, `create_vm` still succeeds and `start_vm`
+  is refused with a message that names the file and the line. `create_vm` also refuses a TPM while `<name>.tpm`
+  already exists in the pool, and names the `virsh vol-delete` command that removes it.
 - `create_vm` with `secure_boot` on, the default, now asks libvirt for firmware with Secure Boot and the enrolled keys,
   instead of leaving the choice to libvirt. A VM with `firmware: "bios"` and `secure_boot: false` now fails with
   `secure_boot "off" and "setup" need firmware "uefi"`. VMs that exist keep their definition.

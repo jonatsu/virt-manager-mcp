@@ -531,7 +531,8 @@ pub struct CreateVmParams {
     /// Default uefi.
     #[serde(default)]
     pub firmware: Firmware,
-    /// Add an emulated TPM 2.0 (needed by Windows 11).
+    /// Add an emulated TPM 2.0 (needed by Windows 11). Its state is kept as `<name>.tpm` in the disk pool, and the VM's
+    /// deletion removes it.
     #[serde(default)]
     pub tpm: bool,
     /// UEFI only. Default `true`, or `"on"`: the host's firmware with Secure Boot and Microsoft's keys enrolled, which
@@ -3009,6 +3010,49 @@ mod tests {
         }
         let schema = serde_json::to_value(schemars::schema_for!(CreateVmParams)).unwrap();
         assert_eq!(schema["properties"]["hibernate"]["type"], "boolean");
+    }
+
+    #[test]
+    fn no_tool_parameter_takes_a_tpm_path_or_a_volume_name_for_tpm_state() {
+        // The server builds the TPM state's path, in the pool next to the disk volume. The only TPM parameter is
+        // create_vm's boolean `tpm`, and no parameter of any tool names a `.tpm` file.
+        let tools = VirtServer::tool_router().list_all();
+        let mut tpm_parameters = Vec::new();
+        for tool in &tools {
+            let Some(properties) = tool
+                .input_schema
+                .get("properties")
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for (name, property) in properties {
+                let text = format!(
+                    "{name} {}",
+                    property
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                );
+                if name.to_lowercase().contains("tpm") {
+                    tpm_parameters.push((
+                        tool.name.to_string(),
+                        name.clone(),
+                        property["type"].clone(),
+                    ));
+                } else {
+                    assert!(
+                        !text.to_lowercase().contains(".tpm"),
+                        "{} parameter {name} takes a TPM file: {text}",
+                        tool.name
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            tpm_parameters,
+            [("create_vm".into(), "tpm".into(), json!("boolean"))]
+        );
     }
 
     #[test]
