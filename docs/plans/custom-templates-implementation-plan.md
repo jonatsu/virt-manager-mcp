@@ -1119,7 +1119,7 @@ The run's goal:
 | 4 More CD-ROMs | `b1519e1` | Gate green, 460 tests; `extra-isos` passes: targets `sda` to `sde`, `set_cdrom` adds at `sdf` and refuses a seventh SATA device, the guest shows `/dev/sr0` and `/dev/sr1`; the case's ISOs live in `/var/tmp`, because `libvirt-qemu` cannot enter the repository | Self-review by the main session |
 | 5 Hibernation | `e2fd8b2` | Gate green, 475 tests; `hibernate` passes: a UEFI VM keeps its UUID across the redefine and ends with an explicit loader and `<suspend-to-disk enabled='yes'/>`; a secure loader needs `<smm state='on'/>`; setup and on are told apart by the variables template's file name until unit 8 records the mode | Self-review by the main session |
 | 6 UEFI variables in the pool | `d41d126` | Gate green, 481 tests; `uefi-vars` cases pass: `<nvram>` at `POOL/t-uv.vars`, a guest variable survives a restart, `delete_vm` removes the file, a leftover refuses the create; `firmware-secure-boot`, `hibernate` and the UEFI reset cases rerun green | `code-reviewer` (Sonnet): approve, no blocking finding; the leftover check's refresh error is ignored, hardened in unit 7 |
-| 7 TPM state in the pool |  |  |  |
+| 7 TPM state in the pool | `bcd9bab`, `9b7c5f8`, `89f81ea`, `cb35951` | Gate green, 516 tests; `tpm-gate.sh` passes on this host; `tpm` and `uefi-vars` cases pass, `tpm-refused` skips because the gate passes (checked once by simulating a root-owned state file); a guest given the pool volume sees a TPM 2.0 | `code-reviewer` (Sonnet): approve; its should-fix (undefine deleted a TPM file outside the pool) and four nits fixed in `89f81ea` and `cb35951` |
 | 8 Firmware record in the owner element |  |  |  |
 | 9 Seal mark, seal lock and refusals |  |  |  |
 | 10 Resolver and `agent_templates` |  |  |  |
