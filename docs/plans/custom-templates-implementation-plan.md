@@ -1,6 +1,7 @@
 # Custom templates and images: implementation plan
 
-Status: approved, with the five decisions below; reviewed twice by plan-critic. Built from
+Status: approved, with the five decisions below; reviewed twice by plan-critic. In progress: units 1 to 9 are built
+and released (release A as 0.5.0, unit 9 in the interim 0.5.1), and unit 10 is next. Built from
 [`custom-templates-design.md`](custom-templates-design.md) at `078da8a`, which owns behaviour, and from its probes in
 [`2026-11-24-custom-templates-probes.md`](../research/2026-11-24-custom-templates-probes.md). Roadmap outcome 5 in
 [`fork-roadmap.md`](fork-roadmap.md) is the outcome. This plan owns order and checks. Progress goes in the execution
@@ -203,7 +204,9 @@ and tag, waits for approval.
 | C | 9, 16 to 21 | Importing an image, sealing a VM into a template, and VMs from a sealed template |
 | D | 22 to 26 | Snapshots and resets that keep variables and TPM state, the docs and the closing checks |
 
-Unit 9, the seal lock, is built in its place between A and B, so release B contains it, but nothing uses it before C.
+Unit 9, the seal lock, is built in its place between A and B, but nothing uses it before C. Release A shipped as
+0.5.0. Unit 9 shipped in 0.5.1, an interim release with roadmap follow-up 40 (VNC displays), so release B holds units
+10 to 15 only.
 
 ## Units
 

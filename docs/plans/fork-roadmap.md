@@ -302,8 +302,8 @@ it is built.
    mode with no keys enrolled, for enrolling one's own keys; snapshots of a shut-off UEFI VM keep its variables; and a
    VM may hibernate. It takes in the parked idea of agents promoting a VM to a template. Design:
    [`custom-templates-design.md`](custom-templates-design.md), accepted. Plan:
-   [`custom-templates-implementation-plan.md`](custom-templates-implementation-plan.md), approved; it builds the probes
-   first.
+   [`custom-templates-implementation-plan.md`](custom-templates-implementation-plan.md), approved; units 1 to 9
+   are built and released in 0.5.0 and 0.5.1, and units 10 to 26 remain.
 6. **Several VMs together.** An agent can test small networks, such as a client and a server, including mDNS between
    guests. It builds on outcomes 1 and 5. The server creates and deletes networks of its own, owned and capped like
    VMs, limited to a configured name prefix and address range, as NAT or isolated networks with multicast between
@@ -339,7 +339,9 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Outcome 5 comes next, on its accepted design, whose probes have settled its provisional decisions. Then
-comes outcome 6, which needs a design that settles the open question above. Of the other open follow-ups, 36 needs a
-short design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`, 32 lands with the next change to the
-event worker, and 37 waits until an agent without a shell needs it.
+Outcome 5 continues with its plan's release B, units 10 to 15. Units 1 to 9 are built: 0.5.0 shipped release A, and
+0.5.1 shipped unit 9 with follow-up 40. Follow-up 38 comes first, because the kept owned VMs `t-win11net` and
+`cachyos-gnome` now fill `max_vms` in the test configs and every capped case fails until it lands; 39 is small and
+fits beside it. Then comes outcome 6, which needs a design that settles the open question above. Of the other open
+follow-ups, 36 needs a short design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`, 32 lands with
+the next change to the event worker, and 37 waits until an agent without a shell needs it.
