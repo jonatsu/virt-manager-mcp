@@ -5,6 +5,8 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+## 0.5.0
+
 ### Added
 
 - `secure_boot` takes `"setup"` besides `"on"` and `"off"`, in `create_vm` and in template entries. Setup mode gives
@@ -53,8 +55,8 @@ Each release's section lists what changed for people who run the server and for 
   path a `manage_vms` VM's `<tpm>` named. State in the pool, and libvirt's own state under `/var/lib/libvirt/swtpm/`,
   is still deleted with the VM.
 - `create_vm` with `secure_boot` on, the default, now asks libvirt for firmware with Secure Boot and the enrolled keys,
-  instead of leaving the choice to libvirt. A VM with `firmware: "bios"` and `secure_boot: false` now fails with
-  `secure_boot "off" and "setup" need firmware "uefi"`. VMs that exist keep their definition.
+  instead of leaving the choice to libvirt. VMs that exist keep their definition. A BIOS VM with `secure_boot` off is
+  still refused, now with `secure_boot "off" and "setup" need firmware "uefi"`.
 - `create_vm` and `create_vm_from_template` refuse the VM name `tpl`, which the server keeps for the names of
   template volumes. Name the VM anything else; `tpl2` and `my-tpl` are fine, and VMs already named `tpl` stay as they
   are.

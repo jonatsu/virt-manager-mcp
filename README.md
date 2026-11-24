@@ -80,7 +80,7 @@ Each `v*` tag publishes an x86_64 Linux tarball and its SHA-256 checksum on the
 and glibc of GitHub's `ubuntu-latest` runner. Download both files, check the checksum, and unpack the tarball:
 
 ```sh
-version=0.4.0
+version=0.5.0
 name=virtmanager-mcp-$version-x86_64-linux-gnu
 base=https://github.com/jonatsu/virt-manager-mcp/releases/download/v$version
 curl -fLO $base/$name.tar.gz -O $base/$name.tar.gz.sha256
