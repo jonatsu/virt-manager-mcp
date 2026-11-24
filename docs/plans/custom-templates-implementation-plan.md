@@ -182,8 +182,8 @@ These apply to every unit, which names only its additions.
 - **`swtpm-tools`.** `swtpm_setup` is at `/usr/bin/swtpm_setup` and `/etc/swtpm_setup.conf` exists. The `swtpm` user is
   114 with group 117 on this host; the code looks both up and hard-codes neither.
 - **AppArmor rule and the gate before unit 7.** The line `owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,` in
-  `/etc/apparmor.d/local/usr.bin.swtpm` is deployed through the dotfiles before unit 7 starts; the file did not exist
-  when this plan was written. Unit 7 opens with the gate: a VM that names a hand-made `.tpm` volume in the pool starts
+  `/etc/apparmor.d/local/usr.bin.swtpm` is deployed through the dotfiles, and a manual run of the gate has passed
+  (see the probe notes). Unit 7 still opens with the gate: a VM that names a hand-made `.tpm` volume in the pool starts
   and shows `/dev/tpm0`. Only a start shows that the profile is loaded. If the gate fails, units 7, 11, 22, 23 and 24
   still land with their unit tests and their refusal cases, and their positive cases run once the gate passes. Unit
   26 runs every waiting case. If the gate still fails then, they stay named exceptions in the execution record, and
