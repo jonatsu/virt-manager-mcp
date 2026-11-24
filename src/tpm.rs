@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,15 @@ pub struct SwtpmIds {
 }
 
 /// How long `swtpm_setup` may take. It makes keys and a few kilobytes of state, so a run that lasts this long hangs.
-const SETUP_DEADLINE: Duration = Duration::from_secs(60);
+/// `generate_state` runs while its caller holds the management lock, so this stays below `LOCK_WAIT`, the time
+/// another operation waits for that lock.
+const SETUP_DEADLINE: Duration = Duration::from_secs(20);
+
+// `generate_state` runs under the management lock, which another operation waits for at most `LOCK_WAIT`.
+const _: () = assert!(
+    SETUP_DEADLINE.as_secs() < crate::manage::LOCK_WAIT.as_secs(),
+    "a run of swtpm_setup under the management lock must end before a waiting operation gives up"
+);
 
 /// The most state `generate_state` accepts. Fresh state is about 4 KiB, and a larger file is not what was asked for.
 const MAX_STATE_BYTES: u64 = 1 << 20;
@@ -165,22 +173,19 @@ pub fn device_xml(path: &str) -> String {
     )
 }
 
-/// The refusal for a failed start, when the VM's inactive definition `xml` keeps its TPM state in a `.tpm` file and
-/// libvirt's `message` shows that `swtpm_setup` failed.
-pub fn start_refusal(xml: &str, message: &str) -> Option<String> {
+/// The refusal for a failed start, when the VM's inactive definition `xml` keeps its TPM state in a `.tpm` file
+/// directly in `pool_dir`, the `disk_pool` directory, and libvirt's `message` shows that `swtpm_setup` failed. The
+/// AppArmor rule it names covers that directory only, so a file elsewhere keeps libvirt's own message.
+pub fn start_refusal(xml: &str, message: &str, pool_dir: Option<&Path>) -> Option<String> {
     if !message.contains("swtpm_setup") {
         return None;
     }
     let doc = roxmltree::Document::parse(xml).ok()?;
-    let path = doc
-        .descendants()
-        .filter(|n| n.has_tag_name("tpm"))
-        .flat_map(|tpm| tpm.children().filter(|n| n.has_tag_name("backend")))
-        .flat_map(|backend| backend.children().filter(|n| n.has_tag_name("source")))
+    let path = sources(&doc)
         .filter(|source| source.attribute("type") == Some("file"))
         .filter_map(|source| source.attribute("path"))
-        .find(|path| path.ends_with(".tpm"))?;
-    let dir = Path::new(path).parent()?.display();
+        .find(|path| path.ends_with(".tpm") && is_in(path, pool_dir))?;
+    let dir = pool_dir?.display();
     Some(format!(
         "libvirt could not run swtpm_setup for the TPM state file {path}. The first thing to check is the host's \
          AppArmor rule: {APPARMOR_LOCAL} needs the line `owner {dir}/*.tpm rwk,`, and the swtpm profile must be \
@@ -277,9 +282,14 @@ pub fn generate_state() -> Result<Vec<u8>> {
     fs::read(&state).with_context(|| format!("reading {}", state.display()))
 }
 
-/// The last lines of `log`, for an error message.
+/// The most of a log that `log_tail` reads, from its end.
+const LOG_TAIL_BYTES: usize = 4096;
+
+/// The last lines of `log`, for an error message. It reads the end of the file only, because the log is the output of
+/// a program that failed and may be any size or not text.
 fn log_tail(log: &Path) -> String {
-    let text = fs::read_to_string(log).unwrap_or_default();
+    let text = read_end(log, LOG_TAIL_BYTES).unwrap_or_default();
+    let text = String::from_utf8_lossy(&text);
     let lines: Vec<&str> = text.lines().rev().take(3).collect();
     let tail = lines.into_iter().rev().collect::<Vec<_>>().join(" / ");
     if tail.is_empty() {
@@ -287,6 +297,17 @@ fn log_tail(log: &Path) -> String {
     } else {
         tail
     }
+}
+
+/// The last `limit` bytes of the file `path`, or all of it when it is shorter.
+fn read_end(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(limit as u64);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity(limit);
+    file.take(limit as u64).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Makes the volume `<vm>.tpm` in `pool` holding `state`, owned by the swtpm user `ids` with mode 0600 and a capacity
@@ -535,9 +556,15 @@ mod tests {
     const FILE_TPM: &str = "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>\
                             <source type='file' path='/var/lib/libvirt/images/agent-vms/t-v.tpm'/></backend></tpm>";
 
+    const POOL: &str = "/var/lib/libvirt/images/agent-vms";
+
+    fn refusal(xml: &str, message: &str) -> Option<String> {
+        start_refusal(xml, message, Some(Path::new(POOL)))
+    }
+
     #[test]
     fn a_failed_swtpm_setup_names_the_apparmor_rule_for_the_pool_directory() {
-        let text = start_refusal(&definition(FILE_TPM), SETUP_FAILURE).unwrap();
+        let text = refusal(&definition(FILE_TPM), SETUP_FAILURE).unwrap();
         assert!(text.contains(APPARMOR_LOCAL), "{text}");
         assert!(
             text.contains("owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,"),
@@ -548,39 +575,54 @@ mod tests {
     }
 
     #[test]
+    fn a_tpm_file_outside_the_pool_gets_libvirts_own_message_not_the_apparmor_hint() {
+        // The rule the hint names covers the pool directory only, so it would send the operator the wrong way.
+        let elsewhere = "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>\
+                         <source type='file' path='/home/u/t-v.tpm'/></backend></tpm>";
+        assert_eq!(refusal(&definition(elsewhere), SETUP_FAILURE), None);
+        // A directory below the pool is not the pool directory either.
+        let below = "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>\
+                     <source type='file' path='/var/lib/libvirt/images/agent-vms/sub/t-v.tpm'/></backend></tpm>";
+        assert_eq!(refusal(&definition(below), SETUP_FAILURE), None);
+        // Without a pool directory there is nothing to compare with.
+        assert_eq!(
+            start_refusal(&definition(FILE_TPM), SETUP_FAILURE, None),
+            None
+        );
+    }
+
+    #[test]
     fn other_failed_starts_keep_libvirts_own_message() {
         let xml = definition(FILE_TPM);
         // Not a swtpm_setup failure.
         assert_eq!(
-            start_refusal(
+            refusal(
                 &xml,
                 "internal error: process exited while connecting to monitor"
             ),
             None
         );
         // No TPM, or libvirt's own state location, or a source that is not a `.tpm` file.
-        assert_eq!(start_refusal(&definition(""), SETUP_FAILURE), None);
+        assert_eq!(refusal(&definition(""), SETUP_FAILURE), None);
         assert_eq!(
-            start_refusal(
+            refusal(
                 &definition("<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>"),
                 SETUP_FAILURE
             ),
             None
         );
         assert_eq!(
-            start_refusal(
+            refusal(
                 &definition(
                     "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>\
-                     <source type='dir' path='/p/t-v.tpmdir'/></backend></tpm>"
+                     <source type='dir' path='/var/lib/libvirt/images/agent-vms/t-v.tpmdir'/></backend></tpm>"
                 ),
                 SETUP_FAILURE
             ),
             None
         );
-        assert_eq!(start_refusal("not xml", SETUP_FAILURE), None);
+        assert_eq!(refusal("not xml", SETUP_FAILURE), None);
     }
-
-    const POOL: &str = "/var/lib/libvirt/images/agent-vms";
 
     fn outside(tpm: &str, pool: Option<&str>) -> Vec<String> {
         state_outside_pool(&definition(tpm), pool.map(Path::new)).unwrap()
@@ -738,6 +780,36 @@ mod tests {
         assert!(gone(), "the grandchild {pid} still runs");
         let _ = std::fs::remove_file(&log);
         let _ = std::fs::remove_file(&pidfile);
+    }
+
+    #[test]
+    fn the_log_tail_is_the_last_three_lines_of_a_log_of_any_size() {
+        let log = log_path("tail");
+        // 8 MiB that are not UTF-8, then the lines that matter: a read of the whole log would fail on the first
+        // bytes and report no output.
+        let mut text = vec![0xFF_u8; 8 << 20];
+        text.extend_from_slice(b"\nfirst\nsecond\nthird\nfourth\n");
+        std::fs::write(&log, &text).unwrap();
+        assert_eq!(log_tail(&log), "second / third / fourth");
+        std::fs::write(&log, b"only\n").unwrap();
+        assert_eq!(log_tail(&log), "only");
+        std::fs::write(&log, b"").unwrap();
+        assert_eq!(log_tail(&log), "no output");
+        std::fs::remove_file(&log).unwrap();
+        assert_eq!(log_tail(&log), "no output");
+    }
+
+    #[test]
+    fn the_log_tail_reads_a_bounded_window_and_not_a_cut_line() {
+        let log = log_path("window");
+        // One line far longer than the window: the tail is the end of it, in no more than the window.
+        let mut text = vec![b'x'; 1 << 20];
+        text.extend_from_slice(b"END\n");
+        std::fs::write(&log, &text).unwrap();
+        let tail = log_tail(&log);
+        assert!(tail.ends_with("xEND"), "{tail}");
+        assert!(tail.len() <= LOG_TAIL_BYTES, "{}", tail.len());
+        std::fs::remove_file(&log).unwrap();
     }
 
     #[test]

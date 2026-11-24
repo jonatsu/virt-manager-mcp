@@ -62,7 +62,7 @@ fn tpm_kept_note(outside: &[String]) -> String {
 }
 
 /// How long an operation waits for another holder to release the management lock.
-const LOCK_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(30);
 
 /// Takes the management lock, so that a limit checked here, such as `max_vms`, still holds when the operation acts.
 /// The lock is an exclusive `flock` on a lock file. Every open of the file has its own lock, so it excludes other
@@ -1066,6 +1066,21 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
     })
 }
 
+/// The directory of the pool `manage.disk_pool` names, or `None` when it is unset, missing or has no directory. It
+/// serves a hint, so a lookup that fails reads as no directory.
+pub fn disk_pool_dir(hv: &Hypervisor) -> Option<PathBuf> {
+    let name = &hv.config.manage.disk_pool;
+    if name.is_empty() {
+        return None;
+    }
+    hv.with_conn(|conn| {
+        let pool = StoragePool::lookup_by_name(conn, name)?;
+        pool_dir(&pool)
+    })
+    .ok()
+    .flatten()
+}
+
 /// The directory `pool` keeps its volumes in, from its XML target path; `None` when the pool has none.
 fn pool_dir(pool: &StoragePool) -> Result<Option<PathBuf>> {
     hypervisor::pool_target(&pool.get_xml_desc(0)?)
@@ -1816,8 +1831,12 @@ trait PoolListing {
     ///
     /// Fails when the pool refuses the scan.
     fn refresh(&self) -> Result<()>;
-    /// Whether the listing holds a volume named `name`.
-    fn has_volume(&self, name: &str) -> bool;
+    /// Whether the pool holds a volume named `name`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lookup fails for any reason but the volume's absence.
+    fn has_volume(&self, name: &str) -> Result<bool>;
 }
 
 impl PoolListing for StoragePool {
@@ -1828,8 +1847,26 @@ impl PoolListing for StoragePool {
             .map_err(|e| anyhow!("cannot refresh storage pool '{name}': {}", e.message()))
     }
 
-    fn has_volume(&self, name: &str) -> bool {
-        StorageVol::lookup_by_name(self, name).is_ok()
+    fn has_volume(&self, name: &str) -> Result<bool> {
+        volume_listed(
+            name,
+            StorageVol::lookup_by_name(self, name)
+                .map(drop)
+                .map_err(|e| (e.code(), e.message().to_string())),
+        )
+    }
+}
+
+/// Reads the outcome of a volume lookup, given as libvirt's error number and message on failure: only libvirt's
+/// no-such-volume error means the volume is absent, and any other failure leaves the question open.
+fn volume_listed(
+    name: &str,
+    found: std::result::Result<(), (ErrorNumber, String)>,
+) -> Result<bool> {
+    match found {
+        Ok(()) => Ok(true),
+        Err((ErrorNumber::NoStorageVolume, _)) => Ok(false),
+        Err((_, message)) => bail!("cannot look up volume '{name}': {message}"),
     }
 }
 
@@ -1842,7 +1879,7 @@ fn check_no_leftover(
     refusal: impl FnOnce() -> anyhow::Error,
 ) -> Result<()> {
     pool.refresh()?;
-    if pool.has_volume(volume) {
+    if pool.has_volume(volume)? {
         return Err(refusal());
     }
     Ok(())
@@ -3547,6 +3584,8 @@ mod tests {
     struct FakePool {
         refresh: std::result::Result<(), &'static str>,
         volumes: Vec<&'static str>,
+        /// The error a lookup of a volume fails with, in place of the listing.
+        lookup_error: Option<&'static str>,
         calls: std::cell::RefCell<Vec<&'static str>>,
     }
 
@@ -3556,9 +3595,12 @@ mod tests {
             self.refresh.map_err(|m| anyhow!("{m}"))
         }
 
-        fn has_volume(&self, name: &str) -> bool {
+        fn has_volume(&self, name: &str) -> Result<bool> {
             self.calls.borrow_mut().push("has_volume");
-            self.volumes.contains(&name)
+            if let Some(m) = self.lookup_error {
+                return Err(anyhow!("{m}"));
+            }
+            Ok(self.volumes.contains(&name))
         }
     }
 
@@ -3569,6 +3611,7 @@ mod tests {
         FakePool {
             refresh,
             volumes: volumes.to_vec(),
+            lookup_error: None,
             calls: Default::default(),
         }
     }
@@ -3601,6 +3644,34 @@ mod tests {
         let err = check_no_leftover(&pool, "t-lv.vars", refusal).unwrap_err();
         assert_eq!(err.to_string(), "leftover refusal");
         check_no_leftover(&pool, "t-lv.tpm", refusal).unwrap();
+    }
+
+    #[test]
+    fn a_failed_volume_lookup_fails_the_leftover_check_instead_of_reading_as_absent() {
+        // A pool that cannot answer must not pass the check as if the leftover were not there.
+        let mut pool = fake_pool(Ok(()), &[]);
+        pool.lookup_error = Some("pool is gone");
+        let err = check_no_leftover(&pool, "t-lv.tpm", refusal).unwrap_err();
+        assert!(format!("{err:#}").contains("pool is gone"), "{err:#}");
+        assert!(!format!("{err:#}").contains("leftover refusal"), "{err:#}");
+    }
+
+    #[test]
+    fn only_libvirts_no_such_volume_error_means_the_volume_is_absent() {
+        let found = || Ok::<(), (ErrorNumber, String)>(());
+        assert!(volume_listed("v", found()).unwrap());
+        let missing = Err((ErrorNumber::NoStorageVolume, "no volume".to_string()));
+        assert!(!volume_listed("v", missing).unwrap());
+        for code in [
+            ErrorNumber::NoStoragePool,
+            ErrorNumber::OperationInvalid,
+            ErrorNumber::InternalError,
+        ] {
+            let err = volume_listed("v.tpm", Err((code, "it broke".to_string())))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("v.tpm") && err.contains("it broke"), "{err}");
+        }
     }
 
     #[test]

@@ -202,7 +202,13 @@ impl Boot for LibvirtBoot<'_> {
                     .dom
                     .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
                     .ok()
-                    .and_then(|xml| tpm::start_refusal(&xml, e.message()));
+                    .and_then(|xml| {
+                        tpm::start_refusal(
+                            &xml,
+                            e.message(),
+                            manage::disk_pool_dir(self.hv).as_deref(),
+                        )
+                    });
                 match refusal {
                     Some(text) => anyhow!("cannot start '{}': {text}", self.name),
                     None => anyhow!("cannot start '{}': {}", self.name, e.message()),
