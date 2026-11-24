@@ -2010,8 +2010,9 @@ pub fn refresh_pool(hv: &Hypervisor) -> Result<()> {
     })
 }
 
-/// Before a start of `dom`, named `name`: whether it is the first start of a VM the server made with a UEFI
-/// variables file in the pool, so that `record_firmware` should follow it. The pool is rescanned first, because
+/// Before a start of `dom`, named `name`: whether it is the first start of a VM the server made and the management
+/// tools may act on (`can_manage`), with a UEFI variables file in the pool, so that `record_firmware` should follow
+/// it. The pool is rescanned first, because
 /// libvirt's listing does not show a `<name>.vars` that another client's start made. A VM that cannot qualify costs
 /// no rescan. A failure to read the VM or the pool counts as no: nothing is recorded on a listing that cannot be
 /// trusted.
@@ -2020,14 +2021,16 @@ pub fn firmware_record_due(hv: &Hypervisor, dom: &Domain, name: &str) -> bool {
         let Some(dir) = disk_pool_dir(hv) else {
             return Ok(false);
         };
+        let may_manage = hv.can_manage(dom);
         let xml = inactive_xml(dom)?;
         let owner = owner_in_domain_xml(&xml)?;
-        if !firmware::should_record(owner.as_ref(), &xml, &dir, name, false) {
+        if !firmware::should_record(may_manage, owner.as_ref(), &xml, &dir, name, false) {
             return Ok(false);
         }
         let listed =
             hv.with_conn(|conn| vars_listed(&disk_pool(conn, &hv.config.manage)?, name))?;
         Ok(firmware::should_record(
+            may_manage,
             owner.as_ref(),
             &xml,
             &dir,
@@ -2069,7 +2072,14 @@ pub fn record_firmware(hv: &Hypervisor, uuid: &str, name: &str) -> Result<()> {
         let inactive = inactive_xml(&dom)?;
         let owner = owner_in_domain_xml(&inactive)?;
         // The listing was checked before the start; here only the VM's own state is.
-        if !firmware::should_record(owner.as_ref(), &inactive, &dir, name, false) {
+        if !firmware::should_record(
+            hv.can_manage(&dom),
+            owner.as_ref(),
+            &inactive,
+            &dir,
+            name,
+            false,
+        ) {
             bail!("'{name}' no longer qualifies for a firmware record");
         }
         let live = dom.get_xml_desc(0).map_err(|e| {

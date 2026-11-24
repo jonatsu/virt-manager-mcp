@@ -19,6 +19,8 @@ const MAX_CODE_BYTES: u64 = 64 << 20;
 /// Whether a start is the first of a VM the server made, with its variables file in the pool, and so the one whose
 /// firmware to record. All of these must hold:
 ///
+/// - the management tools may act on the VM (`may_manage`, from `Hypervisor::can_manage`), because the record is a
+///   management write: a VM that only `power_vms` lists, or any VM while management is off, is never recorded;
 /// - the VM's inactive definition carries the owner element (`owner` is `Some`);
 /// - that element has no firmware record yet;
 /// - the definition's `<nvram>` names `<vm>.vars` in `pool_dir`, which excludes BIOS VMs and any other file;
@@ -26,13 +28,15 @@ const MAX_CODE_BYTES: u64 = 64 << 20;
 ///   it at this start. A VM started first by another client already has the file, and the server did not see which
 ///   code file that start used.
 pub fn should_record(
+    may_manage: bool,
     owner: Option<&Owner>,
     inactive_xml: &str,
     pool_dir: &Path,
     vm: &str,
     vars_listed_before: bool,
 ) -> bool {
-    owner.is_some_and(|o| !o.has_firmware_record())
+    may_manage
+        && owner.is_some_and(|o| !o.has_firmware_record())
         && !vars_listed_before
         && nvram_is_pool_vars(inactive_xml, pool_dir, vm)
 }
@@ -137,7 +141,14 @@ mod tests {
     fn the_first_start_of_an_owned_uefi_vm_without_a_vars_volume_is_recorded() {
         let xml = uefi_definition();
         let pool = Path::new(POOL);
-        assert!(should_record(Some(&owner()), &xml, pool, "t-x", false));
+        assert!(should_record(
+            true,
+            Some(&owner()),
+            &xml,
+            pool,
+            "t-x",
+            false
+        ));
     }
 
     #[test]
@@ -150,18 +161,47 @@ mod tests {
             ..owner()
         };
         // A second start: the record exists, and the variables file is listed.
-        assert!(!should_record(Some(&recorded), &xml, pool, "t-x", true));
+        assert!(!should_record(
+            true,
+            Some(&recorded),
+            &xml,
+            pool,
+            "t-x",
+            true
+        ));
         // A record alone, or a listed file alone, already rules a start out.
-        assert!(!should_record(Some(&recorded), &xml, pool, "t-x", false));
-        assert!(!should_record(Some(&owner()), &xml, pool, "t-x", true));
+        assert!(!should_record(
+            true,
+            Some(&recorded),
+            &xml,
+            pool,
+            "t-x",
+            false
+        ));
+        assert!(!should_record(
+            true,
+            Some(&owner()),
+            &xml,
+            pool,
+            "t-x",
+            true
+        ));
         // A VM the server did not make.
-        assert!(!should_record(None, &xml, pool, "t-x", false));
+        assert!(!should_record(true, None, &xml, pool, "t-x", false));
         // BIOS has no variables file.
         let bios = definition("");
-        assert!(!should_record(Some(&owner()), &bios, pool, "t-x", false));
+        assert!(!should_record(
+            true,
+            Some(&owner()),
+            &bios,
+            pool,
+            "t-x",
+            false
+        ));
         // Variables kept elsewhere, or under another name, are not the pool's `<vm>.vars`.
         let elsewhere = definition("<nvram>/var/lib/libvirt/qemu/nvram/t-x_VARS.fd</nvram>");
         assert!(!should_record(
+            true,
             Some(&owner()),
             &elsewhere,
             pool,
@@ -170,6 +210,7 @@ mod tests {
         ));
         let other_vm = definition(&format!("<nvram>{POOL}/t-y.vars</nvram>"));
         assert!(!should_record(
+            true,
             Some(&owner()),
             &other_vm,
             pool,
@@ -177,11 +218,43 @@ mod tests {
             false
         ));
         let nested = definition(&format!("<nvram>{POOL}/sub/t-x.vars</nvram>"));
-        assert!(!should_record(Some(&owner()), &nested, pool, "t-x", false));
+        assert!(!should_record(
+            true,
+            Some(&owner()),
+            &nested,
+            pool,
+            "t-x",
+            false
+        ));
         // Garbage is not a definition.
         assert!(!should_record(
+            true,
             Some(&owner()),
             "<domain",
+            pool,
+            "t-x",
+            false
+        ));
+    }
+
+    #[test]
+    fn a_vm_the_management_tools_may_not_act_on_is_never_recorded() {
+        // The guardrail: `can_manage` is false for a VM that only `power_vms` lists, and for every VM while
+        // management is off, and the record is a management write. Everything else qualifies.
+        let xml = uefi_definition();
+        let pool = Path::new(POOL);
+        assert!(should_record(
+            true,
+            Some(&owner()),
+            &xml,
+            pool,
+            "t-x",
+            false
+        ));
+        assert!(!should_record(
+            false,
+            Some(&owner()),
+            &xml,
             pool,
             "t-x",
             false
