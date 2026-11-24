@@ -230,6 +230,10 @@ Reviews of earlier work found these. None blocks the server's use.
     same name once no VM holds it in a CD-ROM; the how-to guide says so. An agent that reaches the host only through
     MCP has no way to do that, and a tool that copies an ISO from `host_share_dirs` into an ISO directory would give it
     one. Low priority.
+38. **Test bed refuses to start beside owned VMs.** `run-all.sh` lists the VMs that carry the server's owner element
+    before the first case. If any exist that the run did not create, it stops and names them, because they count toward
+    `manage.max_vms` in the test configs and make capped cases fail with misleading errors. `t-win11net`, kept for the
+    Windows network check, is the known case.
 
 ## Outcomes
 
