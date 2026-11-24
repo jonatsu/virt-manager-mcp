@@ -234,6 +234,11 @@ Reviews of earlier work found these. None blocks the server's use.
     before the first case. If any exist that the run did not create, it stops and names them, because they count toward
     `manage.max_vms` in the test configs and make capped cases fail with misleading errors. `t-win11net`, kept for the
     Windows network check, is the known case.
+39. **Delete keeps UEFI variables outside the pool.** `delete_vm` and expiry undefine with
+    `VIR_DOMAIN_UNDEFINE_NVRAM`, so libvirt deletes a VM's variables file wherever its `<nvram>` names it. For a VM in
+    `manage_vms` that the server did not create, that can be a file outside `disk_pool`, against the rule that deletion
+    removes only what lies in the pool. Apply the rule TPM state already follows: when the `<nvram>` path is not in the
+    pool directory, undefine with `VIR_DOMAIN_UNDEFINE_KEEP_NVRAM` and name the kept file in the reply.
 
 ## Outcomes
 
