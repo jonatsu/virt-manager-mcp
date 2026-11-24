@@ -53,7 +53,7 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["hibernate"]="hibernate hibernate-after"
-  ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
+  ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-virsh uefi-vars-virsh-after uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
   ["tpm"]="tpm-state tpm-state-delete tpm-leftover tpm-leftover-after tpm-refused"
   ["jobs"]="jobs jobs-reopen"
   ["diag-stats"]="diag-stats diag-stats-read-only diag-stats-after"
@@ -304,6 +304,8 @@ unit_hibernate() {
   # The redefinition keeps the variables path the first definition named, which is the VM's own file in the pool.
   [[ $(xmllint --xpath "string(//os/nvram)" "${xml}") == "$(pool_path)/t-hu.vars" ]] \
     || record hibernate failed "t-hu's variables are not t-hu.vars in the pool, see ${xml}"
+  # The first start recorded the pinned firmware, and the mode, which a loader named by path cannot tell from setup.
+  check_firmware_record t-hu off hibernate
   run_case hibernate-after "${config}"
 }
 
@@ -317,13 +319,53 @@ owned_by_qemu() {
   [[ $(vsh vol-dumpxml --pool "${POOL}" "$1" | xmllint --xpath 'string(//target/permissions/owner)' -) == "${uid}" ]]
 }
 
+# Prints the attribute $2 of the owner element in the persistent definition of VM $1, empty when it has none. `--config`
+# reads the persistent definition, which is where the firmware record goes: a redefinition of a running VM changes only
+# that one.
+owner_attr() {
+  vsh metadata "$1" http://virtmanager-mcp/owner/1 --config 2> /dev/null \
+    | xmllint --xpath "string(/*/@$2)" - 2> /dev/null
+}
+
+# Checks the firmware record of VM $1 against its persistent definition and the host: the code file path is the one the
+# definition's <loader> names, the hash is the file's `sha256sum`, and the Secure Boot mode is $2. Records a failure
+# under case $3.
+check_firmware_record() { # vm mode case
+  local vm=$1 mode=$2 name=$3 xml=${WORK}/$1.record.xml code sum
+  vsh dumpxml --inactive "${vm}" > "${xml}" || {
+    record "${name}" failed "could not read the definition of ${vm}"
+    return
+  }
+  code=$(xmllint --xpath "string(//os/loader)" "${xml}")
+  [[ $(owner_attr "${vm}" secure_boot) == "${mode}" ]] \
+    || record "${name}" failed "${vm}'s owner element does not say secure_boot='${mode}'"
+  [[ -n ${code} && $(owner_attr "${vm}" firmware_code) == "${code}" ]] \
+    || record "${name}" failed "${vm}'s firmware_code is not the definition's loader '${code}'"
+  sum=$(sha256sum -- "${code}" | cut -d' ' -f1)
+  [[ -n ${sum} && $(owner_attr "${vm}" firmware_sha256) == "${sum}" ]] \
+    || record "${name}" failed "${vm}'s firmware_sha256 is not the SHA-256 of ${code}"
+  # The redefinition kept the rest of the definition: the variables are still the pool's file.
+  [[ $(xmllint --xpath "string(//os/nvram)" "${xml}") == "$(pool_path)/${vm}.vars" ]] \
+    || record "${name}" failed "${vm}'s variables moved after the record, see ${xml}"
+}
+
+# Checks that the owner element of VM $1 carries secure_boot='$2' and no firmware record. Records a failure under case $3.
+check_no_firmware_record() { # vm mode case
+  [[ $(owner_attr "$1" secure_boot) == "$2" ]] \
+    || record "$3" failed "$1's owner element does not say secure_boot='$2'"
+  [[ -z $(owner_attr "$1" firmware_code)$(owner_attr "$1" firmware_sha256) ]] \
+    || record "$3" failed "$1 carries a firmware record"
+}
+
 # UEFI variables in the pool. The files appear in the pool listing without a refresh from here, because the server
 # rescans the pool after a start; before a VM's first start there is no file, even after a refresh. t-uv is made by
 # create_vm and only started and stopped, t-uvg comes from a template and keeps a variable the guest writes across a
 # shutdown and start, and both files go with their VMs. A t-lv.vars made here with virsh makes create_vm and
 # create_vm_from_template refuse t-lv for UEFI, names it and the command that removes it, and a create works once it
-# is removed. The case runs under config-templates.toml with max_vms = 4, because the kept t-win11net counts toward
-# max_vms.
+# is removed. The owner element of t-uv, made by create_vm, holds its Secure Boot mode and no firmware record before its
+# first start; the server's start adds the record, whose hash equals `sha256sum` of the code file, and t-uvg, from a
+# template, gets one too. t-uvv is started first with `virsh start`, so the server's later start of it records nothing.
+# The case runs under config-templates.toml with max_vms = 4, because the kept t-win11net counts toward max_vms.
 unit_uefi_vars() {
   local config=${WORK}/config-uefi-vars.toml xml=${WORK}/t-uv.inactive.xml vm avail left
   if ! sed 's/^max_vms = 3$/max_vms = 4/' "${TESTBED}/config-templates.toml" > "${config}" \
@@ -347,7 +389,9 @@ unit_uefi_vars() {
   else
     record uefi-vars failed "could not read the definition of t-uv"
   fi
+  check_no_firmware_record t-uv off uefi-vars
   run_case uefi-vars-start "${config}"
+  check_firmware_record t-uv off uefi-vars-start
   has_vol t-uv.vars || record uefi-vars-start failed "t-uv.vars is not in the pool listing after the first start"
   owned_by_qemu t-uv.vars || record uefi-vars-start failed "t-uv.vars is not owned by the QEMU user"
   [[ ! -e /var/lib/libvirt/qemu/nvram/t-uv_VARS.fd ]] \
@@ -355,9 +399,22 @@ unit_uefi_vars() {
   run_case uefi-vars-guest "${config}"
   has_vol t-uvg.vars || record uefi-vars-guest failed "t-uvg.vars is not in the pool listing after the first start"
   owned_by_qemu t-uvg.vars || record uefi-vars-guest failed "t-uvg.vars is not owned by the QEMU user"
+  check_firmware_record t-uvg on uefi-vars-guest
+  run_case uefi-vars-virsh "${config}"
+  check_no_firmware_record t-uvv setup uefi-vars-virsh
+  if vsh start t-uvv > /dev/null; then
+    wait_until 30 is_state t-uvv running || record uefi-vars-virsh failed "t-uvv did not start with virsh"
+    vsh destroy t-uvv > /dev/null || record uefi-vars-virsh failed "could not stop t-uvv"
+  else
+    record uefi-vars-virsh failed "virsh could not start t-uvv"
+  fi
+  vsh pool-refresh "${POOL}" > /dev/null
+  has_vol t-uvv.vars || record uefi-vars-virsh failed "t-uvv.vars is not in the pool after virsh start"
+  run_case uefi-vars-virsh-after "${config}"
+  check_no_firmware_record t-uvv setup uefi-vars-virsh-after
   run_case uefi-vars-delete "${config}"
   vsh pool-refresh "${POOL}" > /dev/null || record uefi-vars-delete failed "could not refresh the pool"
-  for vm in t-uv t-uvg; do
+  for vm in t-uv t-uvg t-uvv; do
     has_vol "${vm}.vars" && record uefi-vars-delete failed "${vm}.vars remains after delete_vm"
     [[ ! -e /var/lib/libvirt/qemu/nvram/${vm}_VARS.fd ]] \
       || record uefi-vars-delete failed "${vm}_VARS.fd remains in libvirt's nvram directory"

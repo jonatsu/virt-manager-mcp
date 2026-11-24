@@ -24,6 +24,7 @@ use virt::stream::Stream;
 use virt::sys;
 
 use crate::config::{Firmware, GuestOs, Manage, OnCrash, SecureBoot, is_hostname};
+use crate::firmware;
 use crate::hypervisor::{self, Hypervisor};
 use crate::seed;
 use crate::tpm::{self, SwtpmIds};
@@ -142,15 +143,24 @@ pub fn is_owned(dom: &Domain) -> bool {
         .is_ok()
 }
 
-/// Attributes of the owner element. VMs made by `create_vm` carry none; VMs made from a template carry the
-/// template's name and the disk generation, and an expiry when they have a lifetime. Only the server writes them,
-/// when it defines a domain.
+/// Attributes of the owner element. A UEFI VM carries the Secure Boot mode it was asked for; VMs made from a template
+/// carry the template's name and the disk generation, and an expiry when they have a lifetime; and a UEFI VM the
+/// server started first carries the firmware record. Only the server writes them: the create tools when they define
+/// a domain, and, on a VM that already carries the element, a reset (`generation`, `expires`) and the first start
+/// (the firmware record).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Owner {
     pub template: Option<String>,
     pub generation: Option<u32>,
     /// UTC time in seconds since the epoch after which the VM is deleted.
     pub expires: Option<u64>,
+    /// The Secure Boot mode a UEFI VM was made with. A loader pinned by path cannot tell setup from on, so this does.
+    /// Absent for BIOS and for VMs made before it was recorded.
+    pub secure_boot: Option<SecureBoot>,
+    /// The firmware code file libvirt resolved at the VM's first start, which the server made.
+    pub firmware_code: Option<String>,
+    /// The SHA-256 of that file at that start, in lower-case hex.
+    pub firmware_sha256: Option<String>,
 }
 
 impl Owner {
@@ -165,6 +175,15 @@ impl Owner {
         }
         if let Some(e) = self.expires {
             attrs.push_str(&format!(" expires='{e}'"));
+        }
+        if let Some(mode) = self.secure_boot {
+            attrs.push_str(&format!(" secure_boot='{}'", mode.as_str()));
+        }
+        if let Some(code) = &self.firmware_code {
+            attrs.push_str(&format!(" firmware_code='{}'", esc(code)));
+        }
+        if let Some(sum) = &self.firmware_sha256 {
+            attrs.push_str(&format!(" firmware_sha256='{}'", esc(sum)));
         }
         format!("<vmm:owner xmlns:vmm='{OWNER_NS}'{attrs}/>")
     }
@@ -181,7 +200,26 @@ impl Owner {
             template: node.attribute("template").map(str::to_string),
             generation: node.attribute("generation").and_then(|g| g.parse().ok()),
             expires: node.attribute("expires").and_then(|e| e.parse().ok()),
+            secure_boot: node
+                .attribute("secure_boot")
+                .and_then(SecureBoot::from_word),
+            firmware_code: node.attribute("firmware_code").map(str::to_string),
+            firmware_sha256: node.attribute("firmware_sha256").map(str::to_string),
         }
+    }
+
+    /// The owner element of a new VM made by `create_vm`: no template, and for a UEFI VM the Secure Boot mode asked
+    /// for. A template VM adds its own attributes to this.
+    fn for_new_vm(uefi: bool, secure_boot: SecureBoot) -> Self {
+        Self {
+            secure_boot: uefi.then_some(secure_boot),
+            ..Self::default()
+        }
+    }
+
+    /// Whether the element carries any part of the firmware record.
+    pub fn has_firmware_record(&self) -> bool {
+        self.firmware_code.is_some() || self.firmware_sha256.is_some()
     }
 }
 
@@ -193,15 +231,10 @@ pub fn owner_of(dom: &Domain) -> Option<Owner> {
     Owner::from_element(&xml).ok()
 }
 
-/// The owner attributes in a domain's XML, or `None` when it has no owner element in `OWNER_NS`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a test oracle for the owner element in domain XML; production reads it through libvirt"
-    )
-)]
-fn owner_in_domain_xml(xml: &str) -> Result<Option<Owner>> {
+/// The owner attributes in a domain's XML, or `None` when it has no owner element in `OWNER_NS`. Given the inactive
+/// definition, it reads the persistent element, which `owner_of` does not for a running VM: libvirt's metadata call
+/// reads the live definition then, and a redefinition changes only the persistent one.
+pub(crate) fn owner_in_domain_xml(xml: &str) -> Result<Option<Owner>> {
     let doc = roxmltree::Document::parse(xml)?;
     let Some(metadata) = child(doc.root_element(), "metadata") else {
         return Ok(None);
@@ -328,7 +361,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             network: network.as_deref(),
             uuid: None,
             mac: None,
-            owner: Owner::default(),
+            owner: Owner::for_new_vm(vm.uefi, vm.secure_boot),
         };
         let mut volumes = vec![&vol];
         volumes.extend(tpm_vol.as_ref());
@@ -641,6 +674,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                     template: Some(vm.template.clone()),
                     generation: Some(generation),
                     expires,
+                    ..Owner::for_new_vm(t.firmware == Firmware::Uefi, t.secure_boot)
                 },
             });
             Domain::define_xml(conn, &xml)
@@ -854,6 +888,24 @@ fn replace_owner(xml: &str, owner: &Owner) -> Result<String> {
         owner.element(),
         &xml[range.end..]
     ))
+}
+
+/// `xml` with the firmware record in its owner element: the code file `path` and its SHA-256 `sha256`. The other
+/// attributes stay. Refuses a definition without an owner element, which no record may create, and one that already
+/// holds a record, which describes the first start only.
+fn with_firmware_record(xml: &str, path: &str, sha256: &str) -> Result<String> {
+    let owner = owner_in_domain_xml(xml)?.ok_or_else(|| anyhow!("the VM has no owner element"))?;
+    if owner.has_firmware_record() {
+        bail!("the VM's owner element already holds a firmware record");
+    }
+    replace_owner(
+        xml,
+        &Owner {
+            firmware_code: Some(path.to_string()),
+            firmware_sha256: Some(sha256.to_string()),
+            ..owner
+        },
+    )
 }
 
 /// Owned VMs with an expiry, as (UUID, owner) pairs, for the sweep to choose from.
@@ -1103,7 +1155,9 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
     let os = child(root, "os");
     let uefi =
         os.is_some_and(|o| o.attribute("firmware") == Some("efi") || child(o, "loader").is_some());
-    let (secure_boot, secure_boot_mode) = secure_boot_fields(uefi, os);
+    // The persistent element: a running VM's live one lacks what a redefinition added.
+    let recorded = owner_in_domain_xml(&xml)?.and_then(|o| o.secure_boot);
+    let (secure_boot, secure_boot_mode) = secure_boot_fields(uefi, os, recorded);
     let devices = child(root, "devices");
     let has = |tag: &str| devices.is_some_and(|d| child(d, tag).is_some());
 
@@ -1709,7 +1763,14 @@ fn check_disk(m: &Manage, gib: u64) -> Result<()> {
 /// absent, from its loader's `secure` attribute, which libvirt fills in when it picks the firmware and which the
 /// explicit form (a VM that hibernates, or one from a sealed template) always carries. Secure Boot without enrolled
 /// keys is setup mode. `None` when nothing says, as for a loader named by path alone.
-fn secure_boot_state(os: roxmltree::Node<'_, '_>) -> Option<SecureBoot> {
+///
+/// A secure loader alone cannot tell setup from on. The mode the owner element records (`recorded`) settles that;
+/// without one, the variables template's file name does (`template_without_keys`), as for a VM made before the mode
+/// was recorded. The record never overrides what the definition says about Secure Boot being off.
+fn secure_boot_state(
+    os: roxmltree::Node<'_, '_>,
+    recorded: Option<SecureBoot>,
+) -> Option<SecureBoot> {
     let feature = |name: &str| {
         child(os, "firmware").and_then(|f| {
             f.children()
@@ -1720,9 +1781,11 @@ fn secure_boot_state(os: roxmltree::Node<'_, '_>) -> Option<SecureBoot> {
     let loader = child(os, "loader").and_then(|l| l.attribute("secure"));
     match feature("secure-boot").or(loader)? {
         "yes" if feature("enrolled-keys") == Some("no") => Some(SecureBoot::Setup),
-        "yes" if feature("secure-boot").is_none() && template_without_keys(os) => {
-            Some(SecureBoot::Setup)
-        }
+        "yes" if feature("secure-boot").is_none() => Some(match recorded {
+            Some(mode @ (SecureBoot::Setup | SecureBoot::On)) => mode,
+            Some(SecureBoot::Off) | None if template_without_keys(os) => SecureBoot::Setup,
+            Some(SecureBoot::Off) | None => SecureBoot::On,
+        }),
         "yes" => Some(SecureBoot::On),
         "no" => Some(SecureBoot::Off),
         _ => None,
@@ -1750,15 +1813,16 @@ fn suspends_to_disk(root: roxmltree::Node<'_, '_>) -> bool {
 
 /// The `secure_boot` boolean and the `secure_boot_mode` word `describe_vm` reports. Setup mode reads as false in the
 /// boolean, which says whether the VM's keys are enrolled. A BIOS VM has no Secure Boot; for a UEFI VM, `None` means
-/// the XML does not say.
+/// the XML does not say. `recorded` is the mode the owner element holds, which `secure_boot_state` uses.
 fn secure_boot_fields(
     uefi: bool,
     os: Option<roxmltree::Node<'_, '_>>,
+    recorded: Option<SecureBoot>,
 ) -> (Option<bool>, Option<&'static str>) {
     if !uefi {
         return (Some(false), Some(SecureBoot::Off.as_str()));
     }
-    match os.and_then(secure_boot_state) {
+    match os.and_then(|os| secure_boot_state(os, recorded)) {
         Some(mode) => (Some(mode == SecureBoot::On), Some(mode.as_str())),
         None => (None, None),
     }
@@ -1900,11 +1964,16 @@ fn check_no_leftover_tpm(hv: &Hypervisor, pool: &StoragePool, vm: &str) -> Resul
     })
 }
 
-/// The volume `<vm>.vars` holds a UEFI VM's variables in `pool`. The pool lists it only after `refresh_pool`
-/// follows the VM's first start.
-#[expect(dead_code, reason = "first caller: unit 8")]
-fn vars_volume(pool: &StoragePool, vm: &str) -> Option<StorageVol> {
-    StorageVol::lookup_by_name(pool, &volnames::vars_name(vm)).ok()
+/// Whether the pool lists the volume `<vm>.vars` after a rescan. libvirt's cached listing does not show a file made
+/// outside its own calls, such as the one a `virsh start` creates, so the lookup never runs before the rescan.
+///
+/// # Errors
+///
+/// Fails when the rescan or the lookup fails. A caller that records the firmware then records nothing, because a
+/// listing it cannot trust may hide a file made by an earlier start.
+fn vars_listed(pool: &impl PoolListing, vm: &str) -> Result<bool> {
+    pool.refresh()?;
+    pool.has_volume(&volnames::vars_name(vm))
 }
 
 /// Rescans `disk_pool`, so that files libvirt made outside the server's own calls are listed, such as `<vm>.vars`,
@@ -1928,6 +1997,83 @@ pub fn refresh_pool(hv: &Hypervisor) -> Result<()> {
                 e.message()
             )
         })?;
+        Ok(())
+    })
+}
+
+/// Before a start of `dom`, named `name`: whether it is the first start of a VM the server made with a UEFI
+/// variables file in the pool, so that `record_firmware` should follow it. The pool is rescanned first, because
+/// libvirt's listing does not show a `<name>.vars` that another client's start made. A VM that cannot qualify costs
+/// no rescan. A failure to read the VM or the pool counts as no: nothing is recorded on a listing that cannot be
+/// trusted.
+pub fn firmware_record_due(hv: &Hypervisor, dom: &Domain, name: &str) -> bool {
+    let due = || -> Result<bool> {
+        let Some(dir) = disk_pool_dir(hv) else {
+            return Ok(false);
+        };
+        let xml = inactive_xml(dom)?;
+        let owner = owner_in_domain_xml(&xml)?;
+        if !firmware::should_record(owner.as_ref(), &xml, &dir, name, false) {
+            return Ok(false);
+        }
+        let listed =
+            hv.with_conn(|conn| vars_listed(&disk_pool(conn, &hv.config.manage)?, name))?;
+        Ok(firmware::should_record(
+            owner.as_ref(),
+            &xml,
+            &dir,
+            name,
+            listed,
+        ))
+    };
+    due().unwrap_or_else(|e| {
+        tracing::warn!("cannot tell whether the start of '{name}' is its first: {e:#}");
+        false
+    })
+}
+
+/// After the first start of the VM with `uuid`, named `name`: records the firmware code file that libvirt resolved
+/// and its SHA-256 in the VM's owner element. It takes the management lock, rescans the pool, reads the loader path
+/// from the live definition, hashes the file, and redefines the VM from its inactive definition with the element
+/// replaced. A redefinition of a running VM changes only its persistent definition, which is where a later seal reads
+/// the record. Its checks run again under the lock: a concurrent delete, or a VM that no longer qualifies, records
+/// nothing. The caller must not hold the lock.
+///
+/// # Errors
+///
+/// Fails when the lock is not free in time, the VM is gone or no longer qualifies, the loader or its file cannot be
+/// read, or libvirt refuses the redefinition. The start has already succeeded, so the caller logs it.
+pub fn record_firmware(hv: &Hypervisor, uuid: &str, name: &str) -> Result<()> {
+    let _guard = lock()?;
+    hv.with_conn(|conn| {
+        let dom = Domain::lookup_by_uuid_string(conn, uuid)
+            .map_err(|e| anyhow!("cannot find VM '{name}': {}", e.message()))?;
+        if dom.get_name()? != name {
+            bail!("VM '{name}' was renamed");
+        }
+        let pool = disk_pool(conn, &hv.config.manage)?;
+        // The rescan shows the file libvirt made at this start; without it, this was not a start that made one.
+        if !vars_listed(&pool, name)? {
+            bail!("the pool lists no variables file for '{name}' after its start");
+        }
+        let dir = pool_dir(&pool)?.ok_or_else(|| anyhow!("the pool has no directory"))?;
+        let inactive = inactive_xml(&dom)?;
+        let owner = owner_in_domain_xml(&inactive)?;
+        // The listing was checked before the start; here only the VM's own state is.
+        if !firmware::should_record(owner.as_ref(), &inactive, &dir, name, false) {
+            bail!("'{name}' no longer qualifies for a firmware record");
+        }
+        let live = dom.get_xml_desc(0).map_err(|e| {
+            anyhow!(
+                "cannot read the live definition of '{name}': {}",
+                e.message()
+            )
+        })?;
+        let code = firmware::loader_path(&live)?;
+        let sha256 = firmware::sha256_file(Path::new(&code))?;
+        let xml = with_firmware_record(&inactive, &code, &sha256)?;
+        Domain::define_xml(conn, &xml)
+            .map_err(|e| anyhow!("cannot redefine '{name}': {}", e.message()))?;
         Ok(())
     })
 }
@@ -3003,7 +3149,7 @@ mod tests {
                 "{mode:?}"
             );
             // What the reader says about the definition the server wrote.
-            assert_eq!(secure_boot_state(os), Some(mode), "{mode:?}");
+            assert_eq!(secure_boot_state(os, None), Some(mode), "{mode:?}");
         }
         // BIOS has no firmware element, whatever the mode says.
         assert!(firmware_features(&domain_xml(&spec(vec![Disk::Qcow2("/p/t.qcow2")]))).is_empty());
@@ -3014,7 +3160,7 @@ mod tests {
         let state = |os_inner: &str| {
             let xml = format!("<domain><os firmware='efi'>{os_inner}</os></domain>");
             let doc = roxmltree::Document::parse(&xml).unwrap();
-            secure_boot_state(child(doc.root_element(), "os").unwrap())
+            secure_boot_state(child(doc.root_element(), "os").unwrap(), None)
         };
         // What libvirt fills in after picking the secure-enrolled firmware.
         assert_eq!(
@@ -3058,7 +3204,7 @@ mod tests {
         let fields = |uefi, os_inner: &str| {
             let xml = format!("<domain><os firmware='efi'>{os_inner}</os></domain>");
             let doc = roxmltree::Document::parse(&xml).unwrap();
-            secure_boot_fields(uefi, child(doc.root_element(), "os"))
+            secure_boot_fields(uefi, child(doc.root_element(), "os"), None)
         };
         let feature = |secure: &str, keys: &str| {
             format!(
@@ -3144,7 +3290,7 @@ mod tests {
                     );
                     let doc = roxmltree::Document::parse(&xml).unwrap();
                     let os = child(doc.root_element(), "os").unwrap();
-                    assert_eq!(secure_boot_state(os), Some(secure_boot));
+                    assert_eq!(secure_boot_state(os, None), Some(secure_boot));
                 }
             }
         }
@@ -3392,8 +3538,12 @@ mod tests {
             });
             let doc = roxmltree::Document::parse(&xml).unwrap();
             let os = child(doc.root_element(), "os");
-            assert_eq!(os.and_then(secure_boot_state), Some(mode), "{mode:?}");
-            let (boolean, word) = secure_boot_fields(true, os);
+            assert_eq!(
+                os.and_then(|o| secure_boot_state(o, None)),
+                Some(mode),
+                "{mode:?}"
+            );
+            let (boolean, word) = secure_boot_fields(true, os, None);
             assert_eq!(boolean, Some(mode == SecureBoot::On), "{mode:?}");
             assert_eq!(word, Some(mode.as_str()), "{mode:?}");
         }
@@ -3407,7 +3557,7 @@ mod tests {
                  <nvram template='{template}'>/v.vars</nvram></os></domain>"
             );
             let doc = roxmltree::Document::parse(&xml).unwrap();
-            secure_boot_state(child(doc.root_element(), "os").unwrap())
+            secure_boot_state(child(doc.root_element(), "os").unwrap(), None)
         };
         // Debian's names and Fedora's, where the keys are in the `.ms` or `.secboot` variables.
         assert_eq!(
@@ -3431,7 +3581,7 @@ mod tests {
             "<domain><os><loader secure='yes' type='pflash'>/o/CODE.fd</loader></os></domain>";
         let doc = roxmltree::Document::parse(xml).unwrap();
         assert_eq!(
-            secure_boot_state(child(doc.root_element(), "os").unwrap()),
+            secure_boot_state(child(doc.root_element(), "os").unwrap(), None),
             Some(SecureBoot::On)
         );
     }
@@ -3536,7 +3686,7 @@ mod tests {
             assert_eq!(nvram[0].attribute("template"), None, "{mode:?}");
             assert_eq!(os.attribute("firmware"), Some("efi"), "{mode:?}");
             // The variables element does not change what the mode reads as.
-            assert_eq!(secure_boot_state(os), Some(mode), "{mode:?}");
+            assert_eq!(secure_boot_state(os, None), Some(mode), "{mode:?}");
             assert_eq!(firmware_features(&xml).len(), 2, "{mode:?}");
         }
     }
@@ -3614,6 +3764,41 @@ mod tests {
             lookup_error: None,
             calls: Default::default(),
         }
+    }
+
+    /// A pool whose cached listing lacks a file until the pool is rescanned, as libvirt's does for a file another
+    /// client made.
+    struct CachedPool {
+        on_disk: bool,
+        scanned: std::cell::Cell<bool>,
+        refresh_fails: bool,
+    }
+
+    impl PoolListing for CachedPool {
+        fn refresh(&self) -> Result<()> {
+            if self.refresh_fails {
+                bail!("pool is busy");
+            }
+            self.scanned.set(true);
+            Ok(())
+        }
+
+        fn has_volume(&self, _name: &str) -> Result<bool> {
+            Ok(self.on_disk && self.scanned.get())
+        }
+    }
+
+    #[test]
+    fn a_vars_file_made_by_another_client_shows_in_the_listing_only_after_the_rescan() {
+        let pool = |on_disk, refresh_fails| CachedPool {
+            on_disk,
+            scanned: false.into(),
+            refresh_fails,
+        };
+        assert!(vars_listed(&pool(true, false), "t-x").unwrap());
+        assert!(!vars_listed(&pool(false, false), "t-x").unwrap());
+        // A rescan that fails gives no answer, so no record follows from a stale listing.
+        assert!(vars_listed(&pool(false, true), "t-x").is_err());
     }
 
     fn refusal() -> anyhow::Error {
@@ -4236,6 +4421,7 @@ mod tests {
             template: Some("debian13".into()),
             generation: Some(2),
             expires: Some(1_794_300_000),
+            ..Owner::default()
         };
         let xml = domain_xml(&DomainSpec {
             uuid: Some("8a3f0c55-1d2e-4c6b-9f00-5b6d1e2f3a4b"),
@@ -4284,13 +4470,17 @@ mod tests {
             template: Some("a'b".into()),
             generation: Some(7),
             expires: Some(42),
+            secure_boot: Some(SecureBoot::Setup),
+            firmware_code: Some("/o/it's \"CODE\" <4M>&.fd".into()),
+            firmware_sha256: Some("ab".repeat(32)),
         };
         assert_eq!(Owner::from_element(&owner.element()).unwrap(), owner);
         assert_eq!(
             Owner::from_element(&Owner::default().element()).unwrap(),
             Owner::default()
         );
-        let garbled = format!("<o xmlns='{OWNER_NS}' generation='x' expires='-1'/>");
+        let garbled =
+            format!("<o xmlns='{OWNER_NS}' generation='x' expires='-1' secure_boot='maybe'/>");
         assert_eq!(Owner::from_element(&garbled).unwrap(), Owner::default());
     }
 
@@ -4368,6 +4558,7 @@ mod tests {
             template: Some("debian13".into()),
             generation: Some(1),
             expires,
+            ..Owner::default()
         };
         // expire() re-reads the owner just before acting, so these are the states it can find.
         assert!(should_expire(Some(&owned(Some(100))), 100));
@@ -4545,6 +4736,7 @@ mod tests {
                 template: Some("debian13".into()),
                 generation: Some(1),
                 expires: Some(99),
+                ..Owner::default()
             },
             ..spec(vec![
                 Disk::Qcow2("/pool/t-g1.qcow2"),
@@ -4610,6 +4802,7 @@ mod tests {
             template: Some("debian13".into()),
             generation: Some(2),
             expires: Some(99),
+            ..Owner::default()
         };
         let new = replace_owner(&template_vm_xml(), &next).unwrap();
         assert_eq!(owner_in_domain_xml(&new).unwrap(), Some(next.clone()));
@@ -4617,6 +4810,129 @@ mod tests {
         let plain = "<domain><name>x</name><metadata><o:owner xmlns:o='http://example.com/o'/></metadata></domain>";
         assert!(replace_owner(plain, &next).is_err());
         assert!(replace_owner("<domain><name>x</name></domain>", &next).is_err());
+    }
+
+    #[test]
+    fn a_missing_firmware_attribute_reads_as_absent() {
+        let only_code = format!("<o xmlns='{OWNER_NS}' firmware_code='/o/CODE.fd'/>");
+        let owner = Owner::from_element(&only_code).unwrap();
+        assert_eq!(owner.firmware_code.as_deref(), Some("/o/CODE.fd"));
+        assert_eq!(owner.firmware_sha256, None);
+        assert!(owner.has_firmware_record());
+        assert!(!Owner::default().has_firmware_record());
+        // An owner element from before this change reads with no record and no mode.
+        let old = format!("<o xmlns='{OWNER_NS}' template='debian13' generation='3'/>");
+        let owner = Owner::from_element(&old).unwrap();
+        assert_eq!((owner.secure_boot, owner.firmware_code), (None, None));
+    }
+
+    #[test]
+    fn a_new_vm_records_the_secure_boot_mode_it_was_asked_for_when_it_is_uefi() {
+        for mode in [SecureBoot::Off, SecureBoot::Setup, SecureBoot::On] {
+            let owner = Owner::for_new_vm(true, mode);
+            assert_eq!(owner.secure_boot, Some(mode), "{mode:?}");
+            let xml = domain_xml(&DomainSpec {
+                uefi: true,
+                secure_boot: mode,
+                owner,
+                ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+            });
+            let recorded = owner_in_domain_xml(&xml).unwrap().unwrap();
+            assert_eq!(recorded.secure_boot, Some(mode), "{mode:?}");
+            // The firmware record waits for the first start.
+            assert!(!recorded.has_firmware_record());
+        }
+        assert_eq!(Owner::for_new_vm(false, SecureBoot::On), Owner::default());
+    }
+
+    #[test]
+    fn a_recorded_mode_settles_what_a_pinned_loader_cannot_tell() {
+        let state = |loader_secure: &str, template: &str, recorded| {
+            let xml = format!(
+                "<domain><os><loader secure='{loader_secure}' type='pflash'>/o/CODE.fd</loader>\
+                 <nvram template='{template}'>/v.vars</nvram></os></domain>"
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            secure_boot_state(child(doc.root_element(), "os").unwrap(), recorded)
+        };
+        // The file name still answers for a VM made before the mode was recorded.
+        assert_eq!(state("yes", "/o/VARS.fd", None), Some(SecureBoot::Setup));
+        assert_eq!(state("yes", "/o/VARS.ms.fd", None), Some(SecureBoot::On));
+        // The record wins over a template whose name says otherwise, in both directions.
+        assert_eq!(
+            state("yes", "/o/custom-vars.bin", Some(SecureBoot::Setup)),
+            Some(SecureBoot::Setup)
+        );
+        assert_eq!(
+            state("yes", "/o/VARS.fd", Some(SecureBoot::On)),
+            Some(SecureBoot::On)
+        );
+        assert_eq!(
+            state("yes", "/o/VARS.ms.fd", Some(SecureBoot::Setup)),
+            Some(SecureBoot::Setup)
+        );
+        // A loader that says Secure Boot is off stays off: the record only separates setup from on.
+        assert_eq!(
+            state("no", "/o/VARS.fd", Some(SecureBoot::On)),
+            Some(SecureBoot::Off)
+        );
+        // `describe_vm` reports the recorded mode through both of its fields.
+        let xml = "<domain><os><loader secure='yes' type='pflash'>/o/C.fd</loader>\
+                   <nvram template='/o/custom.bin'>/v.vars</nvram></os></domain>";
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let os = child(doc.root_element(), "os");
+        assert_eq!(
+            secure_boot_fields(true, os, Some(SecureBoot::Setup)),
+            (Some(false), Some("setup"))
+        );
+    }
+
+    #[test]
+    fn recording_the_firmware_keeps_every_other_owner_attribute_and_the_rest_of_the_definition() {
+        let before = Owner {
+            template: Some("debian13".into()),
+            generation: Some(2),
+            expires: Some(99),
+            secure_boot: Some(SecureBoot::Setup),
+            ..Owner::default()
+        };
+        let xml = replace_owner(&template_vm_xml(), &before).unwrap();
+        let new = with_firmware_record(&xml, "/o/CODE.fd", &"cd".repeat(32)).unwrap();
+        let after = owner_in_domain_xml(&new).unwrap().unwrap();
+        assert_eq!(
+            after,
+            Owner {
+                firmware_code: Some("/o/CODE.fd".into()),
+                firmware_sha256: Some("cd".repeat(32)),
+                ..before
+            }
+        );
+        let old_owner = xml.find("<vmm:owner").unwrap();
+        assert_eq!(&xml[..old_owner], &new[..old_owner]);
+    }
+
+    #[test]
+    fn the_firmware_record_never_gives_a_vm_an_owner_element() {
+        // The guardrail: only the create tools set the owner element, so a record written to a definition without
+        // one fails, and never claims the VM.
+        let record = |xml: &str| with_firmware_record(xml, "/o/CODE.fd", &"ab".repeat(32));
+        assert!(record("<domain><name>x</name></domain>").is_err());
+        assert!(record("<domain><name>x</name><metadata/></domain>").is_err());
+        let foreign = "<domain><name>x</name><metadata>\
+                       <o:owner xmlns:o='http://example.com/o'/></metadata></domain>";
+        let err = record(foreign).unwrap_err().to_string();
+        assert!(err.contains("no owner element"), "{err}");
+    }
+
+    #[test]
+    fn a_firmware_record_is_written_once() {
+        let owner = Owner {
+            firmware_code: Some("/o/CODE.fd".into()),
+            firmware_sha256: Some("ab".repeat(32)),
+            ..Owner::default()
+        };
+        let xml = replace_owner(&template_vm_xml(), &owner).unwrap();
+        assert!(with_firmware_record(&xml, "/o/OTHER.fd", &"cd".repeat(32)).is_err());
     }
 
     #[test]

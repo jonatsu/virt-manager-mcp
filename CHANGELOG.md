@@ -58,6 +58,14 @@ Each release's section lists what changed for people who run the server and for 
 - `create_vm` and `create_vm_from_template` refuse the VM name `tpl`, which the server keeps for the names of
   template volumes. Name the VM anything else; `tpl2` and `my-tpl` are fine, and VMs already named `tpl` stay as they
   are.
+- The first `start_vm`, `create_vm_from_template` or `reset_vm` start of a UEFI VM that the server made, with its
+  variables in the pool, records the firmware code file libvirt chose and its SHA-256 in the VM's owner metadata
+  (`firmware_code` and `firmware_sha256`). A VM that `virsh` or virt-manager started first, and a
+  VM made before this change, carry no record. The record changes only the persistent definition.
+- `create_vm` and `create_vm_from_template` also write the `secure_boot` mode into a UEFI VM's owner metadata, and
+  `describe_vm` reports it. Before, `describe_vm` guessed setup from on by the variables template's file name for a
+  VM with its firmware pinned by path (one that hibernates), which a template with another name defeats. VMs made
+  earlier keep the guess.
 
 ## 0.4.0
 

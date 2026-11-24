@@ -51,7 +51,8 @@ The server's safety comes from operator config that defaults to deny. Do not wea
   `"*"`. While VM management is on, VMs the server created stay visible too.
 - `is_owned` in `src/manage.rs` reads the owner element in the `OWNER_NS` metadata namespace. Only the create tools
   set it, inside the new domain's XML. No tool may add it to an existing VM, because an agent could then claim another
-  VM; a reset rewrites only its attributes, on a VM that already has it.
+  VM; the server rewrites its attributes (`generation`, `expires` and the firmware record) only on a VM that already
+  has it.
 - `Hypervisor::can_manage` in `src/hypervisor.rs` limits management tools to owned VMs and to `manage_vms`.
 - Deletion removes only volumes in the configured `disk_pool`.
 

@@ -137,6 +137,7 @@ mod tests {
             template: Some("debian13".into()),
             generation: Some(1),
             expires,
+            ..Owner::default()
         }
     }
 

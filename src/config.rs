@@ -147,6 +147,16 @@ impl SecureBoot {
             Self::Setup => "setup",
         }
     }
+
+    /// The mode a word from `as_str` names, or `None` for any other text.
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "off" => Some(Self::Off),
+            "on" => Some(Self::On),
+            "setup" => Some(Self::Setup),
+            _ => None,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for SecureBoot {

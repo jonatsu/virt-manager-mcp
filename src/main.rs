@@ -7,6 +7,7 @@ mod consolelog;
 mod dirpull;
 mod display;
 mod events;
+mod firmware;
 mod fsops;
 mod guestpath;
 mod hypervisor;

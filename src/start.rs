@@ -281,6 +281,8 @@ impl State {
         flags: u32,
         tool: &'static str,
     ) -> Result<String> {
+        // Read before the start, whose first run makes the variables file the decision rests on.
+        let record_firmware = manage::firmware_record_due(&self.hv, dom, name);
         let console = boot(
             &self.consoles,
             &self.events,
@@ -299,8 +301,20 @@ impl State {
                 log: self.hv.config.console_log().as_ref(),
             },
         )?;
-        // libvirt creates a UEFI VM's variables file at its first start, and the pool lists it only after a scan.
-        if !self.hv.config.manage.disk_pool.is_empty()
+        // The record needs the management lock, and a failure to take it leaves the start as it is. Neither callers of
+        // this function nor the start itself hold that lock.
+        let recorded = record_firmware
+            && match manage::record_firmware(&self.hv, uuid, name) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!("cannot record the firmware of '{name}': {e:#}");
+                    false
+                }
+            };
+        // libvirt creates a UEFI VM's variables file at its first start, and the pool lists it only after a scan,
+        // which the record has made already.
+        if !recorded
+            && !self.hv.config.manage.disk_pool.is_empty()
             && let Err(e) = manage::refresh_pool(&self.hv)
         {
             tracing::warn!("cannot refresh the disk pool after starting '{name}': {e:#}");

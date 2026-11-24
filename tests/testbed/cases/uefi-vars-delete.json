@@ -16,5 +16,14 @@
     "expect": {
       "contains": "deleted VM 't-uvg'"
     }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-uvv"
+    },
+    "expect": {
+      "contains": "deleted VM 't-uvv'"
+    }
   }
 ]

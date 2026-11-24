@@ -1,0 +1,31 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-uvv",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-uvv': started"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-uvv",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-uvv' is shut off"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-uvv"
+    },
+    "expect": {
+      "contains": "\"secure_boot_mode\": \"setup\""
+    }
+  }
+]
