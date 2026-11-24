@@ -1,39 +1,39 @@
 # Custom templates and images: implementation plan
 
-Status: proposed; reviewed twice by plan-critic; waits for approval of the plan and its pending decisions. Built from
+Status: approved, with the five decisions below; reviewed twice by plan-critic. Built from
 [`custom-templates-design.md`](custom-templates-design.md) at `078da8a`, which owns behaviour, and from its probes in
 [`2026-11-24-custom-templates-probes.md`](../research/2026-11-24-custom-templates-probes.md). Roadmap outcome 5 in
 [`fork-roadmap.md`](fork-roadmap.md) is the outcome. This plan owns order and checks. Progress goes in the execution
 record at the end.
 
-## Decisions pending the owner's confirmation
+## Decisions the design left open
 
 The design is silent on five points that the build has to settle. The plan builds each as stated here. A different
 answer changes only the units named, and the rejected options are listed so that the review can weigh them.
 
 1. **Volume name clash (units 2, 22, 24).** A VM named `tpl` with a snapshot `s1` makes the volume `tpl@s1.vars`,
-   which is also the variables volume of a template named `s1`. This amends the design's Names text and its invariant
-   that no VM or snapshot name can produce a template's volume name, and unit 25 edits both. Provisional: no new VM
-   may be named `tpl`, with a refusal test; `snapshot_create` refuses a VM that already has that name; and copies and
+   which is also the variables volume of a template named `s1`. The design's Names text and its invariant that no VM
+   or snapshot name can produce a template's volume name carry this amendment. Decided: no new VM may be named `tpl`,
+   with a refusal test; `snapshot_create` refuses a VM that already has that name; and copies and
    journals are deleted by their exact derived names, never by an `<vm>@` prefix. Rejected: a template prefix that no
    VM name can match, such as `@tpl@`, which renames every template volume the design names.
-2. **`describe_vm` output (unit 3).** Provisional: `secure_boot` stays a boolean, where setup mode reads as false,
+2. **`describe_vm` output (unit 3).** Decided: `secure_boot` stays a boolean, where setup mode reads as false,
    and a new field `secure_boot_mode` holds `"off"`, `"on"` or `"setup"`. Rejected: replacing the boolean with a
    string, which breaks every reader of the field.
-3. **`create_vm` with `disk_image` (unit 15).** Provisional: a synchronous upload on its own libvirt connection,
+3. **`create_vm` with `disk_image` (unit 15).** Decided: a synchronous upload on its own libvirt connection,
    under a new key `limits.max_disk_image_gib` with the fixed default 8 GiB, counted on the image's data size, which
    keeps it inside a client's call timeout at disk speed. The manage lock is taken only to define the VM, after a
    recheck of the name and `max_vms`, and `disk_gib` is refused beside `disk_image`. Larger images go through
    `template_create` and then a VM from that template. Rejected: the whole upload under the manage lock, which blocks
    every other management call for its length, and a background transfer, which needs a claim on the name and on
    `max_vms` while it runs.
-4. **Format of an image (units 14, 15, 16).** Provisional: the server probes the content. The qcow2 magic means
+4. **Format of an image (units 14, 15, 16).** Decided: the server probes the content. The qcow2 magic means
    qcow2, and no magic means raw. An optional `format: "raw"` forces raw, and a forced-raw file that carries the magic
    is refused, as the design says. A qcow2 is still refused when it names a backing file or an external data file, or
    is encrypted, which is what makes the probe safe. Rejected: a required `format` parameter, which asks every caller
    for what the file already says, and the file extension, which cannot tell a raw file that carries the magic from a
    qcow2 file.
-5. **Revert of a running VM (unit 23).** The design describes only the revert of a shut-off VM. Provisional: a
+5. **Revert of a running VM (unit 23).** The design describes only the revert of a shut-off VM. Decided: a
    revert of a running VM to a snapshot that has variable or TPM copies is refused, with the advice to run `stop_vm`
    first. Rejected: copying the files after libvirt stops the VM, because libvirt stops it inside the revert call and
    no step of the server runs between the stop and the disk revert.
@@ -974,7 +974,7 @@ TPM" section in `docs/vm-management.md` documents `swtpm-tools` and the AppArmor
 `config.example.toml` holds every key; `docs/file-transfer.md` mentions the import's use of share directories. The
 README's Terms entry for template says that an agent can also register one, by sealing a VM or importing an image, and
 its tool table gains the new tools; the wording of that Terms entry is for the plan review. The design takes every
-detail the build settled differently, among them the reserved VM name `tpl` in its Names text and invariants, marks its
+detail the build settled differently (the reserved VM name `tpl` is already in its Names text and invariants), marks its
 open question answered by unit 1, and changes `AGENTS.md` for the guardrails, as unit 9 did. `CHANGELOG.md` is complete,
 including the notes the design asks for (rollback past this change is unsupported for VMs from a sealed template) and
 the new `secure_boot_mode` field of `describe_vm`.

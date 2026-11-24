@@ -52,8 +52,10 @@ Device passthrough was settled in the same interview but is its own roadmap item
 ### Names
 
 Agent-made template volumes and the copies of variables and TPM state use `@`, which no VM or snapshot name can
-contain, because `check_name` allows only `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. A VM can therefore never be named so
-that its volumes land on a template's:
+contain, because `check_name` allows only `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. One clash remains: a VM named `tpl`
+with a snapshot `s1` would make `tpl@s1.vars`, the variables of a template named `s1`. No new VM may therefore be named
+`tpl`, `snapshot_create` refuses a VM that already has that name, and copies are deleted by their exact derived names,
+never by a `<vm>@` prefix. With that rule no VM can be named so that its volumes land on a template's:
 
 | Volume | Holds |
 | -- | -- |
@@ -366,7 +368,7 @@ advertised when the resolver finds any template source: a config template, or `a
 - No imported image or `disk_image` names a backing file or an external data file when it is uploaded, and no seal
   copies a disk whose format or header could make libvirt follow a backing file.
 - No VM or snapshot name can produce a template's volume name or another VM's or snapshot's variables or TPM state
-  volume.
+  volume, given that no VM the server manages is named `tpl`.
 - A template is usable only when its record says `ready`, its checksum holds, and every volume it needs exists.
 - Templates never carry TPM state or host devices.
 - A VM's TPM state is a volume in `disk_pool` that the server makes and deletes, never a path an agent names, and no
