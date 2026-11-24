@@ -192,3 +192,143 @@ SWTPM_NVRAM_StoreData: Error (fatal) opening /var/lib/libvirt/images/agent-vms/t
 
 TPM state in the pool therefore needs a root-made rule for the pool directory in
 `/etc/apparmor.d/local/usr.bin.swtpm`, and swtpm ownership of the state, on every host that runs the server.
+
+## TPM state in the pool, with the AppArmor rule
+
+The previous section ended with AppArmor refusing the pool path. This probe reran it after a temporary rule went into
+`/etc/apparmor.d/local/usr.bin.swtpm` and the profile was reloaded:
+
+```text
+owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,
+owner /var/lib/libvirt/images/agent-vms/*.tpmdir/** rwk,
+```
+
+Host and guests are as above (libvirt 12.0.0, swtpm 0.10.1), plus an `<interface type='network'><source
+network='default'/></interface>` and a systemd-networkd DHCP file in the guest, so that `apt-get install tpm2-tools` could
+run. The persistent-handle checks used `tpm2_createprimary` and `tpm2_evictcontrol` to `0x81000001`, then
+`tpm2_getcap handles-persistent` and `handles-nv-index`. The endorsement key (EK) is the first 16 hex digits of the
+SHA-256 of `tpm2_readpublic -c 0x81010001 -o ek.pub`. The VMs were `t-tp2` (dir form) and `t-tp3` (file form), UEFI with
+Secure Boot off as in probe 2. `journalctl -k` showed no swtpm denial from the profile after the reload, in any run below.
+
+### Question 1: which form works, and what must exist first
+
+| Form | Result | Evidence |
+| -- | -- | -- |
+| `type='dir'` | Works with nothing created beforehand | `<source type='dir' path='/var/lib/libvirt/images/agent-vms/t-tp2.tpmdir'/>`; libvirt creates the directory at first start, mode 0700, owner `114:117` (`swtpm:swtpm`); after `pool-refresh` it is a volume of type `dir` |
+| `type='file'`, no volume, or an empty, zero-filled or root-owned one | Fails | `Could not run '/usr/bin/swtpm_setup'. exitstatus: 1`, with no AppArmor denial. Tried: missing; 8 MiB root-owned; 8 MiB owned by `114:114`; 0 bytes owned by `114:117` |
+| `type='file'`, a volume of `114:117` holding valid swtpm state | Works | `<source type='file' path='/var/lib/libvirt/images/agent-vms/t-tp3.tpm'/>`; the VM started, with `/dev/tpm0` and `/dev/tpmrm0` |
+
+The file form fails for a reason that is not AppArmor. libvirt runs `swtpm_setup --tpm-state file://…` as uid 114 with
+`--not-overwrite`. When the file is empty, swtpm_setup unlinks and recreates it, and uid 114 cannot do that in the
+root-owned pool directory (mode 0711). The same call as an unprivileged user reproduces it: in a directory without write
+permission, `swtpm_setup 0.10.1` stops with `Couldn't unlink file for clearing …: Permission denied` and exit 1, while the
+same file in a writable directory succeeds. A file that already holds valid state is left alone, so the start passes.
+Three things follow for the file form:
+
+- The volume must be owned by the swtpm user and group. libvirt does not change the owner of a pool file (a root-owned
+  copy of valid state failed the same way). Create it from volume XML, with `uid 114` and `gid 117` read from
+  `getent passwd swtpm` and not hard-coded:
+
+  ```xml
+  <volume><name>t-tp3.tpm</name><capacity unit='bytes'>4288</capacity>
+    <target><format type='raw'/><permissions><owner>114</owner><group>117</group><mode>0600</mode></permissions></target>
+  </volume>
+  ```
+
+  `virsh vol-create agent-vms vol.xml`, then `virsh vol-upload --pool agent-vms t-tp3.tpm state.tpm`. The upload keeps the
+  owner and sets the capacity to the file's size.
+- The content must be swtpm state that the server makes as itself, in a scratch directory:
+  `swtpm_setup --tpm2 --tpmstate file://$PWD/state.tpm --createek --lock-nvram --not-overwrite --pcr-banks sha256 --config
+  /etc/swtpm_setup.conf` on an empty file. The result is 4288 bytes with a fresh EK each run. It has no EK or platform
+  certificate, because `swtpm_localca` needs `/var/lib/swtpm-localca`, so the guest has none of the NV indices `0x1c00002`,
+  `0x1c00016` and `0x1c08000`. Fresh state made by libvirt itself (the dir form) has them. A user-owned localca configuration was not tried.
+- The state file grows: 4288 bytes at creation and 8384 after one persistent handle, so the volume capacity is not fixed.
+
+Ownership after the start stays `114:117` in both forms, and the mode stays 0600 (file) or 0700 (dir).
+
+### Question 2: the TPM works and keeps a stored value
+
+Holds in both forms. In each guest `tpm2_getcap handles-persistent` listed `0x81010001` and `0x81010016`; after the
+`tpm2_evictcontrol` it also listed `0x81000001`. After `virsh shutdown`, `virsh start` and a wait for the guest agent, the
+same three handles were present and the EK hash was unchanged (`8f9974cccc05cdf8` for dir, `a9614d7ee682e4ed` for file).
+
+### Question 3: deleting the state gives an empty TPM, with the UUID kept
+
+| Form | Method | Result |
+| -- | -- | -- |
+| file | Shut off; `vol-delete`; create the volume again with the XML above; `vol-upload` of freshly made state; start | Holds. The handle `0x81000001` is gone, and the EK hash went from `a9614d7ee682e4ed` to `7a927db8c847e97a`. The UUID stayed `72206cfd-…`, and `virsh list --all` showed the VM at every step |
+| dir | `vol-delete t-tp2.tpmdir` | Fails: `cannot remove directory …: Directory not empty`. `vol-wipe` fails (`Is a directory`), and `vol-clone` of a dir volume makes an empty regular file, not a copy |
+| dir | Shut off; `virsh define` the same XML with another path (`t-tp2b.tpmdir`); start | Works. The handle is gone, the EK hash went from `8f9974cccc05cdf8` to `f175fbfd1f92e9ca`, libvirt made the state with its certificates (`0x1c00002` and the others), and the UUID stayed `fb23d6aa-…`. The old directory stays in the pool, and the storage API cannot delete it |
+
+The pool API cannot empty a directory state, so the dir form can only reset by switching paths and leaks the old directory
+until a domain that points at it is undefined with `--tpm`. I removed my leftover that way.
+
+### Question 4: snapshot revert with a copy made by the server
+
+Holds, in the file form. `t-tp3` was shut off with `0x81000001` set; `virsh snapshot-create-as t-tp3 s1` made an internal
+disk snapshot, and `virsh vol-clone --pool agent-vms t-tp3.tpm t-tp3.s1.tpm` copied the state (the copy kept `114:117`
+and 8384 bytes). After a start, the guest got a marker file and the handle `0x81000002`; then a shutdown. The revert
+restored the disk and the state:
+
+- `virsh vol-download --pool agent-vms t-tp3.s1.tpm s1.dl`, then `virsh vol-upload --pool agent-vms t-tp3.tpm s1.dl` over
+  the existing volume (owner kept), or `vol-delete` of `t-tp3.tpm` followed by `vol-clone … t-tp3.s1.tpm t-tp3.tpm`
+  (owner kept too). Both gave handles `0x81000001 0x81010001 0x81010016`, with the added handle gone, and the same EK.
+  Each was tried after a new change (`0x81000002`, then `0x81000003`).
+
+libvirt's own commands leave the TPM state alone:
+
+- `virsh snapshot-revert t-tp3 s1` reverted the disk (the marker file was gone) and did not touch the state file: the
+  mtime stayed and the guest still had `0x81000002`. The TPM state therefore needs the manual copy above.
+- A snapshot of the running VM, `snapshot-create-as t-tp3 s2`, was refused: `internal snapshots of a VM with pflash based
+  firmware require QCOW2 nvram format`. That refusal comes from the raw `<nvram>`, not from the TPM.
+- `snapshot-create-as … --disk-only --diskspec vda,file=…` on the running VM succeeded and did not touch the state.
+
+### Question 5: `virsh undefine` with an external TPM source
+
+The default removes the pool state; `--keep-tpm` keeps it. Checked with `virsh pool-refresh agent-vms` before each
+`vol-list`, since a listing without a refresh showed the removed volume as still there (an early misreading of mine):
+
+| Flags | File form: pool file afterwards |
+| -- | -- |
+| none | deleted |
+| `--tpm` | deleted |
+| `--nvram` | deleted |
+| `--nvram --tpm` | deleted |
+| `--keep-nvram` | deleted |
+| `--keep-tpm` | kept |
+| `--nvram --keep-tpm` | kept |
+
+The dir form behaved the same: `--nvram --keep-tpm` left the directory, and a following `undefine --nvram` removed it,
+with its contents. So `--tpm` is not needed to delete, and `--keep-tpm` is the way to keep. A server that deletes the volume
+itself must pass `--keep-tpm`, or libvirt deletes it first.
+
+### Question 6: the rule lines
+
+I could not edit the rule, so I could not prove any line unnecessary by removing it. What the runs support:
+
+- Both lines were present in every run and no swtpm denial was logged, so together they are sufficient for both forms.
+- `owner` is sufficient: the state file or directory and everything swtpm creates in it carries uid 114, and swtpm
+  runs as uid 114.
+- The `.tpmdir/**` line cannot matter to the file form, and the `.tpm` line cannot match any path in the dir form (the glob
+  `*.tpm` does not match `x.tpmdir/…`), so each form needs only its own line. Neither claim was tested by removal.
+- The earlier denial was `mknod` on a path under the directory, which `**` now covers. The directory itself needed no rule.
+
+Recommended rule, for the file form:
+
+```text
+owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,
+```
+
+### What it means for the design
+
+Both forms work on a host with the rule, and either lets `reset_vm` keep the UUID and never leave the VM undefined, so the
+"new UUID" workaround of probe 2 is not needed. The file form resets in place and copies for snapshots with
+`vol-clone` or `vol-download` plus `vol-upload`. It needs three things from the server: create the volume owned by the swtpm
+user, generate state with `swtpm_setup` as itself, and accept a TPM without EK certificates unless it sets up its own
+localca. The dir form needs none of that and gets libvirt's certificates, but it cannot be emptied or copied through the
+pool, so a reset leaks a directory per reset until the domain is undefined. I recommend the file form with the one-line
+rule. Whether to accept the missing certificates, and whether to ask operators for a root-made rule on every host, is the
+owner's decision. Without the rule the design's TPM-on-reset decision stays as probe 2 found it.
+
+All VMs and volumes of this probe (`t-tp1` to `t-tp4`, their overlays, `.vars` files, state files and snapshot copies)
+were deleted afterwards.
