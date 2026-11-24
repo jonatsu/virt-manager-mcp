@@ -202,6 +202,8 @@ pub struct NewVm {
     pub secure_boot: SecureBoot,
     pub iso: Option<String>,
     pub driver_iso: Option<String>,
+    /// More read-only SATA CD-ROMs after the installer and driver drives, at most `MAX_EXTRA_ISOS`.
+    pub extra_isos: Vec<String>,
     pub network: Option<String>,
 }
 
@@ -212,6 +214,12 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
     check_memory(m, vm.memory_mib)?;
     check_disk(m, vm.disk_gib)?;
     check_secure_boot(vm.uefi, vm.secure_boot)?;
+    check_extra_isos(&vm.extra_isos)?;
+    // The installer drive is always there, empty without an ISO.
+    check_sata_ports(
+        &vm.name,
+        1 + usize::from(vm.driver_iso.is_some()) + vm.extra_isos.len(),
+    )?;
     let iso = vm
         .iso
         .as_deref()
@@ -222,6 +230,11 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         .as_deref()
         .map(|p| hv.config.iso_file(p))
         .transpose()?;
+    let extra_isos = vm
+        .extra_isos
+        .iter()
+        .map(|p| hv.config.iso_file(p))
+        .collect::<Result<Vec<_>>>()?;
     let network = match vm.network.clone() {
         Some(n) => Some(n),
         None => m.networks.first().cloned(),
@@ -243,10 +256,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         let vol_name = format!("{}.qcow2", vm.name);
         let vol = create_volume(&pool, &vol_name, vm.disk_gib)?;
         let disk = vol.get_path()?;
-        let mut disks = vec![Disk::Qcow2(&disk), Disk::Cdrom(iso.as_deref())];
-        if driver_iso.is_some() {
-            disks.push(Disk::Cdrom(driver_iso.as_deref()));
-        }
+        let disks = create_disks(&disk, iso.as_deref(), driver_iso.as_deref(), &extra_isos);
         let xml = domain_xml(&DomainSpec {
             name: &vm.name,
             windows: vm.windows,
@@ -1162,7 +1172,8 @@ pub fn detach_disk(hv: &Hypervisor, name: &str, target: &str) -> Result<String> 
 }
 
 /// Inserts an ISO into a CD-ROM drive, or ejects it with `iso: None`. Without
-/// `target` the first CD-ROM drive is used; a shut-off VM without one gets a new drive.
+/// `target` the first CD-ROM drive is used; a shut-off VM without one gets a new drive. A `target` of the form
+/// `sd<letter>` that no device uses adds a drive there on a shut-off VM, up to q35's six SATA ports.
 pub fn set_cdrom(
     hv: &Hypervisor,
     name: &str,
@@ -1188,27 +1199,16 @@ pub fn set_cdrom(
         Some(p) => format!("inserted {}", p.display()),
         None => "ejected the medium".to_string(),
     };
-    let cdrom = disks
-        .iter()
-        .find(|d| d.device == "cdrom" && target.is_none_or(|t| d.target == t));
-    let Some(cdrom) = cdrom else {
-        if let Some(t) = target {
-            bail!("VM '{name}' has no CD-ROM drive '{t}'");
+    let cdrom = match plan_cdrom(name, &disks, active, target)? {
+        CdromPlan::Change(i) => &disks[i],
+        CdromPlan::Add(t) => {
+            let dev = format!(
+                "<disk type='file' device='cdrom'><driver name='qemu' type='raw'/>{source}<target dev='{t}' bus='sata'/><readonly/></disk>"
+            );
+            dom.attach_device_flags(&dev, sys::VIR_DOMAIN_AFFECT_CONFIG)
+                .map_err(|e| anyhow!("cannot add a CD-ROM drive: {}", e.message()))?;
+            return Ok(format!("added CD-ROM drive {t} to '{name}' and {what}"));
         }
-        if active {
-            bail!("VM '{name}' has no CD-ROM drive; shut it down to add one");
-        }
-        let used: Vec<&str> = disks.iter().map(|d| d.target.as_str()).collect();
-        let t = ('a'..='z')
-            .map(|c| format!("sd{c}"))
-            .find(|t| !used.contains(&t.as_str()))
-            .context("no free SATA target left")?;
-        let dev = format!(
-            "<disk type='file' device='cdrom'><driver name='qemu' type='raw'/>{source}<target dev='{t}' bus='sata'/><readonly/></disk>"
-        );
-        dom.attach_device_flags(&dev, sys::VIR_DOMAIN_AFFECT_CONFIG)
-            .map_err(|e| anyhow!("cannot add a CD-ROM drive: {}", e.message()))?;
-        return Ok(format!("added CD-ROM drive {t} to '{name}' and {what}"));
     };
 
     // Keep the drive's definition and swap only its <source>.
@@ -2003,6 +2003,107 @@ fn disk_xml(disks: &[Disk<'_>]) -> Vec<String> {
         .collect()
 }
 
+/// Ports of q35's built-in SATA controller.
+const SATA_PORTS: usize = 6;
+/// Most `extra_isos` one `create_vm` takes.
+const MAX_EXTRA_ISOS: usize = 4;
+
+fn check_extra_isos(isos: &[String]) -> Result<()> {
+    if isos.len() > MAX_EXTRA_ISOS {
+        bail!(
+            "extra_isos takes at most {MAX_EXTRA_ISOS} ISOs, and {} were given",
+            isos.len()
+        );
+    }
+    Ok(())
+}
+
+/// The disks of a new VM, in the order they are written: the system disk, the installer drive (empty without an
+/// ISO), the driver ISO, then the extra ISOs. `disk_xml` gives the boot order to the first writable disk and the
+/// first CD-ROM only.
+fn create_disks<'a>(
+    disk: &'a str,
+    iso: Option<&'a Path>,
+    driver_iso: Option<&'a Path>,
+    extra_isos: &'a [PathBuf],
+) -> Vec<Disk<'a>> {
+    let mut disks = vec![Disk::Qcow2(disk), Disk::Cdrom(iso)];
+    disks.extend(driver_iso.map(|p| Disk::Cdrom(Some(p))));
+    disks.extend(extra_isos.iter().map(|p| Disk::Cdrom(Some(p.as_path()))));
+    disks
+}
+
+/// How many of `disks` sit on the SATA bus, and so use a port of q35's built-in controller.
+fn sata_devices(disks: &[DiskInfo]) -> usize {
+    disks.iter().filter(|d| d.bus == "sata").count()
+}
+
+/// Refuses a VM whose SATA devices (CD-ROMs and disks on bus `sata`) would pass the controller's ports.
+fn check_sata_ports(name: &str, devices: usize) -> Result<()> {
+    if devices > SATA_PORTS {
+        bail!(
+            "VM '{name}' would have {devices} SATA devices (CD-ROM drives and SATA disks), but q35's SATA controller \
+             has {SATA_PORTS} ports"
+        );
+    }
+    Ok(())
+}
+
+/// What `set_cdrom` does with a drive.
+#[derive(Debug, PartialEq, Eq)]
+enum CdromPlan {
+    /// Change the medium of the drive at this index of the parsed disks.
+    Change(usize),
+    /// Add a drive with this target to a shut-off VM.
+    Add(String),
+}
+
+/// Whether `target` is `sd` and one lowercase letter.
+fn is_sata_target(target: &str) -> bool {
+    target
+        .strip_prefix("sd")
+        .is_some_and(|rest| rest.len() == 1 && rest.starts_with(|c: char| c.is_ascii_lowercase()))
+}
+
+/// Decides what `set_cdrom` does: change the medium of the named CD-ROM drive (the first one without a target), or
+/// add a drive at a free `sd<letter>` target on a shut-off VM within the SATA ports.
+fn plan_cdrom(
+    name: &str,
+    disks: &[DiskInfo],
+    active: bool,
+    target: Option<&str>,
+) -> Result<CdromPlan> {
+    if let Some(i) = disks
+        .iter()
+        .position(|d| d.device == "cdrom" && target.is_none_or(|t| d.target == t))
+    {
+        return Ok(CdromPlan::Change(i));
+    }
+    let target = match target {
+        Some(t) if disks.iter().any(|d| d.target == t) => {
+            bail!(
+                "'{t}' of VM '{name}' is a disk, not a CD-ROM drive (disks are changed with attach_disk and detach_disk)"
+            )
+        }
+        Some(t) if !is_sata_target(t) => {
+            bail!(
+                "VM '{name}' has no CD-ROM drive '{t}'; a new drive needs a free target of the form sd<letter>, such as sdc"
+            )
+        }
+        Some(t) => t.to_string(),
+        None if active => bail!("VM '{name}' has no CD-ROM drive; shut it down to add one"),
+        None => ('a'..='z')
+            .map(|c| format!("sd{c}"))
+            .find(|t| !disks.iter().any(|d| &d.target == t))
+            .context("no free SATA target left")?,
+    };
+    if active {
+        bail!("VM '{name}' is running; shut it down to add a CD-ROM drive at {target}");
+    }
+    check_sata_ports(name, sata_devices(disks) + 1)?;
+    Ok(CdromPlan::Add(target))
+}
+
 fn domain_xml(spec: &DomainSpec<'_>) -> String {
     // Root ports for every PCIe device plus spares, so disks and NICs can be hot-plugged.
     let mut devices = vec!["<controller type='pci' index='0' model='pcie-root'/>".to_string()];
@@ -2529,6 +2630,261 @@ mod tests {
         let (xml, _) = replace_disks(&old, &[Disk::Qcow2("/pool/t-g2.qcow2")]).unwrap();
         let xml = replace_owner(&xml, &Owner::default()).unwrap();
         assert_eq!(crash_devices(&xml), (Some("destroy".into()), vec![], None));
+    }
+
+    fn extra_isos(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| format!("/isos/{n}.iso")).collect()
+    }
+
+    /// The disks of a definition with the given (device, target, bus) triples.
+    fn disks_of(devices: &[(&str, &str, &str)]) -> Vec<DiskInfo> {
+        let body: String = devices
+            .iter()
+            .map(|(device, target, bus)| {
+                format!("<disk type='file' device='{device}'><target dev='{target}' bus='{bus}'/></disk>")
+            })
+            .collect();
+        parse_disks(&format!("<domain><devices>{body}</devices></domain>")).unwrap()
+    }
+
+    #[test]
+    fn five_extra_isos_are_refused_and_four_are_not() {
+        assert!(check_extra_isos(&extra_isos(&["a", "b", "c", "d"])).is_ok());
+        assert!(check_extra_isos(&[]).is_ok());
+        let err = check_extra_isos(&extra_isos(&["a", "b", "c", "d", "e"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("extra_isos") && err.contains("at most 4") && err.contains('5'),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn create_writes_installer_driver_and_extras_in_order_and_only_the_first_boots() {
+        let extras = [
+            PathBuf::from("/isos/x1.iso"),
+            PathBuf::from("/isos/x2.iso"),
+            PathBuf::from("/isos/x3.iso"),
+        ];
+        let xml = domain_xml(&spec(create_disks(
+            "/pool/t.qcow2",
+            Some(Path::new("/isos/install.iso")),
+            Some(Path::new("/isos/drivers.iso")),
+            &extras,
+        )));
+        let disks = parse_disks(&xml).unwrap();
+        let layout: Vec<_> = disks
+            .iter()
+            .map(|d| {
+                (
+                    d.target.as_str(),
+                    d.bus.as_str(),
+                    d.device.as_str(),
+                    d.file.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            layout,
+            [
+                ("vda", "virtio", "disk", "/pool/t.qcow2"),
+                ("sda", "sata", "cdrom", "/isos/install.iso"),
+                ("sdb", "sata", "cdrom", "/isos/drivers.iso"),
+                ("sdc", "sata", "cdrom", "/isos/x1.iso"),
+                ("sdd", "sata", "cdrom", "/isos/x2.iso"),
+                ("sde", "sata", "cdrom", "/isos/x3.iso"),
+            ]
+        );
+        // Only the system disk (1) and the installer drive (2) have a boot order; every extra drive is read-only.
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let boots: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("disk"))
+            .map(|d| {
+                let target = child(d, "target").unwrap().attribute("dev").unwrap();
+                let order = child(d, "boot").and_then(|b| b.attribute("order"));
+                (target, order, child(d, "readonly").is_some())
+            })
+            .collect();
+        assert_eq!(
+            boots,
+            [
+                ("vda", Some("1"), false),
+                ("sda", Some("2"), true),
+                ("sdb", None, true),
+                ("sdc", None, true),
+                ("sdd", None, true),
+                ("sde", None, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn create_without_a_driver_iso_puts_the_extras_right_after_the_installer() {
+        let extras = [PathBuf::from("/isos/x1.iso")];
+        let xml = domain_xml(&spec(create_disks("/pool/t.qcow2", None, None, &extras)));
+        let targets: Vec<_> = parse_disks(&xml)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.target, d.file))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                ("vda".to_string(), Some("/pool/t.qcow2".to_string())),
+                ("sda".to_string(), None),
+                ("sdb".to_string(), Some("/isos/x1.iso".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn sata_devices_counts_cdroms_and_sata_disks_but_not_virtio_ones() {
+        let extras = [
+            PathBuf::from("/isos/x1.iso"),
+            PathBuf::from("/isos/x2.iso"),
+            PathBuf::from("/isos/x3.iso"),
+        ];
+        let xml = domain_xml(&spec(create_disks(
+            "/pool/t.qcow2",
+            None,
+            Some(Path::new("/isos/drivers.iso")),
+            &extras,
+        )));
+        // The installer drive, the driver ISO and three extras; the virtio system disk uses no port.
+        assert_eq!(sata_devices(&parse_disks(&xml).unwrap()), 5);
+        let mixed = disks_of(&[
+            ("disk", "vda", "virtio"),
+            ("disk", "sda", "sata"),
+            ("cdrom", "sdb", "sata"),
+            ("disk", "sdc", "usb"),
+            ("cdrom", "hda", "ide"),
+        ]);
+        assert_eq!(sata_devices(&mixed), 2);
+    }
+
+    #[test]
+    fn six_sata_devices_fit_and_a_seventh_is_refused_by_name() {
+        assert!(check_sata_ports("t-x", 6).is_ok());
+        let err = check_sata_ports("t-x", 7).unwrap_err().to_string();
+        assert!(
+            err.contains("t-x") && err.contains('7') && err.contains("SATA") && err.contains('6'),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn set_cdrom_changes_the_named_or_first_cdrom_drive_even_when_running() {
+        let disks = disks_of(&[
+            ("disk", "vda", "virtio"),
+            ("cdrom", "sda", "sata"),
+            ("cdrom", "sdb", "sata"),
+        ]);
+        assert_eq!(
+            plan_cdrom("t-x", &disks, true, None).unwrap(),
+            CdromPlan::Change(1)
+        );
+        assert_eq!(
+            plan_cdrom("t-x", &disks, true, Some("sdb")).unwrap(),
+            CdromPlan::Change(2)
+        );
+        assert_eq!(
+            plan_cdrom("t-x", &disks, false, Some("sda")).unwrap(),
+            CdromPlan::Change(1)
+        );
+    }
+
+    #[test]
+    fn set_cdrom_adds_a_drive_at_a_free_sd_target_on_a_shut_off_vm() {
+        let disks = disks_of(&[("disk", "vda", "virtio"), ("cdrom", "sda", "sata")]);
+        assert_eq!(
+            plan_cdrom("t-x", &disks, false, Some("sdc")).unwrap(),
+            CdromPlan::Add("sdc".into())
+        );
+        // Without a CD-ROM drive, no target means the first free one.
+        let none = disks_of(&[("disk", "vda", "virtio"), ("disk", "vdb", "virtio")]);
+        assert_eq!(
+            plan_cdrom("t-x", &none, false, None).unwrap(),
+            CdromPlan::Add("sda".into())
+        );
+        assert_eq!(
+            plan_cdrom("t-x", &none, false, Some("sdc")).unwrap(),
+            CdromPlan::Add("sdc".into())
+        );
+    }
+
+    #[test]
+    fn set_cdrom_refuses_a_used_target_a_non_sd_name_and_a_running_vm() {
+        let disks = disks_of(&[
+            ("disk", "vda", "virtio"),
+            ("disk", "sda", "sata"),
+            ("cdrom", "sdb", "sata"),
+        ]);
+        // A used target that holds a disk is no CD-ROM drive.
+        for used in ["vda", "sda"] {
+            let err = plan_cdrom("t-x", &disks, false, Some(used))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(used) && err.contains("not a CD-ROM"), "{err}");
+        }
+        // Only sd<letter> names a new drive.
+        for bad in [
+            "hdc", "vdc", "sd", "sdc1", "sdAB", "SDC", "sdC", "sd1", "", "sdc'",
+        ] {
+            let err = plan_cdrom("t-x", &disks, false, Some(bad))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("sd<letter>") || err.contains("sda to sdz"),
+                "{bad}: {err}"
+            );
+        }
+        // A running VM keeps refusing to gain a drive, with or without a target.
+        for target in [Some("sdc"), None] {
+            let none = disks_of(&[("disk", "vda", "virtio")]);
+            let err = plan_cdrom("t-x", &none, true, target)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("shut it down"), "{err}");
+        }
+    }
+
+    #[test]
+    fn set_cdrom_refuses_a_seventh_sata_device_and_adds_a_sixth() {
+        let five: Vec<_> = ["sda", "sdb", "sdc", "sdd", "sde"]
+            .iter()
+            .map(|t| ("cdrom", *t, "sata"))
+            .collect();
+        let five = disks_of(&five);
+        assert_eq!(
+            plan_cdrom("t-x", &five, false, Some("sdf")).unwrap(),
+            CdromPlan::Add("sdf".into())
+        );
+        let six: Vec<_> = ["sda", "sdb", "sdc", "sdd", "sde", "sdf"]
+            .iter()
+            .map(|t| ("cdrom", *t, "sata"))
+            .collect();
+        let six = disks_of(&six);
+        let err = plan_cdrom("t-x", &six, false, Some("sdg"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("7") && err.contains("SATA"), "{err}");
+        // A SATA disk takes a port too.
+        let mixed = disks_of(&[
+            ("disk", "sda", "sata"),
+            ("cdrom", "sdb", "sata"),
+            ("cdrom", "sdc", "sata"),
+            ("cdrom", "sdd", "sata"),
+            ("cdrom", "sde", "sata"),
+            ("cdrom", "sdf", "sata"),
+        ]);
+        assert!(plan_cdrom("t-x", &mixed, false, Some("sdg")).is_err());
+        // Changing media in a full VM is no new device.
+        assert_eq!(
+            plan_cdrom("t-x", &six, false, Some("sdf")).unwrap(),
+            CdromPlan::Change(5)
+        );
     }
 
     #[test]

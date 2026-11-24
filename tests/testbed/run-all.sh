@@ -39,7 +39,7 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
   transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot templates-expiry
+  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos templates-expiry
   templates-expiry-command
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
@@ -70,6 +70,8 @@ readonly WIN_NET_VM_MIB=9216
 declare -A RESULT=()
 ORDER=()
 WORK=
+# The directory of extra-isos's ISOs; set while the case runs.
+ISO_DIR=
 PRE_VMS=
 PRE_VOLS=
 
@@ -223,6 +225,40 @@ unit_templates_reset_uefi() {
   else
     record templates-reset-saved failed "virsh managedsave t-u failed"
   fi
+}
+
+# Zero-filled ISOs in a directory under /var/tmp, which is on disk, not tmpfs like /tmp, and which the qemu user can
+# read, unlike the repository under the home directory: install, drivers and e1 are 1 MiB, and e2 to e4 are 2 to 4 MiB.
+# extra-isos reads the directory as ${iso} from vars.json and runs under config-templates.toml with that directory as
+# manage.iso_dirs and max_vms = 4, because the kept t-win11net counts toward max_vms. The case's guest check compares the
+# sizes of /dev/sr0 and /dev/sr1 with those of e1 and e3.
+unit_extra_isos() {
+  local config=${WORK}/config-extra-isos.toml name avail
+  local -A mib=([install]=1 [drivers]=1 [e1]=1 [e2]=2 [e3]=3 [e4]=4)
+  if ! ISO_DIR=$(mktemp -d /var/tmp/vmm-testbed-isos.XXXXXX) || ! chmod 755 "${ISO_DIR}"; then
+    record extra-isos failed "could not make a directory under /var/tmp"
+    return
+  fi
+  for name in "${!mib[@]}"; do
+    truncate -s "${mib[${name}]}M" "${ISO_DIR}/${name}.iso" || record extra-isos failed "could not write ${name}.iso"
+  done
+  if ! sed -e "s|^iso_dirs = \\[\\]\$|iso_dirs = [\"${ISO_DIR}\"]|" -e 's/^max_vms = 3$/max_vms = 4/' \
+    "${TESTBED}/config-templates.toml" > "${config}" \
+    || ! grep -qxF "iso_dirs = [\"${ISO_DIR}\"]" "${config}" || ! grep -qxF 'max_vms = 4' "${config}"; then
+    record extra-isos failed "could not write ${config}"
+    rm -rf -- "${ISO_DIR:?}"
+    ISO_DIR=
+    return
+  fi
+  printf '{"iso": "%s"}\n' "${ISO_DIR}" > "${WORK}/vars.json"
+  avail=$(avail_mib)
+  if ((avail >= 1024)); then
+    run_case extra-isos "${config}"
+  else
+    record extra-isos failed "needs 1024 MiB of available memory; the host has ${avail} MiB"
+  fi
+  rm -rf -- "${ISO_DIR:?}" "${WORK:?}/vars.json"
+  ISO_DIR=
 }
 
 unit_templates_expiry() {
@@ -801,6 +837,7 @@ run_unit() {
     console-after-start) unit_console_after_start ;;
     templates-reset) unit_templates_reset ;;
     templates-reset-uefi) unit_templates_reset_uefi ;;
+    extra-isos) unit_extra_isos ;;
     templates-expiry) unit_templates_expiry ;;
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;
@@ -837,6 +874,7 @@ cleanup() {
   if is_state t-win11net running; then
     win_shut_off t-win11net > /dev/null 2>&1 || echo "cleanup: could not shut t-win11net off"
   fi
+  [[ -n ${ISO_DIR} ]] && rm -rf -- "${ISO_DIR:?}"
   while read -r vm; do
     [[ ${vm} == t-* && ${vm} != t-owrt ]] || continue
     grep -qxF -- "${vm}" <<< "${PRE_VMS}" && continue

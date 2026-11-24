@@ -13,6 +13,12 @@ Each release's section lists what changed for people who run the server and for 
   refused. `describe_vm` and `list_templates` keep the boolean `secure_boot`, which reads false in setup mode, and
   add `secure_boot_mode` with `"off"`, `"on"` or `"setup"`. For `describe_vm` it is `null` when the firmware does not
   say.
+- `create_vm` takes `extra_isos`, up to four more ISOs from `iso_dirs`. Each becomes a read-only SATA CD-ROM after
+  the install and driver drives, and the VM never boots from it, so an answer-file ISO can sit beside the Windows
+  installer and virtio-win. q35's SATA controller has six ports, and `create_vm` refuses a VM that would need more.
+- `set_cdrom` on a shut-off VM adds a CD-ROM drive at a free target of the form `sd<letter>` that you name, such as
+  `sdc`. It refuses a target that a disk uses, a name that is not `sd<letter>`, a running VM, and a seventh SATA
+  device. Without a `target` it behaves as before.
 
 ### Changed
 

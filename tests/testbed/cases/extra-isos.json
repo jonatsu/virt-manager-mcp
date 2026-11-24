@@ -1,0 +1,262 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-xi",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "iso": "${iso}/install.iso",
+      "driver_iso": "${iso}/drivers.iso",
+      "extra_isos": [
+        "${iso}/e1.iso",
+        "${iso}/e2.iso",
+        "${iso}/e3.iso",
+        "${iso}/e4.iso",
+        "${iso}/e5.iso"
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "extra_isos takes at most 4",
+        "5 were given"
+      ]
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-xi",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "iso": "${iso}/install.iso",
+      "extra_isos": [
+        "/etc/hostname"
+      ]
+    },
+    "expect": {
+      "error": true,
+      "contains": "manage.iso_dirs"
+    }
+  },
+  {
+    "tool": "list_isos",
+    "args": {},
+    "expect": {
+      "contains": [
+        "install.iso",
+        "e3.iso"
+      ]
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-xi",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "iso": "${iso}/install.iso",
+      "driver_iso": "${iso}/drivers.iso",
+      "extra_isos": [
+        "${iso}/e1.iso",
+        "${iso}/e2.iso",
+        "${iso}/e3.iso"
+      ]
+    },
+    "expect": {
+      "contains": "created VM 't-xi'"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-xi"
+    },
+    "expect": {
+      "matches": "(?s)\"source\": \"[^\"]*/install\\.iso\",\\s+\"target\": \"sda\".*\"source\": \"[^\"]*/drivers\\.iso\",\\s+\"target\": \"sdb\".*\"source\": \"[^\"]*/e1\\.iso\",\\s+\"target\": \"sdc\".*\"source\": \"[^\"]*/e2\\.iso\",\\s+\"target\": \"sdd\".*\"source\": \"[^\"]*/e3\\.iso\",\\s+\"target\": \"sde\"",
+      "absent": "\"target\": \"sdf\""
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xi",
+      "target": "sdf",
+      "iso": "${iso}/e4.iso"
+    },
+    "expect": {
+      "contains": "added CD-ROM drive sdf to 't-xi'"
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xi",
+      "target": "sdg",
+      "iso": "${iso}/e4.iso"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "7 SATA devices",
+        "6 ports"
+      ]
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xi",
+      "target": "vda",
+      "iso": "${iso}/e4.iso"
+    },
+    "expect": {
+      "error": true,
+      "contains": "not a CD-ROM drive"
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xi",
+      "target": "hdc",
+      "iso": "${iso}/e4.iso"
+    },
+    "expect": {
+      "error": true,
+      "contains": "sd<letter>"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-xi"
+    },
+    "expect": {
+      "contains": "deleted VM 't-xi'"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-xt",
+      "template": "debian13",
+      "start": false
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-xt' from template 'debian13'",
+        "it is shut off"
+      ]
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xt",
+      "iso": "${iso}/e1.iso"
+    },
+    "expect": {
+      "contains": "added CD-ROM drive sda to 't-xt'"
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xt",
+      "target": "sda",
+      "iso": "${iso}/e1.iso"
+    },
+    "expect": {
+      "contains": "in sda of 't-xt'"
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xt",
+      "target": "sdc",
+      "iso": "${iso}/e3.iso"
+    },
+    "expect": {
+      "contains": "added CD-ROM drive sdc to 't-xt'"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-xt"
+    },
+    "expect": {
+      "matches": "(?s)\"source\": \"[^\"]*/e1\\.iso\",\\s+\"target\": \"sda\".*\"source\": \"[^\"]*/e3\\.iso\",\\s+\"target\": \"sdc\"",
+      "absent": "\"target\": \"sdb\""
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-xt",
+      "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": [
+        "VM 't-xt': started",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "set_cdrom",
+    "args": {
+      "vm": "t-xt",
+      "target": "sdd",
+      "iso": "${iso}/e2.iso"
+    },
+    "expect": {
+      "error": true,
+      "contains": "shut it down"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-xt",
+      "command": "ls /dev/sr*; blockdev --getsize64 /dev/sr0 /dev/sr1"
+    },
+    "expect": {
+      "contains": [
+        "/dev/sr1",
+        "\"exit_code\":0"
+      ],
+      "matches": "1048576\\s+3145728"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-xt",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-xt' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-xt"
+    },
+    "expect": {
+      "contains": "deleted VM 't-xt'"
+    }
+  }
+]

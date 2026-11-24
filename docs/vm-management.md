@@ -26,19 +26,20 @@ max_disk_gib = 32
   `list_vms` shows `managed: true` for VMs the tools may act on.
   [Give agents their own test VMs](how-to/agent-test-vms.md) sets up a server whose agents see only such VMs.
 
-- **Creating:** `create_vm` takes a name, `os` (`linux`/`windows`), vCPUs, memory, disk size,
-  `firmware` (`uefi`, the default, or `bios`), an optional TPM 2.0, an install ISO, a second
-  "driver" ISO (e.g. `virtio-win.iso` for Windows) and a network. A UEFI VM uses the host's firmware with Secure
-  Boot, which refuses an installer that is not signed. `secure_boot` takes `"on"` (the default, or `true`), `"off"` (or
-  `false`), which boots an unsigned installer, and `"setup"`, which has Secure Boot firmware with no keys enrolled so
-  the guest can enrol its own. `"off"` and `"setup"` need `firmware: "uefi"`. The VM gets a q35 machine,
-  a virtio disk (a new qcow2 volume `<name>.qcow2` in `disk_pool`), a SATA CD-ROM it boots from
-  after the disk, a virtio NIC, the guest agent channel, a serial console, SPICE and spare PCIe
-  ports for hot-plugging. Windows guests also get Hyper-V enlightenments and a local-time clock.
-  Every VM the server creates, here or from a template, also gets a panic device (`isa` for Linux, `hyperv` for
-  Windows), so a guest crash becomes libvirt's crashed event, a balloon that reports guest memory every 5 s, and
-  `manage.on_crash` as its crash action: `preserve` (the default) keeps a crashed VM stopped in place, holding its
-  memory, until `stop_vm` with `force: true`, and `destroy` stops it. The VM is created shut off.
+- **Creating:** `create_vm` takes a name, `os` (`linux`/`windows`), vCPUs, memory, disk size, `firmware` (`uefi`, the
+  default, or `bios`), an optional TPM 2.0, an install ISO, a second "driver" ISO (e.g. `virtio-win.iso` for Windows),
+  up to four `extra_isos` (such as an answer-file ISO) and a network. The driver ISO and each extra ISO are read-only
+  SATA CD-ROMs after the install drive, which is the only CD-ROM the VM boots from. q35's SATA controller has six
+  ports, one per CD-ROM or SATA disk. A UEFI VM uses the host's firmware with Secure Boot, which refuses an installer
+  that is not signed. `secure_boot` takes `"on"` (the default, or `true`), `"off"` (or `false`), which boots an
+  unsigned installer, and `"setup"`, which has Secure Boot firmware with no keys enrolled so the guest can enrol its
+  own. `"off"` and `"setup"` need `firmware: "uefi"`. The VM gets a q35 machine, a virtio disk (a new qcow2 volume
+  `<name>.qcow2` in `disk_pool`), a SATA CD-ROM it boots from after the disk, a virtio NIC, the guest agent channel, a
+  serial console, SPICE and spare PCIe ports for hot-plugging. Windows guests also get Hyper-V enlightenments and a
+  local-time clock. Every VM the server creates, here or from a template, also gets a panic device (`isa` for Linux,
+  `hyperv` for Windows), so a guest crash becomes libvirt's crashed event, a balloon that reports guest memory every 5
+  s, and `manage.on_crash` as its crash action: `preserve` (the default) keeps a crashed VM stopped in place, holding
+  its memory, until `stop_vm` with `force: true`, and `destroy` stops it. The VM is created shut off.
 
 - **Disposable VMs from templates:** `create_vm_from_template` makes a VM in seconds from a template
   volume the operator prepared, such as a Debian 13 cloud image with the guest agent installed
@@ -77,7 +78,9 @@ max_disk_gib = 32
 - **Reconfiguring:** `configure_vm` changes vCPUs and memory in the persistent configuration
   (takes effect at the next boot). `attach_disk` creates a new volume in `disk_pool` and attaches
   it, also while the VM is running. `detach_disk` needs the VM shut off and **deletes** the volume
-  if it is in `disk_pool`. `set_cdrom` inserts or ejects ISOs, `attach_nic`/`detach_nic` add and
+  if it is in `disk_pool`. `set_cdrom` inserts or ejects ISOs; on a shut-off VM, a
+  `target` of the form `sd<letter>` that no device uses adds a new CD-ROM drive there, within the six SATA ports.
+  `attach_nic`/`detach_nic` add and
   remove interfaces on allowed networks. `describe_vm` shows targets and MAC addresses.
 
 - **Limits:** `max_vcpus`, `max_memory_mib` and `max_disk_gib` apply to create and reconfigure. `max_total_memory_mib`,

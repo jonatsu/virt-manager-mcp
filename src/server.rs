@@ -544,6 +544,11 @@ pub struct CreateVmParams {
     /// Second ISO attached as another CD-ROM, e.g. virtio-win.iso so a Windows installer can load
     /// the virtio disk and network drivers.
     pub driver_iso: Option<String>,
+    /// Up to 4 more ISOs (absolute host paths from list_isos), each attached as a read-only CD-ROM after the
+    /// install and driver drives, for example an answer-file ISO. They are never booted from. q35 has 6 SATA
+    /// ports, and every CD-ROM uses one.
+    #[serde(default)]
+    pub extra_isos: Vec<String>,
     /// libvirt network to connect to (default: the first allowed network; none if no network is allowed).
     pub network: Option<String>,
 }
@@ -612,7 +617,8 @@ pub struct SetCdromParams {
     pub vm: String,
     /// Absolute host path of an ISO (from list_isos). Omit to eject.
     pub iso: Option<String>,
-    /// CD-ROM target as shown by describe_vm, e.g. "sda". Omit for the first CD-ROM drive.
+    /// CD-ROM target as shown by describe_vm, e.g. "sda". Omit for the first CD-ROM drive. On a shut-off VM, a
+    /// free target of the form sd<letter>, such as "sdc", adds a new drive there; q35 has 6 SATA ports.
     pub target: Option<String>,
 }
 
@@ -1904,7 +1910,7 @@ impl VirtServer {
             idempotent_hint = false
         ),
         description = "Create a new VM (shut off; start it with start_vm). It gets a new qcow2 system disk, an empty \
-        or ISO-loaded SATA CD-ROM it boots from after the disk, a virtio NIC, the QEMU guest agent channel, a serial \
+        or ISO-loaded SATA CD-ROM it boots from after the disk (driver_iso and up to 4 extra_isos add more), a virtio NIC, the QEMU guest agent channel, a serial \
         console and a SPICE display. The guest agent must still be installed inside the guest. Limits and allowed \
         networks are named in the server instructions."
     )]
@@ -1926,6 +1932,7 @@ impl VirtServer {
                     secure_boot: p.secure_boot,
                     iso: p.iso,
                     driver_iso: p.driver_iso,
+                    extra_isos: p.extra_isos,
                     network: p.network,
                 },
             )?;
@@ -2170,7 +2177,8 @@ impl VirtServer {
             idempotent_hint = true
         ),
         description = "Insert an ISO (from list_isos) into a managed VM's CD-ROM drive, or eject it by omitting iso. \
-        Works while the VM is running. A shut-off VM without a CD-ROM drive gets one added."
+        Works while the VM is running. A shut-off VM without a CD-ROM drive gets one added, and a shut-off VM gets \
+        another at a free sd<letter> target you name, up to 6 SATA devices."
     )]
     async fn set_cdrom(
         &self,
@@ -2951,6 +2959,29 @@ mod tests {
         let text = schema["properties"]["secure_boot"].to_string() + &schema["$defs"].to_string();
         for offered in ["boolean", "off", "on", "setup"] {
             assert!(text.contains(offered), "{offered} missing from {text}");
+        }
+    }
+
+    #[test]
+    fn create_vm_extra_isos_defaults_to_none_and_takes_a_list_of_paths() {
+        let base = |extra: Option<Value>| {
+            let mut params = json!({
+                "name": "t-x", "os": "linux", "vcpus": 1, "memory_mib": 512, "disk_gib": 1
+            });
+            if let Some(v) = extra {
+                params["extra_isos"] = v;
+            }
+            serde_json::from_value::<CreateVmParams>(params)
+        };
+        assert!(base(None).unwrap().extra_isos.is_empty());
+        assert_eq!(
+            base(Some(json!(["/isos/a.iso", "/isos/b.iso"])))
+                .unwrap()
+                .extra_isos,
+            ["/isos/a.iso", "/isos/b.iso"]
+        );
+        for bad in [json!("/isos/a.iso"), json!([1]), json!({"a": 1})] {
+            assert!(base(Some(bad.clone())).is_err(), "{bad} was accepted");
         }
     }
 
