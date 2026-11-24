@@ -68,11 +68,12 @@ one name space covers config and agent-made templates.
 ### The record
 
 The record is a JSON document padded to a fixed 64 KiB, with its SHA-256 inside, written in one upload and read back to
-confirm it. It holds the template's origin (`sealed` or `imported`), its state (`building` or `ready`), the seal's ID,
-the sealed VM's UUID, OS, machine type, disk bus, firmware, firmware code file path and SHA-256, Secure Boot mode, TPM,
-memory, vCPUs, seed choice, hibernation setting and creation time. The checksum detects a torn or damaged record; it
-does not authenticate one, and anyone who can write the pool can forge a record, as they can forge any volume. The
-server therefore never trusts the record further than it must:
+confirm it. A write that does not read back is retried twice; after that the seal fails, the template stays incomplete,
+and `template_delete` removes it. It holds the template's origin (`sealed` or `imported`), its state (`building` or
+`ready`), the seal's ID, the sealed VM's UUID, OS, machine type, disk bus, firmware, firmware code file path and
+SHA-256, Secure Boot mode, TPM, memory, vCPUs, seed choice, hibernation setting and creation time. The checksum detects
+a torn or damaged record; it does not authenticate one, and anyone who can write the pool can forge a record, as they
+can forge any volume. The server therefore never trusts the record further than it must:
 
 - volume names come from the template name, never from the record;
 - a firmware code path is used only when one of the host's firmware descriptors in `/usr/share/qemu/firmware` names it;
@@ -120,20 +121,27 @@ flowchart LR
    - a VM whose owner element the server did not write, read with `owner_of` and not `can_manage`, so a VM in
      `manage_vms` is refused;
    - a VM that is not shut off;
-   - a UEFI VM without a `<vm>.vars` volume, which covers UEFI VMs made before this design such as `t-win11`;
+   - a UEFI VM without a `<vm>.vars` volume, which covers UEFI VMs made before this design such as `t-win11`, and a UEFI
+     VM whose firmware code file changed since its first start. The server records, in the VM's owner element, the code
+     file path and SHA-256 that libvirt resolved at the VM's first start, read from the live definition, and the seal
+     takes the record's firmware from there, never from a fresh match against the descriptors. A VM whose first start
+     the server did not make has no such entry and is refused;
    - a VM with a second writable disk;
    - a boot disk whose format in the VM's definition differs from the format libvirt reports for its volume, and a raw
      boot disk whose first 4 KiB, read through a download stream, begin with the qcow2 magic. A guest writes its own
      raw disk, and libvirt would probe such a disk as a qcow2 that names a backing file of the guest's choosing;
    - a name in use, and a seal that would pass `max_templates`, `max_template_gib` or the free space. The space
      estimate is the boot disk's allocated size, its chain included.
-2. The mark is a `sealing` attribute on the VM's owner element, holding the template name, the seal's ID and its start
-   time. A mark is live only while its seal lock is held; a mark whose lock is free is stale, ignored, and cleared by
-   the next call that finds it. Every management call that changes a VM, `start_vm` and `stop_vm` included, checks the
-   mark after it takes the manage lock, through one helper, and refuses a live one, naming the template; so does the
-   expiry sweep. The snapshot tools take the manage lock for this, which they do not today. Only the server writes owner
-   attributes, as for `generation` and `expires`. Other libvirt clients, such as `virsh` or virt-manager, ignore the
-   mark; step 5 catches what they change.
+2. The mark is a `sealing` attribute on the VM's owner element, holding the template name, the seal's ID, its start
+   time, and the uid and lock path of the process that holds it. A mark is live while that seal lock is held. A process
+   with the same uid and lock path that finds the lock free treats the mark as stale, ignores it, and clears it; any
+   other process treats the mark as live until it is 24 hours old, because it cannot see the lock. Every management call
+   that changes a VM, `start_vm` and `stop_vm` included, checks the mark under the manage lock, through one helper, and
+   refuses a live one, naming the template; so does the expiry sweep. `start_vm` holds the lock only for the check and
+   libvirt's create call, not for the rest of its boot, and the snapshot tools hold it only for the steps that copy
+   variables; step 5 covers the moments outside the lock. Only the server writes owner attributes, as for `generation`
+   and `expires`. Other libvirt clients, such as `virsh` or virt-manager, ignore the mark; step 5 catches what they
+   change.
 3. The record is created with state `building` and the volume-existence check, which claims the name. A seal cut short
    by a crash leaves a `building` record and a free seal lock. `template_delete` of a `building` record refuses while
    the seal lock is held, so it never deletes under a running copy; once the lock is free, it deletes the volumes. The
@@ -145,9 +153,11 @@ flowchart LR
 5. Before it writes `ready`, the server confirms that the VM is still shut off and that the modification times of its
    boot disk and `<vm>.vars`, read from the volume XML, are those it saw when it marked the VM. Anything else fails the
    seal.
-6. The call returns a transfer ID at once. The copy runs on its own libvirt connection, so it does not hold the shared
-   connection's lock for minutes. `wait_for` with `transfer_done` ends with the result or the failure. A failure deletes
-   the volumes the seal made and clears the mark.
+6. When the transfer cannot start, for example because `max_transfers` is reached, the record, the mark and the seal
+   lock are rolled back before the call returns the refusal. Otherwise the call returns a transfer ID at once. The copy
+   runs on its own libvirt connection, so it does not hold the shared connection's lock for minutes. `wait_for` with
+   `transfer_done` ends with the result or the failure. A failure deletes the volumes the seal made and clears the mark.
+   A copy that hangs inside libvirt holds the seal lock until the server process ends; there is no cancel.
 
 A guest that hibernated, rather than shut down, carries its hibernation image in its swap, and a seal copies it, so
 every VM from the template would try to resume it. Shut such a guest down before sealing it; the server cannot tell.
@@ -181,12 +191,13 @@ seal and runs in the background the same way, with the template name as the tran
 ### Firmware in a VM's definition
 
 A VM that is not made from a sealed template keeps libvirt's firmware autoselection, as today: `firmware='efi'`, the
-mode's features and `<loader type='pflash'/>`, plus an `<nvram>` element naming `<vm>.vars` in the pool. libvirt keeps
-a user-given variables path under autoselection and, at the first start, creates the file from the chosen
-descriptor's variables template, so code and variables always come from one descriptor and nothing pins a firmware path
-in the VM's definition. Before defining the VM, the server checks that no `<vm>.vars` volume exists, so a leftover file
-fails the create loudly instead of being reused. A VM that has never started has no `<vm>.vars` yet; a snapshot of it
-copies nothing, and a seal refuses it. On this host the features select:
+mode's features and `<loader type='pflash'/>`, plus an `<nvram>` element naming `<vm>.vars` in the pool. libvirt keeps a
+user-given variables path under autoselection and, at the first start, creates the file from the chosen descriptor's
+variables template, so code and variables always come from one descriptor and nothing pins a firmware path in the VM's
+definition. Before defining the VM, the server checks that no `<vm>.vars` volume exists, so a leftover file fails the
+create loudly instead of being reused; the error names the volume, and the operator removes it with `virsh vol-delete`.
+A VM that has never started has no `<vm>.vars` yet; a snapshot of it copies nothing, and a seal refuses it. On this host
+the features select:
 
 | Mode | Features | Code file | Variables template |
 | -- | -- | -- | -- |
@@ -194,8 +205,10 @@ copies nothing, and a seal refuses it. On this host the features select:
 | `on` | `secure-boot`, `enrolled-keys` | `OVMF_CODE_4M.ms.fd` | `OVMF_VARS_4M.ms.fd` |
 | `setup` | `secure-boot` without `enrolled-keys` | `OVMF_CODE_4M.secboot.fd` | `OVMF_VARS_4M.fd` |
 
-A VM from a sealed template cannot use autoselection, because libvirt rejects a user `<nvram template>` that no
-descriptor names. It gets `<loader readonly='yes' secure='yes|no' type='pflash' format='raw'>` with the recorded code
+libvirt's documentation says a user `<nvram template>` overrides the descriptor's template under autoselection, while a
+reading of libvirt 12.0.0's source found that autoselection rejects a template no descriptor names. The first probe
+tests both forms. If autoselection accepts the template, a VM from a sealed template uses it too and pins nothing.
+Otherwise it gets `<loader readonly='yes' secure='yes|no' type='pflash' format='raw'>` with the recorded code
 file, `<nvram template='…/tpl@<name>.vars' templateFormat='raw' format='raw'>` naming `<vm>.vars`, and
 `<smm state='on'/>` when `secure` is yes. `templateFormat` needs libvirt 10.10.0 or later, so sealed templates need
 it, and the server refuses to seal or create from one on an older libvirt. A recorded code file that no longer exists,
@@ -247,12 +260,15 @@ The snapshot tools take the manage lock for their whole sequence. A snapshot of 
 snapshot, then copies `<vm>.vars` to `<vm>@<snapshot>.vars`; a failed copy deletes the snapshot again. Snapshot names
 of UEFI VMs follow `check_name`.
 
-`snapshot_revert` treats `<vm>@@revert.vars`, a name no snapshot can produce, as a journal. It saves the current
-variables there, copies the snapshot's variables in, reverts the disk, and deletes the journal. A failed disk revert
-copies the journal back. A journal found at the start of any snapshot call or start means an earlier revert was cut
-short: the call refuses, naming it, and `snapshot_revert` of the same snapshot again completes the revert. A snapshot
-of a UEFI VM that has `<vm>.vars` but no copy for that snapshot, because a crash fell between the two steps or the
-snapshot predates this design, reverts the disk only, and the result says the variables were not restored.
+`snapshot_revert` of a shut-off UEFI VM keeps a journal, `<vm>@@revert@<snapshot>.vars`, a name no snapshot can
+produce and that records the revert's target. It writes the journal in full from the current variables and reads it
+back before any other step, and never overwrites an existing one. It then copies the snapshot's variables in, reverts
+the disk, and deletes the journal. A failed disk revert copies the journal back. A journal found at the start of a call
+that changes the VM means an earlier revert was cut short: the call refuses, naming the snapshot. `snapshot_revert` of
+that snapshot completes the revert from where it stopped, and `snapshot_revert` with `abandon: true` copies the
+journal's variables back and deletes it, which also works when the snapshot is gone. Read-only calls are not refused.
+A snapshot of a UEFI VM that has `<vm>.vars` but no copy for that snapshot, because a crash fell between the two steps
+or the snapshot predates this design, reverts the disk only, and the result says the variables were not restored.
 `describe_vm` and `snapshot_list` show leftover variable copies and journals.
 
 `snapshot_delete` deletes the copy, and `delete_vm`, `reset_vm` and the expiry sweep delete every copy and journal. A
@@ -271,7 +287,9 @@ none exists, the decision returns to the owner.
 ### Hibernation
 
 A guest that hibernates shuts its VM off. `start_vm` sees a shut-off VM and starts it, rather than waking it from
-suspend, and the guest resumes from its swap. libvirt keeps no hibernated state for a shut-off VM, so `vm_events` is
+suspend, and the guest resumes from its swap. If libvirt instead reports the VM as suspended with suspend to disk as
+the reason, `start_vm` starts it rather than calling `pm_wakeup`, which cannot resume from disk; the hibernation check
+shows which of the two libvirt does. libvirt keeps no hibernated state for a shut-off VM, so `vm_events` is
 where an agent sees it: the `pmsuspended` event, if libvirt emits one for suspend to disk, which the hibernation check
 confirms. `reset_vm` and `delete_vm` on such a VM discard the saved state without a warning.
 
@@ -326,7 +344,9 @@ advertised when the resolver finds any template source: a config template, or `a
 7. A sealed Windows whose disk is bound to the TPM, such as with BitLocker, does not unlock in VMs from the template,
    because templates carry no TPM state.
 8. The backing check sees only volumes in libvirt pools; a disk outside every pool that backs onto a template is
-   invisible to it. `max_vms` and the manage lock are per account, as in the disposable design.
+   invisible to it. `max_vms`, the manage lock and the seal lock are per account and `HOME`, as in the disposable
+   design; a process under another account or `HOME` honours a seal mark for 24 hours, so a seal that outlasts that
+   while such a process runs can be disturbed.
 9. cloudbase-init reading a NoCloud seed is unverified; its first user checks it.
 
 ## Open questions
@@ -364,7 +384,8 @@ advertised when the resolver finds any template source: a config template, or `a
   next call clears, and `template_delete` removes its volumes.
 - With `agent_templates` on and no config template, the template tools are advertised and a VM with a lifetime
   expires.
-- A revert cut short by killing the server leaves a journal that the next call names and a repeated revert completes.
+- A revert killed between each pair of its steps leaves a journal that the next call names; a repeated revert
+  completes it, and `abandon: true` restores the variables, also after the snapshot is deleted.
 - Unit tests cover the record's parsing and checksum, the qcow2 header check on one buffer, the hole detection, the
   caps, the free-space figure, the template resolver, the mark helper, the SATA limit, the hardware defaults and limits,
   the `secure_boot` values, and the XML for each firmware mode and the sealed form.
