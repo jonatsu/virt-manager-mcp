@@ -39,7 +39,7 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
   transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos hibernate templates-expiry
+  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos hibernate uefi-vars templates-expiry
   templates-expiry-command
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
@@ -53,6 +53,7 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["hibernate"]="hibernate hibernate-after"
+  ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
   ["jobs"]="jobs jobs-reopen"
   ["diag-stats"]="diag-stats diag-stats-read-only diag-stats-after"
   ["transfer-pull"]="transfer-pull transfer-pull-caps"
@@ -299,7 +300,80 @@ unit_hibernate() {
   $(xmllint --xpath "string(//os/loader)" "${xml}") == /*OVMF_CODE*.fd &&
   $(xmllint --xpath "string(//os/nvram/@template)" "${xml}") == /*OVMF_VARS*.fd ]] \
     || record hibernate failed "t-hu does not hold the explicit firmware form, see ${xml}"
+  # The redefinition keeps the variables path the first definition named, which is the VM's own file in the pool.
+  [[ $(xmllint --xpath "string(//os/nvram)" "${xml}") == "$(pool_path)/t-hu.vars" ]] \
+    || record hibernate failed "t-hu's variables are not t-hu.vars in the pool, see ${xml}"
   run_case hibernate-after "${config}"
+}
+
+# The directory of the pool agent-vms.
+pool_path() { vsh pool-dumpxml "${POOL}" | xmllint --xpath 'string(//target/path)' -; }
+
+# Whether pool volume $1 is owned by the user QEMU runs as, which is who libvirt makes a VM's variables file for.
+owned_by_qemu() {
+  local uid
+  uid=$(id -u libvirt-qemu 2> /dev/null || id -u qemu 2> /dev/null) || return 1
+  [[ $(vsh vol-dumpxml --pool "${POOL}" "$1" | xmllint --xpath 'string(//target/permissions/owner)' -) == "${uid}" ]]
+}
+
+# UEFI variables in the pool. The files appear in the pool listing without a refresh from here, because the server
+# rescans the pool after a start; before a VM's first start there is no file, even after a refresh. t-uv is made by
+# create_vm and only started and stopped, t-uvg comes from a template and keeps a variable the guest writes across a
+# shutdown and start, and both files go with their VMs. A t-lv.vars made here with virsh makes create_vm and
+# create_vm_from_template refuse t-lv for UEFI, names it and the command that removes it, and a create works once it
+# is removed. The case runs under config-templates.toml with max_vms = 4, because the kept t-win11net counts toward
+# max_vms.
+unit_uefi_vars() {
+  local config=${WORK}/config-uefi-vars.toml xml=${WORK}/t-uv.inactive.xml vm avail left
+  if ! sed 's/^max_vms = 3$/max_vms = 4/' "${TESTBED}/config-templates.toml" > "${config}" \
+    || ! grep -qxF 'max_vms = 4' "${config}"; then
+    record uefi-vars failed "could not write ${config}"
+    return
+  fi
+  avail=$(avail_mib)
+  if ((avail < 1024)); then
+    record uefi-vars failed "needs 1024 MiB of available memory; the host has ${avail} MiB"
+    return
+  fi
+  run_case uefi-vars "${config}"
+  vsh pool-refresh "${POOL}" > /dev/null || record uefi-vars failed "could not refresh the pool"
+  has_vol t-uv.vars && record uefi-vars failed "t-uv.vars exists before the VM's first start"
+  if vsh dumpxml --inactive t-uv > "${xml}"; then
+    [[ $(xmllint --xpath "string(//os/@firmware)" "${xml}") == efi &&
+    $(xmllint --xpath "string(//os/nvram)" "${xml}") == "$(pool_path)/t-uv.vars" &&
+    $(xmllint --xpath "string(//os/nvram/@format)" "${xml}") == raw ]] \
+      || record uefi-vars failed "t-uv's variables are not t-uv.vars in the pool, see ${xml}"
+  else
+    record uefi-vars failed "could not read the definition of t-uv"
+  fi
+  run_case uefi-vars-start "${config}"
+  has_vol t-uv.vars || record uefi-vars-start failed "t-uv.vars is not in the pool listing after the first start"
+  owned_by_qemu t-uv.vars || record uefi-vars-start failed "t-uv.vars is not owned by the QEMU user"
+  [[ ! -e /var/lib/libvirt/qemu/nvram/t-uv_VARS.fd ]] \
+    || record uefi-vars-start failed "t-uv has variables in libvirt's own nvram directory"
+  run_case uefi-vars-guest "${config}"
+  has_vol t-uvg.vars || record uefi-vars-guest failed "t-uvg.vars is not in the pool listing after the first start"
+  owned_by_qemu t-uvg.vars || record uefi-vars-guest failed "t-uvg.vars is not owned by the QEMU user"
+  run_case uefi-vars-delete "${config}"
+  vsh pool-refresh "${POOL}" > /dev/null || record uefi-vars-delete failed "could not refresh the pool"
+  for vm in t-uv t-uvg; do
+    has_vol "${vm}.vars" && record uefi-vars-delete failed "${vm}.vars remains after delete_vm"
+    [[ ! -e /var/lib/libvirt/qemu/nvram/${vm}_VARS.fd ]] \
+      || record uefi-vars-delete failed "${vm}_VARS.fd remains in libvirt's nvram directory"
+  done
+  if ! vsh vol-create-as "${POOL}" t-lv.vars 1M --format raw > /dev/null; then
+    record uefi-vars-leftover failed "could not make t-lv.vars"
+    return
+  fi
+  run_case uefi-vars-leftover "${config}"
+  left=$(vols_named '^t-lv')
+  [[ ${left} == t-lv.vars ]] || record uefi-vars-leftover failed "volumes of t-lv remain besides t-lv.vars: ${left//$'\n'/ }"
+  vsh dominfo t-lv > /dev/null 2>&1 && record uefi-vars-leftover failed "a VM named t-lv exists"
+  vsh vol-delete --pool "${POOL}" t-lv.vars > /dev/null || record uefi-vars-leftover failed "could not delete t-lv.vars"
+  run_case uefi-vars-leftover-after "${config}"
+  has_vol t-lv.vars && record uefi-vars-leftover-after failed "t-lv.vars remains after delete_vm"
+  vsh pool-refresh "${POOL}" > /dev/null
+  has_vol t-lv.vars && record uefi-vars-leftover-after failed "t-lv.vars remains after delete_vm and a refresh"
 }
 
 unit_templates_expiry() {
@@ -880,6 +954,7 @@ run_unit() {
     templates-reset-uefi) unit_templates_reset_uefi ;;
     extra-isos) unit_extra_isos ;;
     hibernate) unit_hibernate ;;
+    uefi-vars) unit_uefi_vars ;;
     templates-expiry) unit_templates_expiry ;;
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;

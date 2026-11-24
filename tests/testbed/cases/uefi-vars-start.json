@@ -1,0 +1,22 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-uv",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-uv': started"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-uv",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-uv' is shut off"
+    }
+  }
+]

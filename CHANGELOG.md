@@ -28,6 +28,14 @@ Each release's section lists what changed for people who run the server and for 
 
 ### Changed
 
+- A UEFI VM that `create_vm` or `create_vm_from_template` makes now keeps its firmware variables as `<name>.vars` in
+  `disk_pool` (`manage.disk_pool`), not in libvirt's own `/var/lib/libvirt/qemu/nvram/`. libvirt creates the file at
+  the VM's first start, so it appears in the pool after that start, owned by the QEMU user. `delete_vm` and expiry
+  delete it with the VM, and `reset_vm` restores it from the firmware's template. UEFI VMs that exist keep their
+  variables where they are.
+- `create_vm` and `create_vm_from_template` refuse a UEFI VM whose `<name>.vars` already exists in the pool, a
+  leftover of an earlier VM, because libvirt would reuse its variables. The error names the volume and the command
+  that removes it, `virsh -c <uri> vol-delete --pool <disk_pool> <name>.vars`; nothing is created.
 - `create_vm` with `secure_boot` on, the default, now asks libvirt for firmware with Secure Boot and the enrolled keys,
   instead of leaving the choice to libvirt. A VM with `firmware: "bios"` and `secure_boot: false` now fails with
   `secure_boot "off" and "setup" need firmware "uefi"`. VMs that exist keep their definition.

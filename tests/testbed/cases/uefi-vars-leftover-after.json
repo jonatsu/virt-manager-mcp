@@ -1,0 +1,25 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-lv",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi"
+    },
+    "expect": {
+      "contains": "created VM 't-lv' (1 vCPUs, 512 MiB, 1 GiB disk agent-vms/t-lv.qcow2, UEFI"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-lv"
+    },
+    "expect": {
+      "contains": "deleted VM 't-lv'"
+    }
+  }
+]

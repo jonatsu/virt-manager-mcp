@@ -1,0 +1,66 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-lv",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "volume 't-lv.vars' already exists in the disk pool 'agent-vms'",
+        "nothing was created",
+        "virsh -c qemu:///system vol-delete --pool agent-vms t-lv.vars"
+      ]
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-lv",
+      "template": "debian13-uefi"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "volume 't-lv.vars' already exists in the disk pool 'agent-vms'",
+        "virsh -c qemu:///system vol-delete --pool agent-vms t-lv.vars"
+      ]
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-lv",
+      "template": "debian13",
+      "wait_for_agent_secs": 0,
+      "memory_mib": 512
+    },
+    "expect": {
+      "contains": "created VM 't-lv' from template 'debian13'"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-lv",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-lv' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-lv"
+    },
+    "expect": {
+      "contains": "deleted VM 't-lv'"
+    }
+  }
+]

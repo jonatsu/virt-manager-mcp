@@ -39,7 +39,13 @@ max_disk_gib = 32
   local-time clock. Every VM the server creates, here or from a template, also gets a panic device (`isa` for Linux,
   `hyperv` for Windows), so a guest crash becomes libvirt's crashed event, a balloon that reports guest memory every 5
   s, and `manage.on_crash` as its crash action: `preserve` (the default) keeps a crashed VM stopped in place, holding
-  its memory, until `stop_vm` with `force: true`, and `destroy` stops it. The VM is created shut off.
+  its memory, until `stop_vm` with `force: true`, and `destroy` stops it. The VM is created shut off. A UEFI VM
+  keeps its firmware variables (boot entries, Secure Boot keys) as `<name>.vars` in `disk_pool`. libvirt creates the
+  file at the VM's first start, so it is absent until then, and the server rescans the pool after each start. A
+  `<name>.vars` that already exists in the pool, a leftover of an earlier VM, makes `create_vm` and
+  `create_vm_from_template` refuse the name, because libvirt would give the new VM the old variables. The error
+  names the command that removes it, `virsh vol-delete --pool <disk_pool> <name>.vars`. UEFI VMs created by an
+  earlier version keep their variables in libvirt's own directory.
 
 - **Hibernation:** `create_vm` with `hibernate: true` turns suspend to disk on and leaves suspend to memory off. A
   guest that hibernates (`systemctl hibernate`) ends up shut off, and `start_vm` resumes it from its swap. libvirt

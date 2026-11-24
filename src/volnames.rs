@@ -50,7 +50,6 @@ fn copy_name(vm: &str, snapshot: &str, kind: StateKind, role: CopyRole) -> Strin
 }
 
 /// `<vm>.vars`, a UEFI VM's own variables.
-#[cfg_attr(not(test), expect(dead_code, reason = "first caller: unit 6"))]
 pub fn vars_name(vm: &str) -> String {
     format!("{vm}.vars")
 }

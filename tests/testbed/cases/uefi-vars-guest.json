@@ -1,0 +1,68 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-uvg",
+      "template": "debian13-uefi",
+      "memory_mib": 768
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-uvg' from template 'debian13-uefi'",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-uvg",
+      "command": "printf '\\007\\000\\000\\000persist-me' > /sys/firmware/efi/efivars/VmmProbe-4f9d1a2e-6c3b-4a57-9e0d-5b8c7a1f2d33 && echo written"
+    },
+    "expect": {
+      "contains": "written"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-uvg"
+    },
+    "expect": {
+      "contains": "VM 't-uvg' is shut off"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-uvg",
+      "wait_for_agent_secs": 120
+    },
+    "expect": {
+      "contains": [
+        "VM 't-uvg': started",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-uvg",
+      "command": "cat /sys/firmware/efi/efivars/VmmProbe-4f9d1a2e-6c3b-4a57-9e0d-5b8c7a1f2d33 | tail -c +5"
+    },
+    "expect": {
+      "contains": "persist-me"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-uvg",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-uvg' is shut off"
+    }
+  }
+]

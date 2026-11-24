@@ -1,0 +1,20 @@
+[
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-uv"
+    },
+    "expect": {
+      "contains": "deleted VM 't-uv'"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-uvg"
+    },
+    "expect": {
+      "contains": "deleted VM 't-uvg'"
+    }
+  }
+]

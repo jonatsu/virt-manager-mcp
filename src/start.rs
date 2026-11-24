@@ -281,6 +281,12 @@ impl State {
                 log: self.hv.config.console_log().as_ref(),
             },
         )?;
+        // libvirt creates a UEFI VM's variables file at its first start, and the pool lists it only after a scan.
+        if !self.hv.config.manage.disk_pool.is_empty()
+            && let Err(e) = manage::refresh_pool(&self.hv)
+        {
+            tracing::warn!("cannot refresh the disk pool after starting '{name}': {e:#}");
+        }
         Ok(format!("started{console}"))
     }
 

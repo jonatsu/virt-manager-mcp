@@ -255,9 +255,13 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             bail!("this server already has {owned} VMs (manage.max_vms = {}); delete one first", m.max_vms);
         }
         let pool = disk_pool(conn, m)?;
+        if vm.uefi {
+            check_no_leftover_vars(hv, &pool, &vm.name)?;
+        }
         let vol_name = format!("{}.qcow2", vm.name);
         let vol = create_volume(&pool, &vol_name, vm.disk_gib)?;
         let disk = vol.get_path()?;
+        let nvram = vm.uefi.then(|| vars_path(&disk, &vm.name));
         let disks = create_disks(&disk, iso.as_deref(), driver_iso.as_deref(), &extra_isos);
         let spec = DomainSpec {
             name: &vm.name,
@@ -269,6 +273,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             secure_boot: vm.secure_boot,
             hibernate: vm.hibernate,
             pinned: None,
+            nvram: nvram.as_deref(),
             on_crash: m.on_crash,
             disks,
             network: network.as_deref(),
@@ -533,6 +538,9 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
             .map_or(0, |gib| gib << 30)
             .max(template.capacity);
         let pool = disk_pool(conn, m)?;
+        if t.firmware == Firmware::Uefi {
+            check_no_leftover_vars(hv, &pool, &vm.name)?;
+        }
         let uuid = new_uuid();
         let generation = 1;
         let (overlay_name, seed_name) = generation_volumes(&vm.name, generation);
@@ -548,6 +556,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
         };
         let defined = (|| -> Result<()> {
             let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
+            let nvram = (t.firmware == Firmware::Uefi).then(|| vars_path(&overlay_path, &vm.name));
             let xml = domain_xml(&DomainSpec {
                 name: &vm.name,
                 windows: t.os == GuestOs::Windows,
@@ -558,6 +567,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                 secure_boot: t.secure_boot,
                 hibernate: false,
                 pinned: None,
+                nvram: nvram.as_deref(),
                 on_crash: m.on_crash,
                 disks: vec![Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
                 network: network.as_deref(),
@@ -738,16 +748,7 @@ pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Re
 /// template's defaults.
 pub fn reset_start(hv: &Hypervisor, name: &str) -> Result<(Domain, u32)> {
     let dom = hv.manage_domain(name)?;
-    let uefi = roxmltree::Document::parse(&inactive_xml(&dom)?)?
-        .root_element()
-        .children()
-        .find(|n| n.has_tag_name("os"))
-        .is_some_and(|os| os.attribute("firmware") == Some("efi"));
-    let flags = if uefi {
-        sys::VIR_DOMAIN_START_RESET_NVRAM
-    } else {
-        0
-    };
+    let flags = reset_flags(&inactive_xml(&dom)?)?;
     Ok((dom, flags))
 }
 
@@ -1663,6 +1664,110 @@ fn secure_boot_fields(
     }
 }
 
+/// The path of a UEFI VM's own variables file: `<vm>.vars` beside the VM's disk volume in `disk_pool`.
+fn vars_path(disk_path: &str, vm: &str) -> String {
+    let name = volnames::vars_name(vm);
+    match Path::new(disk_path).parent() {
+        Some(dir) => dir.join(name).to_string_lossy().into_owned(),
+        None => name,
+    }
+}
+
+/// What `delete` may do with a disk of a VM.
+#[derive(Debug, PartialEq, Eq)]
+enum DiskRef<'a> {
+    /// A volume of the pool, named by its pool and volume.
+    Volume(&'a str),
+    /// A volume of another pool, which `delete` never names.
+    OtherPool,
+    /// A file or device path, which libvirt places in a pool or not.
+    Path(&'a str),
+    /// No source.
+    Empty,
+}
+
+fn disk_ref<'a>(disk: &'a DiskInfo, pool_name: &str) -> DiskRef<'a> {
+    match (&disk.pool, &disk.volume, &disk.file) {
+        (Some(p), Some(v), _) if p == pool_name => DiskRef::Volume(v),
+        (Some(_), Some(_), _) => DiskRef::OtherPool,
+        (_, _, Some(f)) => DiskRef::Path(f),
+        _ => DiskRef::Empty,
+    }
+}
+
+/// The refusal for a create that finds `<vm>.vars` already in the pool.
+fn leftover_vars_error(uri: &str, pool: &str, vm: &str) -> anyhow::Error {
+    let vars = volnames::vars_name(vm);
+    anyhow!(
+        "volume '{vars}' already exists in the disk pool '{pool}', so a new VM '{vm}' would start from another VM's \
+         firmware variables; nothing was created. Remove it with: virsh -c {uri} vol-delete --pool {pool} {vars}"
+    )
+}
+
+/// Refuses a UEFI create while `<vm>.vars` is in the pool, which the caller has refreshed. libvirt would reuse the
+/// file at the first start, so a leftover of an earlier VM would give the new one its variables, boot entries and
+/// keys.
+fn check_no_leftover_vars(hv: &Hypervisor, pool: &StoragePool, vm: &str) -> Result<()> {
+    if vars_volume(pool, vm).is_some() {
+        return Err(leftover_vars_error(
+            &hv.config.uri,
+            &hv.config.manage.disk_pool,
+            vm,
+        ));
+    }
+    Ok(())
+}
+
+/// The volume `<vm>.vars` holds a UEFI VM's variables in `pool`. The pool lists it only after `refresh_pool`
+/// follows the VM's first start.
+fn vars_volume(pool: &StoragePool, vm: &str) -> Option<StorageVol> {
+    StorageVol::lookup_by_name(pool, &volnames::vars_name(vm)).ok()
+}
+
+/// Rescans `disk_pool`, so that files libvirt made outside the server's own calls are listed, such as `<vm>.vars`,
+/// which it creates at the VM's first start.
+///
+/// # Errors
+///
+/// Fails when `manage.disk_pool` is not set, or the pool is missing or refuses the scan.
+pub fn refresh_pool(hv: &Hypervisor) -> Result<()> {
+    let m = &hv.config.manage;
+    if m.disk_pool.is_empty() {
+        bail!("manage.disk_pool is not set");
+    }
+    hv.with_conn(|conn| {
+        let pool = StoragePool::lookup_by_name(conn, &m.disk_pool)
+            .map_err(|e| anyhow!("storage pool '{}': {}", m.disk_pool, e.message()))?;
+        pool.refresh(0).map_err(|e| {
+            anyhow!(
+                "cannot refresh storage pool '{}': {}",
+                m.disk_pool,
+                e.message()
+            )
+        })?;
+        Ok(())
+    })
+}
+
+/// Whether a domain's `<os>` has a variables file that a reset can restore from its template: libvirt's firmware
+/// autoselection, or an explicit flash loader with an `<nvram>`.
+fn has_variables_file(os: roxmltree::Node<'_, '_>) -> bool {
+    os.attribute("firmware") == Some("efi")
+        || (child(os, "loader").and_then(|l| l.attribute("type")) == Some("pflash")
+            && child(os, "nvram").is_some())
+}
+
+/// The libvirt start flags of a reset, for a VM with inactive definition `xml`.
+fn reset_flags(xml: &str) -> Result<u32> {
+    let doc = roxmltree::Document::parse(xml)?;
+    let uefi = child(doc.root_element(), "os").is_some_and(has_variables_file);
+    Ok(if uefi {
+        sys::VIR_DOMAIN_START_RESET_NVRAM
+    } else {
+        0
+    })
+}
+
 fn check_secure_boot(uefi: bool, secure_boot: SecureBoot) -> Result<()> {
     if !uefi && secure_boot != SecureBoot::On {
         bail!("secure_boot \"off\" and \"setup\" need firmware \"uefi\"");
@@ -1794,14 +1899,12 @@ fn pool_volume(
     pool_name: &str,
     disk: &DiskInfo,
 ) -> Option<StorageVol> {
-    if let (Some(p), Some(v)) = (&disk.pool, &disk.volume) {
-        return if p == pool_name {
-            StorageVol::lookup_by_name(pool, v).ok()
-        } else {
-            None
-        };
-    }
-    let vol = StorageVol::lookup_by_path(conn, disk.file.as_deref()?).ok()?;
+    let path = match disk_ref(disk, pool_name) {
+        DiskRef::Volume(v) => return StorageVol::lookup_by_name(pool, v).ok(),
+        DiskRef::OtherPool | DiskRef::Empty => return None,
+        DiskRef::Path(f) => f,
+    };
+    let vol = StorageVol::lookup_by_path(conn, path).ok()?;
     let owner = StoragePool::lookup_by_volume(&vol).ok()?.get_name().ok()?;
     (owner == pool_name).then_some(vol)
 }
@@ -1980,6 +2083,9 @@ struct DomainSpec<'a> {
     hibernate: bool,
     /// With `uefi`, the firmware pinned by path, which replaces `firmware='efi'` and the Secure Boot features.
     pinned: Option<&'a PinnedFirmware>,
+    /// With `uefi` and autoselection, the path of the VM's own variables file in `disk_pool`, which libvirt creates
+    /// at the first start. A pinned firmware carries its own.
+    nvram: Option<&'a str>,
     /// The domain's `<on_crash>` action.
     on_crash: OnCrash,
     /// In order: the first writable disk boots first, the first CD-ROM second.
@@ -2327,6 +2433,16 @@ fn autoselection_features(spec: &DomainSpec<'_>) -> String {
     )
 }
 
+/// The `<nvram>` element that gives an autoselected UEFI VM its own variables file. libvirt keeps a path the
+/// definition names, and at the first start creates the file from the chosen descriptor's variables template, so
+/// code and variables come from one descriptor.
+fn autoselection_nvram(spec: &DomainSpec<'_>) -> String {
+    match spec.nvram.filter(|_| spec.uefi) {
+        Some(path) => format!("<nvram format='raw'>{}</nvram>", esc(path)),
+        None => String::new(),
+    }
+}
+
 fn domain_xml(spec: &DomainSpec<'_>) -> String {
     // Root ports for every PCIe device plus spares, so disks and NICs can be hot-plugged.
     let mut devices = vec!["<controller type='pci' index='0' model='pcie-root'/>".to_string()];
@@ -2409,9 +2525,10 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
         os = match spec.pinned.filter(|_| spec.uefi) {
             Some(pinned) => pinned.os_xml(),
             None => format!(
-                "<os{}><type arch='x86_64' machine='q35'>hvm</type>{}</os>",
+                "<os{}><type arch='x86_64' machine='q35'>hvm</type>{}{}</os>",
                 if spec.uefi { " firmware='efi'" } else { "" },
                 autoselection_features(spec),
+                autoselection_nvram(spec),
             ),
         },
         // libvirt refuses a secure loader without SMM, and fills SMM in itself only under autoselection.
@@ -2635,6 +2752,7 @@ mod tests {
             secure_boot: SecureBoot::On,
             hibernate: false,
             pinned: None,
+            nvram: None,
             on_crash: OnCrash::Preserve,
             disks,
             network: Some("net"),
@@ -3199,8 +3317,143 @@ mod tests {
             uefi,
             hibernate: true,
             secure_boot: SecureBoot::Off,
+            nvram: Some("/p/t-ph.vars"),
             ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
         }
+    }
+
+    /// A UEFI spec for `mode` whose variables sit in the pool.
+    fn uefi_with_vars(mode: SecureBoot) -> DomainSpec<'static> {
+        DomainSpec {
+            uefi: true,
+            secure_boot: mode,
+            nvram: Some("/var/lib/libvirt/images/agent-vms/t.vars"),
+            ..spec(vec![Disk::Qcow2(
+                "/var/lib/libvirt/images/agent-vms/t.qcow2",
+            )])
+        }
+    }
+
+    #[test]
+    fn a_uefi_vm_keeps_its_variables_in_the_pool_in_every_secure_boot_mode() {
+        for mode in [SecureBoot::Off, SecureBoot::On, SecureBoot::Setup] {
+            let xml = domain_xml(&uefi_with_vars(mode));
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let os = child(doc.root_element(), "os").unwrap();
+            let nvram: Vec<_> = os.children().filter(|n| n.has_tag_name("nvram")).collect();
+            assert_eq!(nvram.len(), 1, "{mode:?}: {xml}");
+            assert_eq!(
+                nvram[0].text(),
+                Some("/var/lib/libvirt/images/agent-vms/t.vars"),
+                "{mode:?}"
+            );
+            assert_eq!(nvram[0].attribute("format"), Some("raw"), "{mode:?}");
+            // Autoselection picks the template: naming one would make libvirt reject it, or pin the firmware.
+            assert_eq!(nvram[0].attribute("template"), None, "{mode:?}");
+            assert_eq!(os.attribute("firmware"), Some("efi"), "{mode:?}");
+            // The variables element does not change what the mode reads as.
+            assert_eq!(secure_boot_state(os), Some(mode), "{mode:?}");
+            assert_eq!(firmware_features(&xml).len(), 2, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_bios_vm_has_no_nvram_element() {
+        let bios = DomainSpec {
+            nvram: Some("/p/t.vars"),
+            ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+        };
+        // Not even when a caller hands it a path.
+        assert!(!domain_xml(&bios).contains("nvram"));
+        assert!(!domain_xml(&spec(vec![Disk::Qcow2("/p/t.qcow2")])).contains("nvram"));
+        // A UEFI spec without a path, as nothing builds today, leaves libvirt its own default.
+        let none = DomainSpec {
+            nvram: None,
+            ..uefi_with_vars(SecureBoot::On)
+        };
+        assert!(!domain_xml(&none).contains("nvram"));
+    }
+
+    #[test]
+    fn the_variables_file_sits_beside_the_disk_volume() {
+        assert_eq!(
+            vars_path("/var/lib/libvirt/images/agent-vms/t-x.qcow2", "t-x"),
+            "/var/lib/libvirt/images/agent-vms/t-x.vars"
+        );
+        // The pool is wherever the disk is, and a VM's name carries no path.
+        assert_eq!(vars_path("/srv/pool/t.qcow2", "t"), "/srv/pool/t.vars");
+        assert_eq!(vars_path("t.qcow2", "t"), "t.vars");
+    }
+
+    #[test]
+    fn the_leftover_refusal_names_the_volume_and_the_command_that_removes_it() {
+        let err = leftover_vars_error("qemu:///system", "agent-vms", "t-lv").to_string();
+        assert!(err.contains("t-lv.vars"), "{err}");
+        assert!(
+            err.contains("virsh -c qemu:///system vol-delete --pool agent-vms t-lv.vars"),
+            "{err}"
+        );
+        assert!(err.contains("nothing was created"), "{err}");
+    }
+
+    #[test]
+    fn a_reset_restores_variables_from_either_uefi_form() {
+        let flags = |os: &str| reset_flags(&format!("<domain><os{os}</os></domain>")).unwrap();
+        let reset = sys::VIR_DOMAIN_START_RESET_NVRAM;
+        // Autoselection, as every VM from the server's create tools is defined.
+        assert_eq!(flags(" firmware='efi'><type>hvm</type>"), reset);
+        // An explicit flash loader with variables: a hibernating VM, or one from a sealed template.
+        assert_eq!(
+            flags(
+                "><loader type='pflash' readonly='yes'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>\
+                 <nvram template='/usr/share/OVMF/OVMF_VARS_4M.fd'>/p/t.vars</nvram>"
+            ),
+            reset
+        );
+        // BIOS, a ROM firmware and a flash loader without variables have nothing to restore.
+        assert_eq!(flags("><type>hvm</type>"), 0);
+        assert_eq!(
+            flags("><loader type='rom'>/usr/share/ovmf/OVMF.amdsev.fd</loader>"),
+            0
+        );
+        assert_eq!(
+            flags("><loader type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>"),
+            0
+        );
+        assert_eq!(
+            flags("><loader type='rom'>/f.fd</loader><nvram>/p/t.vars</nvram>"),
+            0
+        );
+    }
+
+    #[test]
+    fn delete_names_only_the_disks_of_the_pool() {
+        // The server's own UEFI VM: one disk, and the variables, which libvirt deletes with the VM and `delete`
+        // never looks up as a disk.
+        let xml = domain_xml(&uefi_with_vars(SecureBoot::On));
+        let disks = parse_disks(&xml).unwrap();
+        assert_eq!(disks.len(), 1);
+        assert!(disks.iter().all(|d| !d.source().ends_with(".vars")));
+        // A volume of another pool is never named, whatever its volume name; a path is left to libvirt's lookup
+        // of the pool that holds it, which `pool_volume` compares with the configured pool.
+        let by_ref = |pool: &str| {
+            let xml = format!(
+                "<domain><devices><disk type='volume' device='disk'><source pool='{pool}' volume='x.vars'/>\
+                 <target dev='vda'/></disk></devices></domain>"
+            );
+            parse_disks(&xml).unwrap()
+        };
+        let own = by_ref("agent-vms");
+        assert_eq!(disk_ref(&own[0], "agent-vms"), DiskRef::Volume("x.vars"));
+        let other = by_ref("elsewhere");
+        assert_eq!(disk_ref(&other[0], "agent-vms"), DiskRef::OtherPool);
+        let path = disk_at("/etc/passwd");
+        assert_eq!(disk_ref(&path, "agent-vms"), DiskRef::Path("/etc/passwd"));
+        let none = DiskInfo {
+            file: None,
+            ..disk_at("")
+        };
+        assert_eq!(disk_ref(&none, "agent-vms"), DiskRef::Empty);
     }
 
     #[test]
@@ -3235,6 +3488,17 @@ mod tests {
         let (first, second) = (&libvirt.defined[0], &libvirt.defined[1]);
         assert_eq!(pm(first), None);
         assert!(first.contains("firmware='efi'"));
+        // The first definition asks for a variables file in the pool, and the second keeps the path libvirt
+        // resolved from it, which is that file.
+        assert!(
+            first.contains("<nvram format='raw'>/p/t-ph.vars</nvram>"),
+            "{first}"
+        );
+        assert!(
+            second.contains(&format!("format='raw'>{POOL}/t-ph.vars</nvram>")),
+            "{second}"
+        );
+        assert_eq!(second.matches("<nvram").count(), 1, "{second}");
         assert_eq!(pm(second), pm_is("no", "yes"));
         assert!(!second.contains("firmware"), "{second}");
         assert!(second.contains(&format!("<uuid>{UUID}</uuid>")));
