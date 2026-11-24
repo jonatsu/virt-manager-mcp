@@ -191,6 +191,20 @@ These apply to every unit, which names only its additions.
 - **Memory and disk.** The Windows check in unit 26 needs 9 GiB available for `t-win11net` and about 65 GiB of free
   pool space. Check both first.
 
+## Release points
+
+The run cuts a release, by the steps in `CONTRIBUTING.md`, after each group of units below. Each release, with its push
+and tag, waits for approval.
+
+| Release | Units | What it delivers |
+| -- | -- | -- |
+| A | 2 to 8 | Secure Boot setup mode, more CD-ROMs, hibernation, UEFI variables and TPM state in the pool |
+| B | 10 to 15 | Config templates with more choices, and `create_vm` booting a built image |
+| C | 9, 16 to 21 | Importing an image, sealing a VM into a template, and VMs from a sealed template |
+| D | 22 to 26 | Snapshots and resets that keep variables and TPM state, the docs and the closing checks |
+
+Unit 9, the seal lock, is built in its place between A and B, so release B contains it, but nothing uses it before C.
+
 ## Units
 
 ### 1. Probes
@@ -1082,8 +1096,8 @@ The run's goal:
   - `tests/testbed/run-all.sh` exits 0, with `t-win11` present, and the cases that wait for the AppArmor rule are run or
     named in the exceptions table;
   - a code review and a separate conformance review find no material mismatch.
-- **Boundaries.** Nothing is pushed. Only `trial-deb13`, `t-*` VMs and `t-*`, `tpl-*` and `tpl@t-*` volumes in
-  `agent-vms` are touched, and large host files stay under `.scratch/`.
+- **Boundaries.** Nothing is pushed except at a release point, after approval. Only `trial-deb13`, `t-*` VMs and `t-*`,
+  `tpl-*` and `tpl@t-*` volumes in `agent-vms` are touched, and large host files stay under `.scratch/`.
 - **Stop.** Stop and report when a step needs root, a design change, a decision above that the owner has not confirmed,
   or another VM or pool.
 
