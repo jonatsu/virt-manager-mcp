@@ -455,10 +455,12 @@ tell setup from on (unit 5); `secure_boot_state` prefers it to the variables tem
 fallback for VMs made earlier. The unit follows unit 1's note on what the live and inactive definitions hold. Before a
 start, `State::boot_claimed` refreshes the pool and looks up the VM's `.vars` volume, so the later "no `.vars` yet"
 decision rests on a current listing, not on libvirt's cached one. After a successful start, it checks whether the VM is
-owned, has an `<nvram>` naming its pool `.vars`, had no `.vars` volume before the start and carries no record. If so,
-under the manage lock, it refreshes the pool, reads the loader path from the live definition, hashes the file with
-`sha2`, and rewrites the owner element through `replace_owner` and `define_xml`. A failure is logged and does not fail
-the start.
+owned and manageable (`can_manage`), has an `<nvram>` naming its pool `.vars`, had no `.vars` volume before the start
+and carries no record. If so, under the manage lock, it refreshes the pool, reads the loader path from the live
+definition, hashes the file with `sha2`, and rewrites the owner element through `replace_owner` and `define_xml`. It
+reads the inactive definition again after the hash, just before `define_xml`, so a change made meanwhile is kept.
+`configure`, `attach_nic` and `detach_nic` change the persistent definition without the manage lock, so that re-read
+narrows the window and cannot close it. A failure is logged and does not fail the start.
 
 This unit rewrites owner attributes on an existing VM, as a reset does, so it carries the guardrail change. The
 `AGENTS.md` Guardrails sentence now says that the server rewrites owner attributes (`generation`, `expires` and the

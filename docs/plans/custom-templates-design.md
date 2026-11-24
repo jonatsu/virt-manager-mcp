@@ -130,7 +130,8 @@ flowchart LR
      VM whose firmware code file changed since its first start. The server records, in the VM's owner element, the code
      file path and SHA-256 that libvirt resolved at the VM's first start, read from the live definition, and the seal
      takes the record's firmware from there, never from a fresh match against the descriptors. A VM whose first start
-     the server did not make has no such entry and is refused;
+     the server did not make has no such entry and is refused. So is a VM whose first start failed after libvirt created
+     its `.vars` file: it stays unrecorded, like a VM made earlier;
    - a VM with a second writable disk;
    - a boot disk whose format in the VM's definition differs from the format libvirt reports for its volume, and a raw
      boot disk whose first 4 KiB, read through a download stream, begin with the qcow2 magic. A guest writes its own

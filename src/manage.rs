@@ -2064,24 +2064,36 @@ pub fn record_firmware(hv: &Hypervisor, uuid: &str, name: &str) -> Result<()> {
             bail!("VM '{name}' was renamed");
         }
         let pool = disk_pool(conn, &hv.config.manage)?;
-        // The rescan shows the file libvirt made at this start; without it, this was not a start that made one.
-        if !vars_listed(&pool, name)? {
-            bail!("the pool lists no variables file for '{name}' after its start");
-        }
+        // Rescan so the pool lists the file libvirt made at this start; the caller skips its own rescan after a
+        // record. The listing proves nothing about which start made the file: `firmware_record_due` decided that
+        // from the listing before the start.
+        pool.refresh(0).map_err(|e| {
+            anyhow!(
+                "cannot refresh storage pool '{}': {}",
+                hv.config.manage.disk_pool,
+                e.message()
+            )
+        })?;
         let dir = pool_dir(&pool)?.ok_or_else(|| anyhow!("the pool has no directory"))?;
-        let inactive = inactive_xml(&dom)?;
-        let owner = owner_in_domain_xml(&inactive)?;
-        // The listing was checked before the start; here only the VM's own state is.
-        if !firmware::should_record(
-            hv.can_manage(&dom),
-            owner.as_ref(),
-            &inactive,
-            &dir,
-            name,
-            false,
-        ) {
-            bail!("'{name}' no longer qualifies for a firmware record");
-        }
+        // The listing was checked before the start; here only the VM's own state is. It is read again after the
+        // hash, because the hash takes time and `configure`, `attach_nic` and `detach_nic` change the persistent
+        // definition without the lock; redefining a copy read earlier would undo their change.
+        let qualifying_definition = || -> Result<String> {
+            let inactive = inactive_xml(&dom)?;
+            let owner = owner_in_domain_xml(&inactive)?;
+            if !firmware::should_record(
+                hv.can_manage(&dom),
+                owner.as_ref(),
+                &inactive,
+                &dir,
+                name,
+                false,
+            ) {
+                bail!("'{name}' no longer qualifies for a firmware record");
+            }
+            Ok(inactive)
+        };
+        qualifying_definition()?;
         let live = dom.get_xml_desc(0).map_err(|e| {
             anyhow!(
                 "cannot read the live definition of '{name}': {}",
@@ -2090,7 +2102,7 @@ pub fn record_firmware(hv: &Hypervisor, uuid: &str, name: &str) -> Result<()> {
         })?;
         let code = firmware::loader_path(&live)?;
         let sha256 = firmware::sha256_file(Path::new(&code))?;
-        let xml = with_firmware_record(&inactive, &code, &sha256)?;
+        let xml = with_firmware_record(&qualifying_definition()?, &code, &sha256)?;
         Domain::define_xml(conn, &xml)
             .map_err(|e| anyhow!("cannot redefine '{name}': {}", e.message()))?;
         Ok(())
@@ -4955,6 +4967,13 @@ mod tests {
         );
         let old_owner = xml.find("<vmm:owner").unwrap();
         assert_eq!(&xml[..old_owner], &new[..old_owner]);
+        // The suffix after the element is unchanged too.
+        let (old_end, new_end) = (
+            old_owner + xml[old_owner..].find("/>").unwrap() + 2,
+            old_owner + new[old_owner..].find("/>").unwrap() + 2,
+        );
+        assert_ne!(&xml[old_owner..old_end], &new[old_owner..new_end]);
+        assert_eq!(&xml[old_end..], &new[new_end..]);
     }
 
     #[test]

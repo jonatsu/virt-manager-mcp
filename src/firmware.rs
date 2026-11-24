@@ -84,7 +84,11 @@ pub fn loader_path(live_xml: &str) -> Result<String> {
 ///
 /// Fails when the path is not a regular file, is over 64 MiB, or cannot be read.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let meta = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    // The opened file's metadata, not the path's: the file checked is the file read.
+    let meta = file
+        .metadata()
+        .with_context(|| format!("reading {}", path.display()))?;
     if !meta.is_file() {
         bail!("{} is not a regular file", path.display());
     }
@@ -95,15 +99,24 @@ pub fn sha256_file(path: &Path) -> Result<String> {
             meta.len()
         );
     }
-    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    sha256_reader(file, MAX_CODE_BYTES).with_context(|| format!("reading {}", path.display()))
+}
+
+/// The SHA-256 of what `reader` yields, in lower-case hex. A reader that yields more than `max` bytes, such as a file
+/// that grew after its size was checked, is refused.
+fn sha256_reader(reader: impl Read, max: u64) -> Result<String> {
     let mut hasher = Sha256::new();
+    let mut limited = reader.take(max.saturating_add(1));
     let mut buf = vec![0; 64 * 1024];
+    let mut total = 0u64;
     loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let n = limited.read(&mut buf)?;
         if n == 0 {
             break;
+        }
+        total += n as u64;
+        if total > max {
+            bail!("more than {max} bytes");
         }
         hasher.update(&buf[..n]);
     }
@@ -298,6 +311,38 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_over_the_cap_is_not_hashed() {
+        let dir = scratch_dir("cap");
+        // A sparse file one byte over the cap, which the size check refuses.
+        let big = dir.join("BIG.fd");
+        File::create(&big)
+            .unwrap()
+            .set_len(MAX_CODE_BYTES + 1)
+            .unwrap();
+        let err = format!("{:#}", sha256_file(&big).unwrap_err());
+        assert!(err.contains("over the"), "{err}");
+        // One at the cap is read.
+        let exact = dir.join("EXACT.fd");
+        File::create(&exact)
+            .unwrap()
+            .set_len(MAX_CODE_BYTES)
+            .unwrap();
+        assert!(sha256_file(&exact).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_reader_that_yields_more_than_the_cap_is_refused() {
+        // A file that grew after its size was checked.
+        let bytes = [7u8; 11];
+        assert!(sha256_reader(&bytes[..], 10).is_err());
+        assert_eq!(
+            sha256_reader(&bytes[..10], 10).unwrap(),
+            sha256_reader(&bytes[..10], 100).unwrap()
+        );
     }
 
     #[test]
