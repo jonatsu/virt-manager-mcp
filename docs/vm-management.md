@@ -89,7 +89,8 @@ max_disk_gib = 32
 
 - **Deleting:** `delete_vm` needs the VM to be shut off. It removes the VM with its snapshots,
   NVRAM and TPM state, and deletes the VM's disks that are volumes in `disk_pool`. Disks
-  elsewhere and ISOs are never deleted. The same applies to VMs in `manage_vms`.
+  elsewhere and ISOs are never deleted, and neither is TPM state that the VM's definition keeps in a file or
+  directory outside `disk_pool`; the reply names it. The same applies to VMs in `manage_vms`.
 
 - **Reconfiguring:** `configure_vm` changes vCPUs and memory in the persistent configuration
   (takes effect at the next boot). `attach_disk` creates a new volume in `disk_pool` and attaches

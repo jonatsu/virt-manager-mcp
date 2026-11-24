@@ -269,7 +269,7 @@ fn resolve_existing(path: &std::path::Path) -> PathBuf {
 }
 
 /// The `<target><path>` of a storage pool's XML, if it has one.
-fn pool_target(xml: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn pool_target(xml: &str) -> Result<Option<PathBuf>> {
     let doc = roxmltree::Document::parse(xml).context("parsing storage pool XML")?;
     Ok(doc
         .root_element()

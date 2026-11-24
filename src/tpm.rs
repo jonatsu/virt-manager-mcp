@@ -189,6 +189,40 @@ pub fn start_refusal(xml: &str, message: &str) -> Option<String> {
     ))
 }
 
+/// The paths of the TPM state that `xml`, a VM's inactive definition, keeps outside `pool_dir`, in document order.
+/// libvirt deletes whatever file or directory a TPM `<source>` names when it undefines a VM, so the caller keeps
+/// them. A definition without a `<source>` keeps its state in libvirt's own directory, which libvirt owns, and
+/// without a pool directory nothing is inside it.
+///
+/// # Errors
+///
+/// Fails when `xml` is not a domain definition.
+pub fn state_outside_pool(xml: &str, pool_dir: Option<&Path>) -> Result<Vec<String>> {
+    let doc =
+        roxmltree::Document::parse(xml).context("reading the TPM devices of the definition")?;
+    Ok(sources(&doc)
+        .filter_map(|source| source.attribute("path"))
+        .filter(|path| !is_in(path, pool_dir))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The `<source>` elements of the TPM backends in `doc`.
+fn sources<'a, 'i>(
+    doc: &'a roxmltree::Document<'i>,
+) -> impl Iterator<Item = roxmltree::Node<'a, 'i>> {
+    doc.descendants()
+        .filter(|n| n.has_tag_name("tpm"))
+        .flat_map(|tpm| tpm.children().filter(|n| n.has_tag_name("backend")))
+        .flat_map(|backend| backend.children().filter(|n| n.has_tag_name("source")))
+}
+
+/// Whether `path` names an entry directly in `dir`. The comparison is of path components, so a `..` or a longer
+/// directory never passes, and a path that fails it is treated as outside.
+fn is_in(path: &str, dir: Option<&Path>) -> bool {
+    dir.is_some_and(|dir| Path::new(path).parent() == Some(dir))
+}
+
 /// `~/.cache/virtmanager-mcp`, where the scratch directories go.
 fn scratch_parent(home: Option<OsString>) -> Result<PathBuf> {
     let home = home
@@ -544,6 +578,76 @@ mod tests {
             None
         );
         assert_eq!(start_refusal("not xml", SETUP_FAILURE), None);
+    }
+
+    const POOL: &str = "/var/lib/libvirt/images/agent-vms";
+
+    fn outside(tpm: &str, pool: Option<&str>) -> Vec<String> {
+        state_outside_pool(&definition(tpm), pool.map(Path::new)).unwrap()
+    }
+
+    #[test]
+    fn a_state_file_outside_the_pool_is_listed_so_the_undefine_keeps_it() {
+        // The refusal case: a file source elsewhere must come back, so the caller undefines with KEEP_TPM.
+        let elsewhere = "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>\
+                         <source type='file' path='/home/u/victim.tpm'/></backend></tpm>";
+        assert_eq!(outside(elsewhere, Some(POOL)), ["/home/u/victim.tpm"]);
+        // A directory source is listed the same way.
+        let dir = "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>\
+                   <source type='dir' path='/home/u/state'/></backend></tpm>";
+        assert_eq!(outside(dir, Some(POOL)), ["/home/u/state"]);
+        // Without a pool directory nothing is inside it.
+        assert_eq!(outside(FILE_TPM, None), [format!("{POOL}/t-v.tpm")]);
+    }
+
+    #[test]
+    fn a_path_that_only_looks_like_the_pool_is_outside_it() {
+        for path in [
+            format!("{POOL}-other/t-v.tpm"),
+            format!("{POOL}/../t-v.tpm"),
+            format!("{POOL}/sub/t-v.tpm"),
+            "t-v.tpm".to_string(),
+            format!("/mnt{POOL}/t-v.tpm"),
+        ] {
+            let tpm = format!(
+                "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>\
+                 <source type='file' path='{path}'/></backend></tpm>"
+            );
+            assert_eq!(
+                outside(&tpm, Some(POOL)),
+                std::slice::from_ref(&path),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pool_file_and_libvirts_own_state_are_not_outside() {
+        assert!(outside(FILE_TPM, Some(POOL)).is_empty());
+        // A trailing slash on the pool directory names the same directory.
+        assert!(outside(FILE_TPM, Some("/var/lib/libvirt/images/agent-vms/")).is_empty());
+        // No `<source>`: libvirt keeps the state under its own directory and owns it, as it owns NVRAM.
+        let own = "<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>";
+        assert!(outside(own, Some(POOL)).is_empty());
+        assert!(outside("", Some(POOL)).is_empty());
+        // A passthrough device has no `<source>` with a path.
+        let passthrough = "<tpm model='tpm-tis'><backend type='passthrough'>\
+                           <device path='/dev/tpm0'/></backend></tpm>";
+        assert!(outside(passthrough, Some(POOL)).is_empty());
+    }
+
+    #[test]
+    fn one_state_outside_the_pool_is_enough_to_list_it_among_pool_files() {
+        let two = format!(
+            "{FILE_TPM}<tpm model='tpm-tis'><backend type='emulator'>\
+             <source type='file' path='/home/u/v.tpm'/></backend></tpm>"
+        );
+        assert_eq!(outside(&two, Some(POOL)), ["/home/u/v.tpm"]);
+    }
+
+    #[test]
+    fn a_definition_that_is_not_xml_is_an_error() {
+        assert!(state_outside_pool("not xml", Some(Path::new(POOL))).is_err());
     }
 
     #[test]

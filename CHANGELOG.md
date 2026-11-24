@@ -48,6 +48,10 @@ Each release's section lists what changed for people who run the server and for 
   `owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,`. Without the rule, `create_vm` still succeeds and `start_vm`
   is refused with a message that names the file and the line. `create_vm` also refuses a TPM while `<name>.tpm`
   already exists in the pool, and names the `virsh vol-delete` command that removes it.
+- `delete_vm` and expiry now keep a VM's TPM state file or directory when its definition names a path outside
+  `manage.disk_pool`, and say so in the reply, as they do for disks outside the pool. Before, libvirt deleted whatever
+  path a `manage_vms` VM's `<tpm>` named. State in the pool, and libvirt's own state under `/var/lib/libvirt/swtpm/`,
+  is still deleted with the VM.
 - `create_vm` with `secure_boot` on, the default, now asks libvirt for firmware with Secure Boot and the enrolled keys,
   instead of leaving the choice to libvirt. A VM with `firmware: "bios"` and `secure_boot: false` now fails with
   `secure_boot "off" and "setup" need firmware "uefi"`. VMs that exist keep their definition.

@@ -428,8 +428,9 @@ names. Then a module `src/tpm.rs`:
   `swtpm_setup` in libvirt's message, becomes a refusal that names `/etc/apparmor.d/local/usr.bin.swtpm` and the line
   `owner <pool dir>/*.tpm rwk,` as the first thing to check.
 
-- `delete` and `expire` keep `VIR_DOMAIN_UNDEFINE_TPM`, so libvirt removes the pool file. Nothing undefines a VM it
-  keeps.
+- `delete` and `expire` keep `VIR_DOMAIN_UNDEFINE_TPM`, so libvirt removes the pool file, unless the inactive
+  definition's TPM `<source>` names a path outside the `disk_pool` directory. Then they pass
+  `VIR_DOMAIN_UNDEFINE_KEEP_TPM` instead and the reply names the kept path. Nothing undefines a VM it keeps.
 
 - `CHANGELOG.md` says that `tpm: true` now needs `swtpm-tools` and the AppArmor rule on the host, and that a VM made
   before this change keeps its state in libvirt's own location.

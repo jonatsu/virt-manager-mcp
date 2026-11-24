@@ -39,6 +39,28 @@ const UNDEFINE_FLAGS: u32 = sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
     | sys::VIR_DOMAIN_UNDEFINE_NVRAM
     | sys::VIR_DOMAIN_UNDEFINE_TPM;
 
+/// The flags to undefine a VM whose TPM state outside `manage.disk_pool` is `outside`, as `tpm::state_outside_pool`
+/// lists it: `UNDEFINE_FLAGS`, except that libvirt keeps that state instead of deleting it.
+fn undefine_flags_for(outside: &[String]) -> u32 {
+    if outside.is_empty() {
+        UNDEFINE_FLAGS
+    } else {
+        (UNDEFINE_FLAGS & !sys::VIR_DOMAIN_UNDEFINE_TPM) | sys::VIR_DOMAIN_UNDEFINE_KEEP_TPM
+    }
+}
+
+/// The report text for TPM state kept outside `manage.disk_pool`, empty when there is none.
+fn tpm_kept_note(outside: &[String]) -> String {
+    if outside.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; left TPM state outside manage.disk_pool in place: {}",
+            outside.join(", ")
+        )
+    }
+}
+
 /// How long an operation waits for another holder to release the management lock.
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 
@@ -888,6 +910,8 @@ pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
             .filter(|d| d.device == "disk")
             .collect();
         let pool = disk_pool(conn, m)?;
+        // libvirt deletes the TPM state its definition names, so state outside the pool is kept.
+        let tpm_outside = tpm::state_outside_pool(&xml, pool_dir(&pool)?.as_deref())?;
         let outcomes = delete_disks_boot_last(&disks, |d| {
             match pool_volume(conn, &pool, &m.disk_pool, d) {
                 Some(vol) => match vol.delete(0) {
@@ -898,8 +922,8 @@ pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
             }
         });
         // A volume left behind keeps the domain, so the next sweep finds the VM again and retries it.
-        let msg = expiry_report(&name, uuid, &outcomes)?;
-        match dom.undefine_flags(UNDEFINE_FLAGS) {
+        let msg = expiry_report(&name, uuid, &outcomes, &tpm_outside)?;
+        match dom.undefine_flags(undefine_flags_for(&tpm_outside)) {
             Ok(_) => Ok(Some(msg)),
             Err(e) if gone(&e) => Ok(None),
             Err(e) => bail!("cannot undefine '{name}': {}", e.message()),
@@ -940,7 +964,12 @@ fn delete_disks_boot_last(
 /// # Errors
 ///
 /// Fails when any pool volume could not be deleted, so the caller keeps the domain for the next sweep to retry.
-fn expiry_report(name: &str, uuid: &str, outcomes: &[(String, DiskDeletion)]) -> Result<String> {
+fn expiry_report(
+    name: &str,
+    uuid: &str,
+    outcomes: &[(String, DiskDeletion)],
+    tpm_outside: &[String],
+) -> Result<String> {
     let failed: Vec<String> = outcomes
         .iter()
         .filter_map(|(source, o)| match o {
@@ -955,6 +984,7 @@ fn expiry_report(name: &str, uuid: &str, outcomes: &[(String, DiskDeletion)]) ->
         );
     }
     let mut msg = format!("expired VM '{name}' ({uuid}) deleted");
+    msg.push_str(&tpm_kept_note(tpm_outside));
     for (source, o) in outcomes {
         match o {
             DiskDeletion::Deleted => msg.push_str(&format!("; deleted disk {source}")),
@@ -985,7 +1015,8 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
         bail!("VM '{name}' is running; shut it down with stop_vm first");
     }
     let _guard = lock()?;
-    let disks: Vec<DiskInfo> = parse_disks(&inactive_xml(&dom)?)?
+    let xml = inactive_xml(&dom)?;
+    let disks: Vec<DiskInfo> = parse_disks(&xml)?
         .into_iter()
         .filter(|d| d.device == "disk")
         .collect();
@@ -1007,7 +1038,13 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
                 None => kept.push(d.source()),
             }
         }
-        dom.undefine_flags(UNDEFINE_FLAGS)
+        // libvirt deletes the TPM state its definition names, so state outside the pool is kept.
+        let dir = match &pool {
+            Some(p) => pool_dir(p)?,
+            None => None,
+        };
+        let tpm_outside = tpm::state_outside_pool(&xml, dir.as_deref())?;
+        dom.undefine_flags(undefine_flags_for(&tpm_outside))
             .map_err(|e| anyhow!("cannot undefine '{name}': {}", e.message()))?;
 
         let mut msg = format!("deleted VM '{name}'");
@@ -1024,8 +1061,14 @@ pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
                 kept.join(", ")
             ));
         }
+        msg.push_str(&tpm_kept_note(&tpm_outside));
         Ok(msg)
     })
+}
+
+/// The directory `pool` keeps its volumes in, from its XML target path; `None` when the pool has none.
+fn pool_dir(pool: &StoragePool) -> Result<Option<PathBuf>> {
+    hypervisor::pool_target(&pool.get_xml_desc(0)?)
 }
 
 /// Hardware summary of a VM's persistent configuration.
@@ -4280,7 +4323,7 @@ mod tests {
                 DiskDeletion::Failed("Permission denied".into()),
             ),
         ];
-        let err = expiry_report("t", "u-1", &outcomes)
+        let err = expiry_report("t", "u-1", &outcomes, &[])
             .unwrap_err()
             .to_string();
         assert!(
@@ -4337,7 +4380,7 @@ mod tests {
             ["/pool/t-vdc.qcow2"],
             "the seed and the boot disk stay"
         );
-        assert!(expiry_report("t", "u-1", &outcomes).is_err());
+        assert!(expiry_report("t", "u-1", &outcomes, &[]).is_err());
     }
 
     #[test]
@@ -4346,10 +4389,48 @@ mod tests {
             ("/pool/t-g1.qcow2".to_string(), DiskDeletion::Deleted),
             ("/home/u/extra.img".to_string(), DiskDeletion::NotInPool),
         ];
-        let msg = expiry_report("t", "u-1", &outcomes).unwrap();
+        let msg = expiry_report("t", "u-1", &outcomes, &[]).unwrap();
         assert!(msg.starts_with("expired VM 't' (u-1) deleted; deleted disk /pool/t-g1.qcow2"));
         assert!(msg.contains("disk /home/u/extra.img is not a volume in manage.disk_pool"));
         assert!(msg.ends_with("so it was not deleted"));
+    }
+
+    #[test]
+    fn expiry_report_names_tpm_state_kept_outside_the_pool() {
+        let outside = ["/home/u/other.tpm".to_string()];
+        let msg = expiry_report("t", "u-1", &[], &outside).unwrap();
+        assert!(msg.contains("/home/u/other.tpm"), "{msg}");
+        assert!(msg.contains("TPM state"), "{msg}");
+        assert!(msg.contains("outside manage.disk_pool"), "{msg}");
+        let none = expiry_report("t", "u-1", &[], &[]).unwrap();
+        assert!(!none.contains("TPM"), "{none}");
+    }
+
+    #[test]
+    fn state_outside_the_pool_is_kept_by_the_undefine_flags() {
+        let delete = sys::VIR_DOMAIN_UNDEFINE_TPM;
+        let keep = sys::VIR_DOMAIN_UNDEFINE_KEEP_TPM;
+        // Nothing outside the pool: today's flags, which delete the pool file.
+        assert_eq!(undefine_flags_for(&[]), UNDEFINE_FLAGS);
+        assert_ne!(UNDEFINE_FLAGS & delete, 0);
+        assert_eq!(UNDEFINE_FLAGS & keep, 0);
+        // Outside the pool: libvirt keeps the state, and every other cleanup stays.
+        let flags = undefine_flags_for(&["/home/u/x.tpm".to_string()]);
+        assert_ne!(flags & keep, 0);
+        assert_eq!(flags & delete, 0);
+        assert_eq!(flags & !keep, UNDEFINE_FLAGS & !delete);
+    }
+
+    #[test]
+    fn a_kept_tpm_note_lists_every_path_and_is_empty_without_any() {
+        assert_eq!(tpm_kept_note(&[]), "");
+        let note = tpm_kept_note(&["/a/x.tpm".to_string(), "/b/y.tpm".to_string()]);
+        assert!(note.starts_with("; "), "{note}");
+        assert!(
+            note.contains("TPM state outside manage.disk_pool"),
+            "{note}"
+        );
+        assert!(note.contains("/a/x.tpm, /b/y.tpm"), "{note}");
     }
 
     #[test]

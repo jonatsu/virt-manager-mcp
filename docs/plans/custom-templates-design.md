@@ -336,8 +336,9 @@ its steps.
 
 `virsh undefine` without `--keep-tpm` deletes the pool state file, whether or not `--tpm` is given. Wherever the server
 undefines a VM it means to keep, it passes `--keep-tpm`. Deletion removes `<vm>.tpm` through the pool, like other
-volumes. A VM made before this change keeps its TPM state in libvirt's own location; a reset cannot clear it and says
-so, as a seal says for a UEFI VM made earlier.
+volumes, and keeps a TPM file or directory outside `disk_pool`, as it keeps disks there, by passing `--keep-tpm` and
+naming the path in the reply. A VM made before this change keeps its TPM state in libvirt's own location; a reset
+cannot clear it and says so, as a seal says for a UEFI VM made earlier.
 
 ### Hibernation
 
