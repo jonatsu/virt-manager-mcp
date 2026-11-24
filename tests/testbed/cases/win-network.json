@@ -1,0 +1,42 @@
+[
+  {
+    "tool": "vm_addresses",
+    "args": {
+      "vm": "t-win11net"
+    },
+    "expect": {
+      "matches": "\"address\":\"192\\.168\\.122\\.\\d+\",\"prefix\":24\\}\\],\"mac\":\"[0-9a-f:]+\",\"name\":\"[^\"]+\",\"source\":\"lease\""
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11net",
+      "command": "(Get-CimInstance Win32_OperatingSystem).Caption; (Get-Tpm).TpmPresent; (Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName -like '*VirtIO Ethernet*' }).IsSigned",
+      "timeout_secs": 120
+    },
+    "expect": {
+      "matches": "Windows 11 Pro\\s+True\\s+True",
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "vm": "t-win11net",
+      "path": "C:\\ProgramData\\ssh\\administrators_authorized_keys",
+      "content": "${pubkey}\n"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11net",
+      "command": "icacls C:\\ProgramData\\ssh\\administrators_authorized_keys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null; for ($i = 0; $i -lt 60 -and (Get-Service sshd).Status -ne 'Running'; $i++) { Start-Sleep 2 }; (Get-Service sshd).Status",
+      "timeout_secs": 150
+    },
+    "expect": {
+      "contains": "Running"
+    }
+  }
+]

@@ -212,11 +212,12 @@ Reviews of earlier work found these. None blocks the server's use.
     never overwrites an earlier one, and a file stays until someone deletes it. The log goes to
     `console/<vm>/<UTC start>-g<generation>.log` in the first pull directory, up to `limits.console_log_bytes`, and
     `console-log.json` shows a boot's log still readable after `delete_vm`.
-35. **Windows guests with networking are proven.** `t-win11` has no network interface, so no test shows a Windows
-    guest's address in `vm_addresses`, SSH from the host to it, WSL 2 nested inside it, or a revert of a shut-off
-    UEFI VM with a TPM. A Windows install through `create_vm` on the `default` network, with virtio-win as the driver
-    ISO and the answer files merged into it, proves all four, and a test-bed case keeps the address and SSH checks.
-    It waits on follow-up 33.
+35. **Done: Windows guests with networking are proven.** A Windows 11 guest that `create_vm` installed on the `default`
+    network, with virtio-win and an answer file merged into one driver ISO (`tests/testbed/win11/build-net-iso.sh`),
+    showed its address in `vm_addresses`, accepted SSH from the host with a key, ran WSL 2 nested inside it, and
+    reverted from a snapshot of the shut-off VM with its TPM still present
+    ([probe note](../research/2026-11-24-windows-network-probe.md)). `win-network.json` and a unit in `run-all.sh` keep
+    the address and SSH checks on `t-win11net`, which stays shut off for the test bed.
 36. **Host devices for VMs.** An agent testing hardware needs a USB-to-serial adapter or a whole USB device in a
     guest. The operator names each allowed device under `[manage.devices.<name>]`, either `serial` (a host serial
     device path such as `/dev/serial/by-id/…`, shown to the guest as a serial port and attached while the VM is shut
@@ -322,8 +323,7 @@ Parked ideas, which no outcome includes yet:
 
 ## Next
 
-Follow-up 35's Windows install comes next. It needs the live server to run a release with the memory cap of follow-up
-33, because the installed server refuses the new key. Outcome 5 follows on its accepted design, starting with the probes
-that settle its two provisional decisions, then outcome 6, which needs a design that settles the open question above. Of
-the other open follow-ups, 36 needs a short design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`,
-32 lands with the next change to the event worker, and 37 waits until an agent without a shell needs it.
+Outcome 5 comes next, on its accepted design, starting with the probes that settle its two provisional decisions. Then
+comes outcome 6, which needs a design that settles the open question above. Of the other open follow-ups, 36 needs a
+short design, 16 waits on a newer `virtio-win`, 27 waits on `rmcp` and `schemars`, 32 lands with the next change to the
+event worker, and 37 waits until an agent without a shell needs it.

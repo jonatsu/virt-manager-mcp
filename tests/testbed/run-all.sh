@@ -6,8 +6,9 @@
 # creates in pool agent-vms on qemu:///system. The OCR cases run only when VIRTMANAGER_OCR_MODELS names the directory
 # scripts/fetch-ocr-models.sh fills, or, without it, when the directory a server with VIRTMANAGER_OCR_DOWNLOAD=1
 # fills holds both models; they define t-inst and t-win from the XML files here. The Windows cases run on
-# t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off. The transfer cases share and
-# pull host files only under the run's work directory.
+# t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off; win-network runs the same way
+# on t-win11net, which create_vm makes (README, "The Windows guest"). The transfer cases share and pull host files only
+# under the run's work directory.
 set -uo pipefail
 
 readonly URI=qemu:///system
@@ -43,7 +44,7 @@ readonly UNITS=(
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
   diag-hidden
-  screen-installer screen-windows win-exec win-screen
+  screen-installer screen-windows win-exec win-screen win-network
 )
 # Memory the host must have available before an OCR case starts its VM, in MiB: the VM's own plus 1 GiB.
 declare -A SCREEN_VM_MIB=(["t-inst"]=2048 ["t-win"]=5120)
@@ -63,6 +64,8 @@ readonly BIG_BYTES=134217728
 readonly BIG_SHA256=bfa16ddec123a5b3cfe4f858f57dfd0c1a24563a61948324e8f2a3b01d04ea24
 # Memory the host must have available before t-win11 starts, in MiB: its 4 GiB plus 1 GiB.
 readonly WIN_VM_MIB=5120
+# The same for t-win11net: its 8 GiB plus 1 GiB.
+readonly WIN_NET_VM_MIB=9216
 
 declare -A RESULT=()
 ORDER=()
@@ -506,18 +509,20 @@ win_blocker() {
   ((avail >= WIN_VM_MIB)) || echo "t-win11 needs ${WIN_VM_MIB} MiB of available memory; the host has ${avail} MiB"
 }
 
-win_ready() {
-  is_state t-win11 running || vsh start t-win11 > /dev/null || return 1
-  wait_until 600 agent_answers t-win11
+win_ready() { # [vm]
+  local vm=${1:-t-win11}
+  is_state "${vm}" running || vsh start "${vm}" > /dev/null || return 1
+  wait_until 600 agent_answers "${vm}"
 }
 
 # Shuts t-win11 down through its agent, which Windows obeys while a user is logged on, unlike the ACPI button; powers
 # it off if that fails.
-win_shut_off() {
-  is_state t-win11 "shut off" && return 0
-  vsh shutdown t-win11 --mode agent > /dev/null 2>&1 || vsh shutdown t-win11 > /dev/null 2>&1
-  wait_until 180 is_state t-win11 "shut off" && return 0
-  vsh destroy t-win11 > /dev/null && wait_until 30 is_state t-win11 "shut off"
+win_shut_off() { # [vm]
+  local vm=${1:-t-win11}
+  is_state "${vm}" "shut off" && return 0
+  vsh shutdown "${vm}" --mode agent > /dev/null 2>&1 || vsh shutdown "${vm}" > /dev/null 2>&1
+  wait_until 180 is_state "${vm}" "shut off" && return 0
+  vsh destroy "${vm}" > /dev/null && wait_until 30 is_state "${vm}" "shut off"
 }
 
 # The blank disk that win-push-volume attaches to t-win11 as a second volume.
@@ -632,6 +637,82 @@ unit_win_screen() {
   win_shut_off || record win-screen failed "could not shut t-win11 off"
 }
 
+# Prints why win-network cannot run, or nothing when it can. A running t-win11net already holds its memory.
+win_net_blocker() {
+  local avail tool
+  for tool in ssh ssh-keygen jq; do
+    command -v "${tool}" > /dev/null || {
+      echo "${tool} is not installed"
+      return
+    }
+  done
+  if ! vsh dominfo t-win11net > /dev/null 2>&1; then
+    echo "no t-win11net; tests/testbed/README.md says how create_vm makes it"
+    return
+  fi
+  is_state t-win11net running && return
+  avail=$(avail_mib)
+  ((avail >= WIN_NET_VM_MIB)) \
+    || echo "t-win11net needs ${WIN_NET_VM_MIB} MiB of available memory; the host has ${avail} MiB"
+}
+
+# Whether t-win11net has a lease and its SSH port accepts a connection, which means that Windows has finished booting
+# far enough for the guest agent to answer commands in time.
+win_net_ssh_open() {
+  local ip
+  ip=$(vsh domifaddr t-win11net --source lease 2> /dev/null | awk '/ipv4/ { split($4, a, "/"); print a[1]; exit }')
+  # shellcheck disable=SC2016 # $0 is the subshell's own argument.
+  [[ -n ${ip} ]] && timeout 3 bash -c 'echo > "/dev/tcp/$0/22"' "${ip}" 2> /dev/null
+}
+
+# This unit starts t-win11net and waits for its SSH server. win-network then checks the address in vm_addresses and
+# installs a test key for the SSH server; the unit logs in from the host with that key, at the address the case's
+# vm_addresses call returned, and shuts the VM off.
+unit_win_network() {
+  local config=${WORK}/config-win-network.toml key=${WORK}/win-network-key reason ip out
+  reason=$(win_net_blocker)
+  if [[ -n ${reason} ]]; then
+    record win-network skipped "${reason}"
+    return
+  fi
+  rm -f -- "${key}" "${key}.pub"
+  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-win11net", /' -e 's/^power_vms = \[/power_vms = ["t-win11net", /' \
+    "${TESTBED}/config-templates.toml" > "${config}" \
+    && [[ $(grep -cF -e 'allowed_vms = ["t-win11net", ' -e 'power_vms = ["t-win11net", ' "${config}") == 2 ]] \
+    || reason="could not write ${config}"
+  if [[ -z ${reason} ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C vmm-testbed -f "${key}" > /dev/null || reason="could not make a test key"
+  fi
+  if [[ -z ${reason} ]]; then
+    jq -n --rawfile pub "${key}.pub" '{pubkey: ($pub | rtrimstr("\n"))}' > "${WORK}/vars.json" \
+      || reason="could not write ${WORK}/vars.json"
+  fi
+  if [[ -z ${reason} ]]; then
+    win_ready t-win11net || reason="the t-win11net agent did not answer"
+  fi
+  if [[ -z ${reason} ]] && ! wait_until 300 win_net_ssh_open; then
+    reason="the t-win11net SSH port did not open within 300 s"
+  fi
+  if [[ -n ${reason} ]]; then
+    record win-network failed "${reason}"
+    win_shut_off t-win11net || record win-network failed "could not shut t-win11net off"
+    return
+  fi
+  run_case win-network "${config}"
+  ip=$(sed -n '/^### vm_addresses/{n;p;q}' "${WORK}/logs/win-network.out" \
+    | jq -r '[.interfaces[] | select(.source == "lease") | .addresses[].address][0] // empty' 2> /dev/null)
+  if [[ ! ${ip} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    record win-network failed "no lease address in the vm_addresses reply"
+  else
+    out=$(ssh -i "${key}" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 "tester@${ip}" whoami 2>&1)
+    [[ ${out//$'\r'/} == 't-win11net\tester' ]] \
+      || record win-network failed "ssh to tester@${ip} with the test key printed: ${out}"
+  fi
+  rm -f -- "${key}" "${key}.pub" "${WORK:?}/vars.json"
+  win_shut_off t-win11net || record win-network failed "could not shut t-win11net off"
+}
+
 # Writes $WORK/config-<name>.toml: config-templates.toml with one more line after the line that matches $2.
 write_variant() { # name after-line line
   local file=${WORK}/config-$1.toml
@@ -736,6 +817,7 @@ run_unit() {
     screen-windows) unit_screen "$1" t-win ;;
     win-exec) unit_windows ;;
     win-screen) unit_win_screen ;;
+    win-network) unit_win_network ;;
     smoke | guest-agent-and-snapshots | lifecycle-guardrails | write-file-mode | exec-args | console-reopen | \
       start-vm-waits-for-agent | console-closed-on-power-off | screenshot-region | screen-settled | \
       screen-no-models) unit_trial "$1" ;;
@@ -743,14 +825,17 @@ run_unit() {
   esac
 }
 
-# Shuts t-win11 off, and removes the t-* VMs and volumes this run created and tpl-scratch.qcow2; never t-owrt or
+# Shuts t-win11 and t-win11net off, and removes the t-* VMs and volumes this run created and tpl-scratch.qcow2; never t-owrt or
 # anything listed before.
 cleanup() {
   local vm vol
   [[ -n ${WORK} ]] || return 0
-  # An interrupted Windows case leaves t-win11 running, and it holds 4 GiB.
+  # An interrupted Windows case leaves t-win11 running, and it holds 4 GiB; t-win11net holds 8 GiB.
   if is_state t-win11 running; then
     win_shut_off > /dev/null 2>&1 || echo "cleanup: could not shut t-win11 off"
+  fi
+  if is_state t-win11net running; then
+    win_shut_off t-win11net > /dev/null 2>&1 || echo "cleanup: could not shut t-win11net off"
   fi
   while read -r vm; do
     [[ ${vm} == t-* && ${vm} != t-owrt ]] || continue

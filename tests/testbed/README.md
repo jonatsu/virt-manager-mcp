@@ -16,6 +16,7 @@ used the same setup.
 | `t-inst.xml`, `t-win.xml` | Installer guests for the screen cases. See "The installer guests". |
 | `t-owrt.xml` | Serial-only OpenWrt appliance. See "The OpenWrt appliance". |
 | `t-win11.xml`, `win11/` | Windows 11 guest and its unattended build, `win11/build.sh` with `autounattend.xml`. See "The Windows guest". |
+| `win11/build-net-iso.sh` | Builds the driver ISO of the networked Windows guest `t-win11net`, with `win11/autounattend-net.xml`. See "The networked Windows guest". |
 | `cases/*.json` | Call lists, one per area. |
 
 ## Cases
@@ -89,6 +90,7 @@ The template cases run with `config-templates.toml`. They need the template volu
 | `win-transfer.json`, then `win-transfer-caps.json` | Run last, with the share and pull directories of the transfer cases; the caps case runs with `max_pull_bytes` at 64 MiB. A file goes to `C:\Windows\Temp` through `copy_to_vm` with a matching `Get-FileHash`, and comes back through `copy_from_vm`, which the script checks. `vm_addresses` lists no interfaces, because the guest has no network interface. Under code page 437, a push below a file named `vmm-été-file` fails with an error naming that path intact and saying that it is not a directory. `copy_dir_to_vm` pushes the transfer tree with matching hashes, no read-only file and every symlink skipped, is refused without `replace`, and with `replace` swaps over an old tree holding a junction to a sentinel, which survives. It refuses `C:\`, `c:\windows\` with `replace`, `C:\Windows.` and a UNC path. A push of `share/win-tree` skips and names `CON`, `nul.txt`, `a?b`, `tail.`, `case.txt` beside `Case.txt`, the directory `aux` with its file, and a symlink. `copy_dir_from_vm` pulls the pushed tree to `pull/win-dir`, which the script checks. A `replace` while a job holds a file open fails with the open-file message and leaves the old tree. A push and a `replace` of `share/win-deep`, whose path reaches 288 characters in the guest, leave no `.vmm-*` entry. While a push of `share/win-ete` to `C:\Users\Public\vmm-acl` runs, a job sees its `.vmm-*.a` archive directory in `C:\Windows\Temp` with a protected access list, and the directory and its `push.tar` granting access only to `SYSTEM` and `Administrators`; afterwards neither `C:\Users\Public` nor `C:\Windows\Temp` holds a `.vmm-*` entry. That push leaves the same access rules on its root and its two files as a tree made there with `New-Item` and `Set-Content`, the inherited `INTERACTIVE` rule included; the tree has no subdirectory, which the research note covers. A push of the same tree to `C:\Windows\Temp\vmm-été` has matching hashes, and its pull to `pull/win-ete`, which the script checks, works although the path is not ASCII. A pull of a guest tree holding `日本.txt` fails with exit status 255 and the code-page message, and leaves no host directory. The caps case pulls a 4 GiB file, which fails at `limits.max_pull_bytes`, and a tree whose junction points to itself, which fails in `tar.exe` with `Cannot stat`; the script checks that neither left a host directory. Both cases check that `C:\Windows\Temp` holds no `.vmm-*` entry and no `tar` runs, and remove their guest trees. |
 | `win-push-place.json` | Runs after the caps case, in `C:\vmm-own`, whose access list lets `Users` rename entries, as a user's own folder does. A push to `new\deeper\app` creates both parents, and the tree and the parents carry the same access rules as ones made there in place. A `replace` over an old tree holding a junction, a directory symbolic link and a hard link to a victim file, and a read-only file, leaves only the new files, the victim file and directory unchanged, and no `.vmm-*` entry. A push below a junction is refused naming it, and a `replace` of a junction is refused as not a directory, with the victim unchanged. A push to `C:\vmm-rootpush` carries the access rules of a directory made there. No principal but `SYSTEM`, `Administrators` and `CREATOR OWNER` may delete or rename entries in `C:\Windows\Temp`. |
 | `win-push-volume.json` | `run-all.sh` shuts `t-win11` off, attaches a blank 1 GiB `t-push-vol.qcow2` from `agent-vms`, and starts it; the case formats it as `X:`. A push and a `replace` of the transfer tree to `X:\vmm-vol\app` copy it across volumes with matching hashes, the access rules of a tree made there in place, and no `.vmm-*` entry. The script then detaches and deletes the disk. |
+| `win-network.json` | Runs on `t-win11net` (see "The networked Windows guest"), with it added to `allowed_vms` and `power_vms`. `run-all.sh` skips it when the VM is absent or the host lacks 9 GiB of available memory, starts the VM and waits for its SSH port. `vm_addresses` names a `lease` address on `192.168.122.0/24`. The guest is Windows 11 Pro with a TPM and a signed virtio network driver. The case writes the test public key from `vars.json` to `C:\ProgramData\ssh\administrators_authorized_keys`, fixes its access list and waits for `sshd`. Then `run-all.sh` logs in from the host with the matching private key at the address the case saw, and `whoami` prints `t-win11net\tester`. The VM is shut off afterwards. |
 | `win-jobs-restart.json` | Manual: `run-all.sh` does not run it. A job keeps running through a restart of the guest agent, started through WMI. See "The Windows guest" for why. |
 
 The screen cases need the OCR models and the guests in "The installer guests". They run with a screen config:
@@ -331,6 +333,55 @@ agent process runs, but libvirt reports the channel disconnected. This happened 
 
 To remove the guest, run `virsh -c qemu:///system undefine t-win11 --nvram --tpm`. Then run
 `virsh -c qemu:///system vol-delete --pool agent-vms t-win11.qcow2`.
+
+## The networked Windows guest
+
+`t-win11net` is a Windows 11 Pro VM that the server's own `create_vm` installs on libvirt's `default` network, with
+8 GiB, 4 vCPUs, a 64 GiB virtio disk, UEFI with Secure Boot and a TPM. `win-network.json` uses it for the address and
+SSH checks. It needs two ISOs in a directory that the server config lists in `iso_dirs`. `win11-26h2.iso` is the
+Windows 11 install ISO. The other is `virtio-win-0.1.302.iso` with `win11/autounattend-net.xml` merged in, which
+`win11/build-net-iso.sh` builds. The script pins the SHA-256 of the `virtio-win` ISO as `build.sh` does, and needs
+`xorriso`:
+
+```sh
+tests/testbed/win11/build-net-iso.sh ~/Downloads/virtio-win-0.1.302.iso /path/to/iso_dir/virtio-win-0.1.302-net.iso
+```
+
+The answer file is `autounattend.xml` with a network. Setup loads the virtio storage and NetKVM drivers from the
+CD-ROM drives, and the first-logon commands install the guest agent and the OpenSSH server. The server is an optional
+Windows capability that downloads from Windows Update, which takes several minutes. The capability's firewall rule
+covers only the Private profile, so the answer file opens it to every profile, because the guest's NAT network is
+Public. The account `tester` has the same test-only password as on `t-win11`.
+
+Create the VM with a server config that allows both ISOs and caps memory at 8192 MiB, vCPUs at 4 and disks at 64 GiB.
+Then start it and press a key at the DVD's boot prompt, as `build.sh` does:
+
+```json
+{
+  "tool": "create_vm",
+  "args": {
+    "name": "t-win11net",
+    "os": "windows",
+    "vcpus": 4,
+    "memory_mib": 8192,
+    "disk_gib": 64,
+    "firmware": "uefi",
+    "secure_boot": true,
+    "tpm": true,
+    "network": "default",
+    "iso": "/path/to/iso_dir/win11-26h2.iso",
+    "driver_iso": "/path/to/iso_dir/virtio-win-0.1.302-net.iso"
+  }
+}
+```
+
+Wait for the guest agent, then for `sshd`, which starts after the agent. Shut the VM down, then eject both CD-ROMs with
+`set_cdrom` (`sda` and `sdb`).
+[`docs/research/2026-11-24-windows-network-probe.md`](../../docs/research/2026-11-24-windows-network-probe.md) records
+the install and the WSL 2 and snapshot checks.
+
+Remove the VM with the server's `delete_vm`, or with `virsh -c qemu:///system undefine t-win11net --nvram --tpm` and
+`virsh -c qemu:///system vol-delete --pool agent-vms t-win11net.qcow2`.
 
 ## Credentials
 
