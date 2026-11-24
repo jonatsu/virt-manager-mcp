@@ -56,6 +56,19 @@ The success signals, the method and the rules for changing these goals are on th
 
 The [tools reference](docs/tools.md) lists every tool, the mechanism behind it, and what read-only mode hides.
 
+## Terms
+
+- **Image:** a file that holds an operating system or its installer, wherever it comes from: an installer ISO, a cloud
+  image, or a disk image a build produced.
+- **Volume:** a file in a libvirt storage pool. The VMs the server creates keep their disks as volumes in
+  `manage.disk_pool`.
+- **Template:** a qcow2 volume in `manage.disk_pool`, registered under a name, that the server makes disposable VMs
+  from. Each VM gets a thin overlay on it, so the template itself never changes. An image becomes a template only when
+  it is copied into the pool and registered. Today that registration is a `[manage.templates.<name>]` entry in the
+  config.
+
+A screenshot is called a screenshot, never an image of the VM.
+
 ## Install
 
 Install a release build, or build from source. Either way, the host needs the libvirt client library at run time.

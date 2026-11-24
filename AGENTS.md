@@ -10,13 +10,14 @@ This repository is a Rust MCP server that gives AI agents guarded access to libv
   approval, so stop and ask before work that would break a goal or widen the scope.
 - Track planned work in `docs/plans/fork-roadmap.md`, and mark each item done in the commit that lands it.
 - Keep dated evidence in `docs/research/`. Cite it from the roadmap rather than copying it.
-- Treat `example-global-CLAUDE.md` and `example-global-AGENTS.md` as product templates for the server's users. They
-  are not instructions for working on this repository.
+- Treat `example-global-CLAUDE.md` and `example-global-AGENTS.md` as example instruction files for the server's users.
+  They are not instructions for working on this repository.
+- Use image, volume and template only as the Terms section of `README.md` defines them.
 - Use Conventional Commits, one logical change per commit.
 - Record each change that operators or agents notice under `## Unreleased` in `CHANGELOG.md`, in the commit that makes
   it. `CONTRIBUTING.md` defines the version rules and the release steps.
 - Keep designs in `docs/plans/<name>-design.md` short and plain: summary, decisions, behaviour, invariants, risks,
-  open questions. Do not use arc42 or other heavy templates.
+  open questions. Do not use arc42 or other heavy document formats.
 - Write plans and designs in the project's own voice. State what holds and what was decided, not who decided it or
   when, and never refer to the maintainer in the third person.
 
@@ -40,7 +41,7 @@ together. Formatting uses default rustfmt settings, and for C#, `dotnet format` 
 `.editorconfig`. The helper must stay C# 5, because Windows PowerShell 5.1 compiles it; `tools/winsteps-helper/`
 builds it that way. The unit tests never touch libvirt. Run `pre-commit install` once
 per clone. Leave `docs/research/` and `example-global-*.md` out of the Markdown formatters: they hold dated records,
-some copied verbatim, and prompt templates.
+some copied verbatim, and example instruction files.
 
 ## Guardrails
 
