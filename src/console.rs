@@ -17,6 +17,7 @@ use virt::domain::Domain;
 use virt::stream::Stream;
 use virt::sys;
 
+use crate::consolelog::{self, ConsoleLog, LogTarget};
 use crate::hypervisor::Hypervisor;
 
 const POLL: Duration = Duration::from_millis(30);
@@ -455,13 +456,38 @@ pub struct OpenRequest<'a> {
     pub replace: bool,
     /// The scrollback limit of the new session.
     pub buffer_bytes: usize,
+    /// Where a new session also writes its output, if anywhere.
+    pub log: Option<&'a LogTarget>,
+}
+
+/// What became of a new session's log file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LogStatus {
+    /// The output goes to this file too.
+    Written(std::path::PathBuf),
+    /// The file could not be created; holds the reason. The capture goes on without it.
+    Failed(String),
+}
+
+impl LogStatus {
+    /// The words a reply adds after the generation: ", log <path>" or the failure.
+    pub fn describe(log: Option<&LogStatus>) -> String {
+        match log {
+            None => String::new(),
+            Some(Self::Written(path)) => format!(", log {}", path.display()),
+            Some(Self::Failed(reason)) => format!("; its log could not be written: {reason}"),
+        }
+    }
 }
 
 /// How an open ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum OpenResult {
-    /// A new session, with its generation.
-    Opened { generation: u64 },
+    /// A new session, with its generation and its log.
+    Opened {
+        generation: u64,
+        log: Option<LogStatus>,
+    },
     /// The VM's live session was kept, because the request did not ask to replace it.
     Attached {
         generation: u64,
@@ -477,8 +503,9 @@ impl OpenResult {
     /// The reply for `console_open` on the VM `name`, or the error it ends in.
     pub fn into_message(self, name: &str) -> Result<String> {
         match self {
-            Self::Opened { generation } => Ok(format!(
-                "console for '{name}' opened (generation {generation}); output is buffered from now on"
+            Self::Opened { generation, log } => Ok(format!(
+                "console for '{name}' opened (generation {generation}{}); output is buffered from now on",
+                LogStatus::describe(log.as_ref())
             )),
             Self::Attached { generation, device } => Ok(format!(
                 "console for '{name}' is already open (device: {}, generation {generation}); attached to it. Pass \
@@ -560,6 +587,15 @@ impl Consoles {
             Err(OpenError::Failed(reason)) => return Ok(OpenResult::Failed(reason)),
         };
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let (log, log_status) = match req.log {
+            None => (None, None),
+            Some(target) => {
+                match consolelog::create(target, vm.name, generation, SystemTime::now()) {
+                    Ok((path, log)) => (Some(log), Some(LogStatus::Written(path))),
+                    Err(e) => (None, Some(LogStatus::Failed(format!("{e:#}")))),
+                }
+            }
+        };
         let buffer = Arc::new(Mutex::new(Buffer::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let reader = {
@@ -567,7 +603,7 @@ impl Consoles {
             let cap = req.buffer_bytes;
             std::thread::Builder::new()
                 .name(format!("console-{}", vm.name))
-                .spawn(move || read_loop(stream.as_ref(), &buffer, &stop, cap))?
+                .spawn(move || read_loop(stream.as_ref(), &buffer, &stop, cap, log))?
         };
         let session = Session {
             stream,
@@ -590,7 +626,10 @@ impl Consoles {
             .current
             .replace(session);
         drop(raced);
-        Ok(OpenResult::Opened { generation })
+        Ok(OpenResult::Opened {
+            generation,
+            log: log_status,
+        })
     }
 
     /// Returns buffered output from absolute offset `since` (None = only the
@@ -871,7 +910,13 @@ fn send_all(
     Ok(())
 }
 
-fn read_loop(stream: &dyn ConsoleStream, buffer: &Mutex<Buffer>, stop: &AtomicBool, cap: usize) {
+fn read_loop(
+    stream: &dyn ConsoleStream,
+    buffer: &Mutex<Buffer>,
+    stop: &AtomicBool,
+    cap: usize,
+    mut log: Option<ConsoleLog>,
+) {
     let mut chunk = vec![0u8; 16 * 1024];
     let reason = loop {
         if stop.load(Ordering::Relaxed) {
@@ -883,12 +928,18 @@ fn read_loop(stream: &dyn ConsoleStream, buffer: &Mutex<Buffer>, stop: &AtomicBo
             }
             Recv::Again => std::thread::sleep(POLL),
             Recv::Data(n) => {
-                let mut b = buffer.lock().unwrap();
-                b.data.extend(&chunk[..n]);
-                let excess = b.data.len().saturating_sub(cap);
-                if excess > 0 {
-                    b.data.drain(..excess);
-                    b.start += excess as u64;
+                {
+                    let mut b = buffer.lock().unwrap();
+                    b.data.extend(&chunk[..n]);
+                    let excess = b.data.len().saturating_sub(cap);
+                    if excess > 0 {
+                        b.data.drain(..excess);
+                        b.start += excess as u64;
+                    }
+                }
+                // After the buffer, so a slow log file never holds back what console_read sees.
+                if let Some(log) = &mut log {
+                    log.append(&chunk[..n]);
                 }
             }
             Recv::Error(message) => break format!("console error: {message}"),
@@ -1215,6 +1266,7 @@ mod tests {
                 force,
                 replace,
                 buffer_bytes: 1024,
+                log: None,
             },
         )
         .unwrap()
@@ -1226,7 +1278,7 @@ mod tests {
 
     fn generation_of(result: OpenResult) -> u64 {
         match result {
-            OpenResult::Opened { generation } | OpenResult::Attached { generation, .. } => {
+            OpenResult::Opened { generation, .. } | OpenResult::Attached { generation, .. } => {
                 generation
             }
             other => panic!("expected an open session, got {other:?}"),
@@ -1275,6 +1327,77 @@ mod tests {
         let current = read_all(&c, Run::Current).unwrap();
         assert_eq!((current.data.len(), current.generation), (0, second));
         assert_eq!(current.closed, None);
+    }
+
+    fn open_logged(c: &Consoles, o: &FakeOpener, target: &LogTarget) -> OpenResult {
+        c.open(
+            o,
+            OpenRequest {
+                vm: vm(),
+                domain_id: Some(10),
+                device: None,
+                force: false,
+                replace: false,
+                buffer_bytes: 1024,
+                log: Some(target),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_logged_session_writes_its_output_to_the_file_too() {
+        let dir = std::env::temp_dir().join(format!("vmm-console-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = LogTarget {
+            dir: dir.clone(),
+            max_bytes: 1 << 20,
+        };
+        let (c, o) = (Consoles::default(), FakeOpener::default());
+        let OpenResult::Opened {
+            generation,
+            log: Some(LogStatus::Written(path)),
+        } = open_logged(&c, &o, &target)
+        else {
+            panic!("expected a logged session");
+        };
+        assert!(
+            path.starts_with(dir.join("console/t-vm")),
+            "{}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy()
+                .ends_with(&format!("-g{generation}.log"))
+        );
+        o.stream(0).say(b"boot\n");
+        await_output(&c, Run::Current, b"boot\n");
+        assert_eq!(std::fs::read(&path).unwrap(), b"boot\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_created_leaves_the_capture_running() {
+        let target = LogTarget {
+            dir: std::env::temp_dir()
+                .join(format!("vmm-console-nolog-{}/missing", std::process::id())),
+            max_bytes: 1024,
+        };
+        let (c, o) = (Consoles::default(), FakeOpener::default());
+        let opened = open_logged(&c, &o, &target);
+        assert!(
+            matches!(
+                opened,
+                OpenResult::Opened {
+                    log: Some(LogStatus::Failed(_)),
+                    ..
+                }
+            ),
+            "{opened:?}"
+        );
+        o.stream(0).say(b"still here\n");
+        await_output(&c, Run::Current, b"still here\n");
     }
 
     #[test]
@@ -1481,10 +1604,33 @@ mod tests {
             text.contains("already open") && text.contains("generation 7"),
             "{text}"
         );
-        let opened = OpenResult::Opened { generation: 8 }
-            .into_message("t-vm")
-            .unwrap();
+        let opened = OpenResult::Opened {
+            generation: 8,
+            log: None,
+        }
+        .into_message("t-vm")
+        .unwrap();
         assert!(opened.contains("opened (generation 8)"), "{opened}");
+        let logged = OpenResult::Opened {
+            generation: 8,
+            log: Some(LogStatus::Written("/p/console/t-vm/x-g8.log".into())),
+        }
+        .into_message("t-vm")
+        .unwrap();
+        assert!(
+            logged.contains("opened (generation 8, log /p/console/t-vm/x-g8.log)"),
+            "{logged}"
+        );
+        let unlogged = OpenResult::Opened {
+            generation: 8,
+            log: Some(LogStatus::Failed("no room".into())),
+        }
+        .into_message("t-vm")
+        .unwrap();
+        assert!(
+            unlogged.contains("(generation 8; its log could not be written: no room)"),
+            "{unlogged}"
+        );
         let failed = OpenResult::Failed("busy".into())
             .into_message("t-vm")
             .unwrap_err();

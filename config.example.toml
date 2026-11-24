@@ -23,6 +23,8 @@ share_project_dir = false
 # Host directories that pulls from a guest may write into. Empty (the default) hides the pull
 # tools. The server refuses to start when one overlaps a share directory, the project directory,
 # an ISO directory or a libvirt storage pool, because the guest controls what a pull writes.
+# The first of them also receives a log of every console session the server opens, as
+# console/<vm>/<UTC start>-g<generation>.log. The server never overwrites or deletes a log.
 # host_pull_dirs = ["/home/me/vm-pulls"]
 
 # When true, only tools that change nothing in a VM or on the host are exposed, such as list_vms,
@@ -71,6 +73,7 @@ max_output_bytes = 1048576          # stdout/stderr cap per exec call
 max_file_read_bytes = 10485760      # read_file cap
 agent_timeout_secs = 10             # single guest agent request
 console_buffer_bytes = 262144       # serial console scrollback per VM
+console_log_bytes = 67108864        # most bytes one console log file holds; it then ends with a note
 max_wait_secs = 50                  # longest a wait_for, paced console_write or copy may block;
                                     # a longer copy goes on in the background
 max_pull_bytes = 1073741824         # largest file or archive one pull from a guest may write

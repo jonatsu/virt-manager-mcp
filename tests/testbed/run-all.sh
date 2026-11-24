@@ -40,7 +40,7 @@ readonly UNITS=(
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
   screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot templates-expiry
   templates-expiry-command
-  templates-outside-disk manage-lock memory-cap console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
+  templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
   diag-hidden
   screen-installer screen-windows win-exec win-screen
@@ -298,6 +298,31 @@ unit_memory_cap() {
     return
   }
   run_case memory-cap "${WORK}/config-memory-cap.toml"
+}
+
+# Runs console-log with a pull directory of its own, then checks that the boot's log outlived delete_vm.
+unit_console_log() {
+  local pull=${WORK}/console-pull logs
+  if ! rm -rf -- "${pull:?}" || ! mkdir -p -- "${pull}"; then
+    record console-log failed "could not make ${pull}"
+    return
+  fi
+  {
+    printf 'host_pull_dirs = ["%s"]\n' "${pull}"
+    cat "${TESTBED}/config-templates.toml"
+  } > "${WORK}/config-console-log.toml" || {
+    record console-log failed "could not write config-console-log.toml"
+    return
+  }
+  run_case console-log "${WORK}/config-console-log.toml"
+  shopt -s nullglob
+  logs=("${pull}"/console/t-cl/*-g*.log)
+  shopt -u nullglob
+  if ((${#logs[@]} != 1)); then
+    record console-log failed "expected one log in ${pull}/console/t-cl, found ${#logs[@]}"
+  elif ! grep -qF "Booting \`Debian GNU/Linux'" "${logs[0]}"; then
+    record console-log failed "${logs[0]} lacks the boot menu line"
+  fi
 }
 
 unit_jobs() {
@@ -705,6 +730,7 @@ run_unit() {
     transfer-* | addresses) unit_transfer "$1" ;;
     manage-lock) unit_manage_lock ;;
     memory-cap) unit_memory_cap ;;
+    console-log) unit_console_log ;;
     owrt-* | mouse-refusals) unit_owrt "$1" ;;
     screen-installer) unit_screen "$1" t-inst ;;
     screen-windows) unit_screen "$1" t-win ;;

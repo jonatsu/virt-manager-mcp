@@ -3,6 +3,7 @@ mod agent;
 mod ansi;
 mod config;
 mod console;
+mod consolelog;
 mod dirpull;
 mod display;
 mod events;

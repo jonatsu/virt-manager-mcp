@@ -1,0 +1,38 @@
+[
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-cl",
+      "template": "debian13"
+    },
+    "expect": {
+      "matches": "console captured from boot \\(generation \\d+, log /\\S+/console/t-cl/\\d{8}T\\d{6}Z-g\\d+\\.log\\)",
+      "contains": "guest agent is responding"
+    }
+  },
+  {
+    "tool": "console_open",
+    "args": {
+      "vm": "t-cl"
+    },
+    "expect": {
+      "contains": "attached"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-cl",
+      "force": true
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-cl"
+    },
+    "expect": {
+      "contains": "deleted VM 't-cl'"
+    }
+  }
+]

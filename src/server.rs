@@ -1320,6 +1320,7 @@ impl VirtServer {
                     // A live session of this server is attached to, unless the caller asks for a new one.
                     replace: p.force,
                     buffer_bytes: s.hv.config.limits.console_buffer_bytes,
+                    log: s.hv.config.console_log().as_ref(),
                 },
             )?;
             Ok(vec![ContentBlock::text(result.into_message(&p.vm)?)])

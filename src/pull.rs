@@ -16,6 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 
+use crate::consolelog;
 use crate::pulldir::{LOCK_SUFFIX, STAGING};
 
 /// Mode of every file a pull writes.
@@ -106,8 +107,8 @@ impl Kind {
 impl Destination {
     /// Resolves `host_path` inside one of `pull_dirs`, creating missing parent directories with mode 755. Refuses a
     /// relative path, a `..` component, a path outside every pull directory, a path in or at the staging directory,
-    /// a pull directory itself or a path holding one, and any symlink on the way. A path inside nested pull
-    /// directories belongs to the innermost.
+    /// a path in or at the console log directory of the first pull directory, a pull directory itself or a path
+    /// holding one, and any symlink on the way. A path inside nested pull directories belongs to the innermost.
     pub fn open(pull_dirs: &[PathBuf], host_path: &str) -> Result<Self> {
         let path = Path::new(host_path);
         if !path.is_absolute() {
@@ -140,6 +141,15 @@ impl Destination {
         // directory lies deeper in the outer one.
         if parts.contains(&OsStr::new(STAGING)) {
             bail!("{host_path} is inside a staging directory {STAGING}");
+        }
+        // The server's console logs outlive their VMs; a pull with overwrite must not replace or delete them.
+        if pull_dirs.first() == Some(dir)
+            && parts.first() == Some(&OsStr::new(consolelog::CONSOLE_DIR))
+        {
+            bail!(
+                "{host_path} is inside the console log directory {}; pull somewhere else",
+                dir.join(consolelog::CONSOLE_DIR).display()
+            );
         }
         let pull_dir = rustix::fs::open(
             dir,
@@ -540,6 +550,8 @@ mod tests {
             ("/etc/passwd".to_string(), "not inside"),
             (dir.path(STAGING), "staging"),
             (dir.path(&format!("{STAGING}/x")), "staging"),
+            (dir.path("console"), "console log directory"),
+            (dir.path("console/t-a/x.log"), "console log directory"),
             (
                 dir.0.to_str().unwrap().to_string(),
                 "is or holds a pull directory",

@@ -205,11 +205,13 @@ Reviews of earlier work found these. None blocks the server's use.
     config sets `max_total_memory_mib = 16384`, `max_memory_mib = 12288`, `max_vcpus = 6`, `max_disk_gib = 80` and
     `max_vms = 2`: one Windows VM and one small Linux VM fit together, and two desktop VMs do not. `memory-cap.json`
     shows a second VM's start refused while the first runs, and allowed once it stops.
-34. **A console log that outlives its VM.** The console captured from boot lives in the server's memory, at most
+34. **Done: a console log that outlives its VM.** The console captured from boot lives in the server's memory, at most
     `limits.console_buffer_bytes` (256 KiB), and goes with `delete_vm`, so an agent that tears a VM down after a failed
     boot loses the log before anyone reads it. The server writes each run's console output to a file in
     `host_pull_dirs` as well, and the result of the boot names the file. Each file is named by VM and run, a later run
-    never overwrites an earlier one, and a file stays until someone deletes it.
+    never overwrites an earlier one, and a file stays until someone deletes it. The log goes to
+    `console/<vm>/<UTC start>-g<generation>.log` in the first pull directory, up to `limits.console_log_bytes`, and
+    `console-log.json` shows a boot's log still readable after `delete_vm`.
 35. **Windows guests with networking are proven.** `t-win11` has no network interface, so no test shows a Windows
     guest's address in `vm_addresses`, SSH from the host to it, WSL 2 nested inside it, or a revert of a shut-off
     UEFI VM with a TPM. A Windows install through `create_vm` on the `default` network, with virtio-win as the driver

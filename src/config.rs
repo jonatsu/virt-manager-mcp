@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::consolelog::LogTarget;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
@@ -140,6 +141,8 @@ pub struct Limits {
     pub agent_timeout_secs: i32,
     /// Size of the per-VM serial console scrollback buffer.
     pub console_buffer_bytes: usize,
+    /// Most bytes of console output one log file in the first pull directory holds.
+    pub console_log_bytes: u64,
     /// Longest a waiting call may block: `wait_for`, and a paced `console_write`. Several MCP clients cut tool
     /// calls off at 60 s, so the default stays below that.
     pub max_wait_secs: u64,
@@ -240,6 +243,7 @@ impl Default for Limits {
             max_file_read_bytes: 10 * 1024 * 1024,
             agent_timeout_secs: 10,
             console_buffer_bytes: 256 * 1024,
+            console_log_bytes: 64 << 20,
             max_wait_secs: 50,
             max_pull_bytes: 1 << 30,
             max_pull_entries: 100_000,
@@ -259,6 +263,18 @@ impl Default for Http {
 }
 
 impl Config {
+    /// Where console logs go: the first pull directory, or nowhere when none is configured or in read-only mode,
+    /// which promises no change on the host.
+    pub fn console_log(&self) -> Option<LogTarget> {
+        if self.read_only {
+            return None;
+        }
+        self.host_pull_dirs.first().map(|dir| LogTarget {
+            dir: dir.clone(),
+            max_bytes: self.limits.console_log_bytes,
+        })
+    }
+
     pub fn default_path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -287,6 +303,9 @@ impl Config {
         }
         if self.limits.console_buffer_bytes == 0 {
             bail!("limits.console_buffer_bytes must be positive");
+        }
+        if self.limits.console_log_bytes == 0 {
+            bail!("limits.console_log_bytes must be positive");
         }
         if self.limits.max_transfers == 0 {
             bail!("limits.max_transfers must be positive");
@@ -635,6 +654,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("at least 256"), "{err}");
+    }
+
+    #[test]
+    fn console_logs_go_to_the_first_pull_dir_and_never_in_read_only_mode() {
+        let mut config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.console_log(), None, "no pull directory, no log");
+        config.host_pull_dirs = vec!["/p/one".into(), "/p/two".into()];
+        assert_eq!(
+            config.console_log(),
+            Some(LogTarget {
+                dir: "/p/one".into(),
+                max_bytes: 64 << 20,
+            })
+        );
+        config.read_only = true;
+        assert_eq!(
+            config.console_log(),
+            None,
+            "read-only mode changes nothing on the host"
+        );
+        let err = parse("[limits]\nconsole_log_bytes = 0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("console_log_bytes"), "{err}");
     }
 
     #[test]

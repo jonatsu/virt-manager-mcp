@@ -144,7 +144,7 @@ Every key is optional, and the server refuses a file with an unknown key.
   `read_only`;
 - `[manage]`: VM management, which is off by default, and `[manage.templates.<name>]` for disposable VMs;
 - `[limits]`: timeouts and size caps, such as `exec_timeout_secs`, `max_output_bytes`, `max_wait_secs` and
-  `max_pull_bytes`;
+  `max_pull_bytes`, and `console_log_bytes` for the console logs written to the first pull directory;
 - `[display]`: `ocr_models`, the directory of text recognition models for the `screen_text` wait condition;
 - `[http]`: `bind`, which defaults to `127.0.0.1:8765`, and `token`, which the HTTP transport requires.
 

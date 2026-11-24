@@ -24,6 +24,9 @@
   and a second move drops the first. `console_read` also works on a stopped VM. After a guest panic, the panic text
   is in the current run while a preserved crash keeps the VM in place, and in the previous run once the VM has
   started again.
+- The server's console output lives in memory and goes with `delete_vm`. With `host_pull_dirs` set, every session also
+  writes to `console/<vm>/<UTC start>-g<generation>.log` in the first pull directory, which outlives the VM. Nothing
+  deletes these logs, so clear old ones yourself; each stops at `limits.console_log_bytes`. Read-only mode writes none.
 - `vm_stats` reports one snapshot from two samples about a second apart and keeps no history, so a spike that ended
   before the call leaves no trace. Its filesystem figures come from the guest agent and are the guest's own claim.
 - `wait_for` returns within `limits.max_wait_secs` (default 50 s, below the 60 s at which some clients cut a call)

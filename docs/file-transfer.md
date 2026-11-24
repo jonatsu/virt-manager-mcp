@@ -17,7 +17,8 @@ Copies read and write only in host directories that the config file lists.
   never writes to a pull directory itself or to a path that holds one, and a path inside nested pull directories
   belongs to the innermost. Each pull directory gets a private `.vmm-staging/` directory, where pulls build their
   copies; its filesystem must support `renameat2` with `RENAME_NOREPLACE` and `RENAME_EXCHANGE`, as local
-  filesystems such as ext4, xfs, btrfs and tmpfs do.
+  filesystems such as ext4, xfs, btrfs and tmpfs do. The first pull directory also holds the server's console logs
+  in `console/`, and a pull into or onto that directory is refused, so no pull can replace or delete a log.
 
 ## Moving files
 

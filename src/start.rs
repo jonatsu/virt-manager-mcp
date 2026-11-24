@@ -8,7 +8,10 @@ use anyhow::{Result, anyhow, bail};
 use virt::domain::Domain;
 use virt::sys;
 
-use crate::console::{ConsoleOpener, Consoles, LibvirtOpener, OpenRequest, OpenResult, VmId};
+use crate::console::{
+    ConsoleOpener, Consoles, LibvirtOpener, LogStatus, OpenRequest, OpenResult, VmId,
+};
+use crate::consolelog::LogTarget;
 use crate::events::{Cause, Events, Kind};
 use crate::hypervisor::{self, Hypervisor};
 use crate::manage::{self, RevertTarget, now_epoch};
@@ -96,6 +99,8 @@ pub struct BootRequest<'a> {
     /// The kinds of event the start produces, which the records then attribute to `tool`.
     pub kinds: &'static [Kind],
     pub buffer_bytes: usize,
+    /// Where the captured console's output also goes, if anywhere.
+    pub log: Option<&'a LogTarget>,
 }
 
 /// The kinds of event a paused boot and its resume produce.
@@ -159,11 +164,15 @@ fn boot_inner(
             force: false,
             replace: true,
             buffer_bytes: req.buffer_bytes,
+            log: req.log,
         },
     );
     Ok(match opened {
-        Ok(OpenResult::Opened { generation }) => {
-            format!("; console captured from boot (generation {generation})")
+        Ok(OpenResult::Opened { generation, log }) => {
+            format!(
+                "; console captured from boot (generation {generation}{})",
+                LogStatus::describe(log.as_ref())
+            )
         }
         Ok(OpenResult::Attached { generation, .. }) => {
             format!("; console captured (generation {generation})")
@@ -269,6 +278,7 @@ impl State {
                 tool,
                 kinds: BOOT_KINDS,
                 buffer_bytes: self.hv.config.limits.console_buffer_bytes,
+                log: self.hv.config.console_log().as_ref(),
             },
         )?;
         Ok(format!("started{console}"))
@@ -333,6 +343,7 @@ impl State {
                 tool: "snapshot_revert",
                 kinds: REVERT_KINDS,
                 buffer_bytes: self.hv.config.limits.console_buffer_bytes,
+                log: self.hv.config.console_log().as_ref(),
             },
         )?;
         let console = console.replace("captured from boot", "captured from the snapshot on");
@@ -498,6 +509,7 @@ mod tests {
             tool: "start_vm",
             kinds: BOOT_KINDS,
             buffer_bytes: 1 << 16,
+            log: None,
         }
     }
 
