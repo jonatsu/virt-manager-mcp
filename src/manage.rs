@@ -1254,13 +1254,24 @@ pub fn owned_with_expiry(hv: &Hypervisor) -> Result<Vec<(String, Owner)>> {
     })
 }
 
-/// Deletes the VM with `uuid` if it is still owned and expired at `now`, re-read just before acting, so a VM
-/// deleted and recreated meanwhile is left alone. Powers it off first, then deletes its pool volumes, then
-/// undefines it, so a failure part-way leaves a domain the next sweep finds again. Returns what was done, or
+/// Whether `e` is libvirt's "no such domain", at the top of the error or anywhere in its chain, which a context layer
+/// leaves in place. A message that flattened the libvirt error into text no longer matches.
+fn is_no_domain(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<virt::error::Error>()
+            .is_some_and(|e| e.code() == ErrorNumber::NoDomain)
+    })
+}
+
+/// Deletes the VM with `uuid` if it is still owned and expired at `now`, looked up first and read again under the
+/// lock, so a VM deleted and recreated meanwhile is left alone. Powers it off first, then deletes its pool volumes,
+/// then undefines it, so a failure part-way leaves a domain the next sweep finds again. Returns what was done, or
 /// `None` when there was nothing to do.
 pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
     let m = &hv.config.manage;
-    // Another process may delete the VM at any step; finding it gone means the work is done.
+    // Another process may delete the VM at any step, also while this call waits for the lock; finding it gone means
+    // the work is done.
     let gone = |e: &virt::error::Error| e.code() == ErrorNumber::NoDomain;
     let found = hv.with_conn(|conn| match Domain::lookup_by_uuid_string(conn, uuid) {
         Ok(dom) => Ok(Some(dom)),
@@ -1277,6 +1288,7 @@ pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
             tracing::info!("the sweep leaves VM {uuid} for a later sweep: {e}");
             return Ok(None);
         }
+        Err(e) if is_no_domain(&e) => return Ok(None),
         Err(e) => return Err(e),
     };
     let dom = &*changing.dom;
@@ -5623,6 +5635,63 @@ mod tests {
         check_unlocked(&vm, NOW, &SEAL_HELD).unwrap();
         assert_eq!(vm.cleared.get(), 0);
         assert_eq!(*vm.owner.borrow(), None);
+    }
+
+    /// A connection to libvirt's in-process test driver, which reaches no host, with libvirt's error printing off.
+    fn test_driver() -> virt::connect::Connect {
+        virt::error::clear_error_callback();
+        virt::connect::Connect::open(Some("test:///default")).unwrap()
+    }
+
+    /// libvirt's own "no such domain" error.
+    fn no_domain_error() -> virt::error::Error {
+        let conn = test_driver();
+        let err = Domain::lookup_by_name(&conn, "t-nothing-like-it").unwrap_err();
+        assert_eq!(err.code(), ErrorNumber::NoDomain);
+        err
+    }
+
+    /// A VM whose persistent definition cannot be read: another process deleted it.
+    struct GoneVm(virt::error::Error);
+
+    impl SealSubject for GoneVm {
+        fn name(&self) -> String {
+            "t-a".into()
+        }
+        fn persistent_owner(&self) -> Result<Option<Owner>> {
+            Err(self.0.clone().into())
+        }
+        fn clear_mark(&self) -> Result<()> {
+            unreachable!("a VM that is gone has no mark to clear")
+        }
+    }
+
+    #[test]
+    fn a_vm_deleted_before_or_during_the_checks_is_told_apart_from_any_other_failure() {
+        let locker = FileLock::new("gone");
+        let gone = GoneVm(no_domain_error());
+        let err = lock_checked(&locker, &gone, Checks::Mark, NOW, &SEAL_FREE).unwrap_err();
+        assert!(is_no_domain(&err), "{err:#}");
+        // A context layer on top keeps the libvirt error findable.
+        assert!(is_no_domain(&err.context("checking the VM")));
+        // The lock is let go.
+        drop(locker.acquire().unwrap());
+        // A live mark, a plain failure and another libvirt error are not "gone".
+        let sealed = lock_checked(
+            &locker,
+            &FakeVm::marked(&seal_mark()),
+            Checks::Mark,
+            NOW,
+            &SEAL_HELD,
+        )
+        .unwrap_err();
+        assert!(!is_no_domain(&sealed));
+        assert!(!is_no_domain(&anyhow!("no such domain")));
+        let conn = test_driver();
+        let pool = virt::storage_pool::StoragePool::lookup_by_name(&conn, "t-no-pool").unwrap_err();
+        assert_eq!(pool.code(), ErrorNumber::NoStoragePool);
+        assert!(!is_no_domain(&pool.into()));
+        locker.remove();
     }
 
     #[test]
