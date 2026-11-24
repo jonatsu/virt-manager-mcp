@@ -52,7 +52,7 @@ The success signals, the method and the rules for changing these goals are on th
 | Watch and drive a guest that has no agent | `console_open`, `console_read`, `console_write`, `screenshot`, `send_keys`, `type_text`, `mouse`, `wait_for` | a serial console or a graphics device |
 | Inspect a VM | `list_vms`, `vm_addresses`, `vm_events`, `vm_stats` | none |
 | Start and stop VMs | `start_vm`, `stop_vm` | the VM in `power_vms` |
-| Create, snapshot and delete VMs | `create_vm`, `create_vm_from_template`, `reset_vm`, `snapshot_create`, `delete_vm`, `configure_vm` | `[manage]` enabled in the config |
+| Create, snapshot and delete VMs | `create_vm`, `create_vm_from_template`, `reset_vm`, `snapshot_create`, `delete_vm`, `configure_vm`, `set_display` | `[manage]` enabled in the config |
 
 The [tools reference](docs/tools.md) lists every tool, the mechanism behind it, and what read-only mode hides.
 

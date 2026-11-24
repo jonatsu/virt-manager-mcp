@@ -8,7 +8,7 @@
 | `wait_for` | The console session, the guest agent and the graphical display, polled together | as for the condition's channel; `screen_text` needs the OCR models |
 | `vm_stats` | libvirt domain statistics (`virDomainListGetStats`), and the guest agent's `guest-get-fsinfo` for filesystems | none; the guest's own memory figures need a balloon device with a stats period and a balloon driver in the guest, and filesystems need qemu-guest-agent |
 | `console_open/read/write/close` | Serial / virtio console stream (`virDomainOpenConsole`, like `virsh console`) | `<console>`/`<serial>` device + getty on it |
-| `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE/VNC) |
+| `screenshot`, `send_keys`, `type_text` | Graphical display (`virDomainScreenshot`, `virDomainSendKey`) | A graphics device (SPICE or VNC; either display serves these tools) |
 | `mouse` | QEMU monitor `input-send-event` (`virDomainQemuMonitorCommand`) | A graphics device and a USB tablet |
 | `start_vm`, `stop_vm` | libvirt (`virDomainCreateWithFlags` paused, `virDomainOpenConsole`, `virDomainResume`, `virDomainShutdown`, `virDomainDestroy`) | none (graceful stop needs ACPI or the guest agent) |
 | VM management tools | libvirt domain, storage volume and snapshot APIs | none |
@@ -44,7 +44,7 @@ The path is passed as data, never spliced into shell code.
 | `mouse`: move, click, double-click, drag or scroll at a point of a full-screen screenshot | ❌ |
 | `create_vm`, `delete_vm` (only with `manage.create` / `manage.delete`) | ❌ |
 | `list_templates`, `create_vm_from_template` (with `manage.create` and a template), `reset_vm` (also `manage.delete`) | ❌ |
-| `configure_vm`, `attach_disk`, `detach_disk`, `set_cdrom`, `attach_nic`, `detach_nic` (only with `manage.reconfigure`) | ❌ |
+| `configure_vm`, `attach_disk`, `detach_disk`, `set_cdrom`, `set_display`, `attach_nic`, `detach_nic` (only with `manage.reconfigure`) | ❌ |
 | `snapshot_create`, `snapshot_list`, `snapshot_revert`, `snapshot_delete` (only with `manage.snapshots`) | ❌ |
 | `describe_vm` (with any `manage` operation), `list_isos` (with create/reconfigure and `iso_dirs`) | ❌ |
 

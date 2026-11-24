@@ -25,6 +25,7 @@ use crate::console::{
     CLOSED_BY_CONSOLE_CLOSE, Consoles, LibvirtOpener, OpenRequest, Pacing, Run, VmId,
 };
 use crate::events::{self, Cause, Events, Kind, Record};
+use crate::graphics::DisplayKind;
 use crate::guestpath::GuestPath;
 use crate::hypervisor::{self, Hypervisor};
 use crate::start::Starting;
@@ -72,6 +73,7 @@ const RECONFIGURE_TOOLS: &[&str] = &[
     "attach_disk",
     "detach_disk",
     "set_cdrom",
+    "set_display",
     "attach_nic",
     "detach_nic",
 ];
@@ -555,6 +557,11 @@ pub struct CreateVmParams {
     /// own, and a Linux guest with Secure Boot `"on"` refuses to hibernate under kernel lockdown.
     #[serde(default)]
     pub hibernate: bool,
+    /// The graphical display: `"spice"` (default), `"vnc"` or `"both"`. VNC listens on 127.0.0.1 only, on a port
+    /// libvirt picks at each start, with no password; `describe_vm` and `start_vm` report the port. A VM has no RDP
+    /// display: enable RDP inside the guest instead.
+    #[serde(default)]
+    pub display: DisplayKind,
     /// libvirt network to connect to (default: the first allowed network; none if no network is allowed).
     pub network: Option<String>,
 }
@@ -626,6 +633,14 @@ pub struct SetCdromParams {
     /// CD-ROM target as shown by describe_vm, e.g. "sda". Omit for the first CD-ROM drive. On a shut-off VM, a
     /// free target of the form sd<letter>, such as "sdc", adds a new drive there; q35 has 6 SATA ports.
     pub target: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetDisplayParams {
+    pub vm: String,
+    /// `"spice"`, `"vnc"` (127.0.0.1 only, no password) or `"both"`. Replaces the VM's display from the next start.
+    pub display: DisplayKind,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1181,7 +1196,7 @@ impl VirtServer {
         description = "Start a VM that is shut off (or resume it if paused, wake it if suspended). \
         A boot captures the serial console from its first byte, so console_read from offset 0 shows the boot; a \
         Windows guest writes nothing there, so watch its boot with the screen tools. A crashed VM is refused until \
-        stop_vm with force: true. Only VMs with power_control: true in list_vms can be started."
+        stop_vm with force: true. The reply names the VNC port when the VM has a VNC display. Only VMs with power_control: true in list_vms can be started."
     )]
     async fn start_vm(
         &self,
@@ -1189,6 +1204,9 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let mut msg = format!("VM '{}': {}", p.vm, s.start_vm(&p.vm)?);
+            if let Ok(dom) = s.hv.domain(&p.vm) {
+                msg.push_str(&manage::vnc_note(&dom));
+            }
             let wait = Duration::from_secs(p.wait_for_agent_secs.min(300));
             if !wait.is_zero() {
                 let dom = s.hv.domain(&p.vm)?;
@@ -1921,7 +1939,8 @@ impl VirtServer {
         ),
         description = "Create a new VM (shut off; start it with start_vm). It gets a new qcow2 system disk, an empty \
         or ISO-loaded SATA CD-ROM it boots from after the disk (driver_iso and up to 4 extra_isos add more), a virtio NIC, the QEMU guest agent channel, a serial \
-        console and a SPICE display. The guest agent must still be installed inside the guest. Limits and allowed \
+        console and a SPICE display (display: \"vnc\" or \"both\" gives a VNC display on 127.0.0.1 instead or as well). \
+        The guest agent must still be installed inside the guest. Limits and allowed \
         networks are named in the server instructions."
     )]
     async fn create_vm(
@@ -1944,6 +1963,7 @@ impl VirtServer {
                     driver_iso: p.driver_iso,
                     extra_isos: p.extra_isos,
                     hibernate: p.hibernate,
+                    display: p.display,
                     network: p.network,
                 },
             )?;
@@ -2105,7 +2125,7 @@ impl VirtServer {
             idempotent_hint = true
         ),
         description = "Show the configuration of a VM with managed: true in list_vms: vCPUs, memory, firmware, TPM, \
-        disks and CD-ROMs (with targets), and network interfaces (with MACs)."
+        disks and CD-ROMs (with targets), network interfaces (with MACs), and the display types, with the VNC address and port while the VM runs."
     )]
     async fn describe_vm(
         &self,
@@ -2197,6 +2217,27 @@ impl VirtServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.blocking(move |s| {
             let msg = manage::set_cdrom(&s.hv, &p.vm, p.target.as_deref(), p.iso.as_deref())?;
+            Ok(vec![ContentBlock::text(msg)])
+        })
+        .await
+    }
+
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        ),
+        description = "Change the display of a shut-off managed VM to \"spice\", \"vnc\" (127.0.0.1 only, no password) \
+        or \"both\", in its persistent definition. Refuses a running VM and a VM with a display that create_vm did not \
+        write, such as one with a password. start_vm then names the VNC port."
+    )]
+    async fn set_display(
+        &self,
+        Parameters(p): Parameters<SetDisplayParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.blocking(move |s| {
+            let msg = manage::set_display(&s.hv, &p.vm, p.display)?;
             Ok(vec![ContentBlock::text(msg)])
         })
         .await
@@ -2770,7 +2811,7 @@ mod tests {
     #[test]
     fn every_tool_states_its_hints() {
         let tools = VirtServer::tool_router().list_all();
-        assert_eq!(tools.len(), 46);
+        assert_eq!(tools.len(), 47);
         let read_only_mode = hidden_tools(
             &toml::from_str(
                 r#"
@@ -3017,6 +3058,68 @@ mod tests {
     }
 
     #[test]
+    fn create_vm_display_defaults_to_spice_and_takes_three_words() {
+        let base = |display: Option<Value>| {
+            let mut params = json!({
+                "name": "t-x", "os": "linux", "vcpus": 1, "memory_mib": 512, "disk_gib": 1
+            });
+            if let Some(v) = display {
+                params["display"] = v;
+            }
+            serde_json::from_value::<CreateVmParams>(params)
+        };
+        assert_eq!(base(None).unwrap().display, DisplayKind::Spice);
+        for (word, kind) in [
+            ("spice", DisplayKind::Spice),
+            ("vnc", DisplayKind::Vnc),
+            ("both", DisplayKind::Both),
+        ] {
+            assert_eq!(base(Some(json!(word))).unwrap().display, kind);
+        }
+        for bad in [json!("rdp"), json!("VNC"), json!(true), json!(null)] {
+            assert!(base(Some(bad.clone())).is_err(), "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn set_display_needs_a_vm_and_a_display_and_takes_nothing_else() {
+        let parse = |params: Value| serde_json::from_value::<SetDisplayParams>(params);
+        assert_eq!(
+            parse(json!({ "vm": "t-x", "display": "both" }))
+                .unwrap()
+                .display,
+            DisplayKind::Both
+        );
+        for bad in [
+            json!({ "vm": "t-x" }),
+            json!({ "display": "vnc" }),
+            json!({ "vm": "t-x", "display": "rdp" }),
+            json!({ "vm": "t-x", "display": "vnc", "password": "x" }),
+        ] {
+            assert!(parse(bad.clone()).is_err(), "{bad} was accepted");
+        }
+        let tools = VirtServer::tool_router().list_all();
+        let tool = tools.iter().find(|t| t.name == "set_display").unwrap();
+        assert_eq!(
+            tool.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+        let a = tool.annotations.as_ref().unwrap();
+        assert_eq!(a.read_only_hint, Some(false));
+        assert_eq!(a.idempotent_hint, Some(true));
+    }
+
+    #[test]
+    fn set_display_follows_the_reconfigure_switch_and_read_only_mode() {
+        let mut config = Config::default();
+        assert!(hidden_tools(&config).contains(&"set_display"));
+        config.manage.reconfigure = true;
+        assert!(!hidden_tools(&config).contains(&"set_display"));
+        config.read_only = true;
+        assert!(hidden_tools(&config).contains(&"set_display"));
+    }
+
+    #[test]
     fn no_tool_parameter_takes_a_tpm_path_or_a_volume_name_for_tpm_state() {
         // The server builds the TPM state's path, in the pool next to the disk volume. The only TPM parameter is
         // create_vm's boolean `tpm`, and no parameter of any tool names a `.tpm` file.
@@ -3140,6 +3243,7 @@ mod tests {
             "reset_vm",
             "delete_vm",
             "configure_vm",
+            "set_display",
             "snapshot_create",
             "snapshot_revert",
         ];

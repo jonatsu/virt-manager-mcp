@@ -9,6 +9,7 @@ mod display;
 mod events;
 mod firmware;
 mod fsops;
+mod graphics;
 mod guestpath;
 mod hypervisor;
 mod jobs;

@@ -47,6 +47,17 @@ max_disk_gib = 32
   names the command that removes it, `virsh vol-delete --pool <disk_pool> <name>.vars`. UEFI VMs created by an
   earlier version keep their variables in libvirt's own directory.
 
+- **Display:** `create_vm` takes `display`: `"spice"` (the default), `"vnc"` or `"both"`. VNC listens on 127.0.0.1
+  only, on a port libvirt picks at each start, and has no password, as SPICE has none. `describe_vm` lists the
+  display types and, while the VM runs, the VNC address and port; `start_vm` names the port in its reply. A desktop
+  client on the host connects to that address and port, also during an OS install. `set_display` changes the display
+  of a shut-off VM the server may manage by rewriting only the `<graphics>` elements of its persistent definition,
+  and, when SPICE goes, the SPICE audio backend that libvirt refuses without it. It refuses a running VM, a VM under a
+  seal, and a display the server did not write: another type than SPICE or VNC, a password, a fixed port, or a
+  listener other than loopback TCP. One virtio video device serves both displays, and `screenshot`, `send_keys`,
+  `type_text` and `mouse` work with either, a VNC-only VM included. libvirt offers no RDP display, so enable RDP
+  inside the guest instead.
+
 - **Hibernation:** `create_vm` with `hibernate: true` turns suspend to disk on and leaves suspend to memory off. A
   guest that hibernates (`systemctl hibernate`) ends up shut off, and `start_vm` resumes it from its swap. libvirt
   keeps no saved state for it, so `vm_events` is where you see it: a `pmsuspended` event with the reason disk comes

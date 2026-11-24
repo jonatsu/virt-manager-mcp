@@ -1,0 +1,374 @@
+//! A VM's graphical display: which graphics devices a new VM gets, how `set_display` replaces them in a persistent
+//! definition, and where a running VM's VNC server listens. The functions are pure; `manage` does the libvirt calls.
+
+use anyhow::{Result, bail};
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+/// The loopback address a VNC display listens on.
+const LOOPBACK: &str = "127.0.0.1";
+
+/// Which displays a VM has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayKind {
+    /// SPICE only, the default.
+    #[default]
+    Spice,
+    /// VNC only, on 127.0.0.1 with an automatic port and no password.
+    Vnc,
+    /// Both, so a SPICE client and a VNC client can connect.
+    Both,
+}
+
+const SPICE_XML: &str = "<graphics type='spice' autoport='yes'><listen type='address'/>\
+                         <image compression='off'/></graphics>";
+const VNC_XML: &str = "<graphics type='vnc' autoport='yes' listen='127.0.0.1'>\
+                       <listen type='address' address='127.0.0.1'/></graphics>";
+
+impl DisplayKind {
+    /// The `<graphics>` elements of a new VM with this display.
+    pub fn graphics_xml(self) -> String {
+        match self {
+            DisplayKind::Spice => SPICE_XML.to_string(),
+            DisplayKind::Vnc => VNC_XML.to_string(),
+            DisplayKind::Both => format!("{SPICE_XML}{VNC_XML}"),
+        }
+    }
+
+    /// The word the tools use for this display.
+    pub fn word(self) -> &'static str {
+        match self {
+            DisplayKind::Spice => "spice",
+            DisplayKind::Vnc => "vnc",
+            DisplayKind::Both => "both",
+        }
+    }
+
+    fn has_spice(self) -> bool {
+        self != DisplayKind::Vnc
+    }
+}
+
+/// The `<graphics>` children of a domain's `<devices>`.
+fn graphics_of<'a, 'i>(
+    devices: roxmltree::Node<'a, 'i>,
+) -> impl Iterator<Item = roxmltree::Node<'a, 'i>> {
+    devices.children().filter(|n| n.has_tag_name("graphics"))
+}
+
+/// Whether `address` is a loopback address.
+fn is_loopback(address: &str) -> bool {
+    matches!(address, "127.0.0.1" | "::1" | "localhost")
+}
+
+/// Why `set_display` may not replace this display, or `None` when it is one the server writes.
+fn unreplaceable(g: roxmltree::Node<'_, '_>) -> Option<String> {
+    let kind = g.attribute("type").unwrap_or_default();
+    if !matches!(kind, "spice" | "vnc") {
+        return Some(format!("a {kind} display"));
+    }
+    if g.has_attribute("passwd") || g.has_attribute("passwdValidTo") {
+        return Some(format!("a {kind} display with a password"));
+    }
+    let automatic = g.attribute("autoport") == Some("yes");
+    for port in ["port", "tlsPort"] {
+        if !automatic && g.attribute(port).is_some_and(|p| p != "-1") {
+            return Some(format!("a {kind} display with a fixed port"));
+        }
+    }
+    let listeners = g
+        .children()
+        .filter(|n| n.has_tag_name("listen"))
+        .map(|n| (n.attribute("type"), n.attribute("address")))
+        .chain(g.attribute("listen").map(|a| (Some("address"), Some(a))));
+    for (kind_of, address) in listeners {
+        if kind_of != Some("address") || address.is_some_and(|a| !is_loopback(a)) {
+            return Some(format!(
+                "a {kind} display that does not listen on the loopback address"
+            ));
+        }
+    }
+    g.has_attribute("socket")
+        .then(|| format!("a {kind} display on a socket"))
+}
+
+/// `xml`, a domain definition, with its `<graphics>` elements replaced by those of `kind`, and any SPICE audio backend
+/// turned off when the new display has no SPICE, because libvirt refuses `<audio type='spice'/>` without SPICE
+/// graphics. Everything else stays byte for byte.
+///
+/// # Errors
+///
+/// Fails when the XML does not parse or has no `<devices>`, or when an existing display is not one the server writes:
+/// another type than SPICE or VNC, a password, a fixed port, or a listener other than loopback TCP. Replacing such a
+/// display would change what an operator set up.
+pub fn with_display(xml: &str, kind: DisplayKind) -> Result<String> {
+    let doc = roxmltree::Document::parse(xml)?;
+    let Some(devices) = doc
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("devices"))
+    else {
+        bail!("the definition has no <devices>");
+    };
+    // Each edit replaces the byte range with the text.
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    for g in graphics_of(devices) {
+        if let Some(why) = unreplaceable(g) {
+            bail!(
+                "set_display replaces only the SPICE and VNC displays that create_vm writes; this VM has {why}"
+            );
+        }
+        let new = if edits.is_empty() {
+            kind.graphics_xml()
+        } else {
+            String::new()
+        };
+        edits.push((g.range(), new));
+    }
+    if edits.is_empty() {
+        let end = devices.range().end;
+        let close = end - "</devices>".len();
+        if !xml[close..end].eq("</devices>") {
+            bail!("the definition's <devices> has no closing tag");
+        }
+        edits.push((close..close, kind.graphics_xml()));
+    }
+    if !kind.has_spice() {
+        for audio in devices
+            .children()
+            .filter(|n| n.has_tag_name("audio") && n.attribute("type") == Some("spice"))
+        {
+            let id = audio
+                .attribute("id")
+                .map(|id| format!(" id='{id}'"))
+                .unwrap_or_default();
+            edits.push((audio.range(), format!("<audio{id} type='none'/>")));
+        }
+    }
+    edits.sort_by_key(|(range, _)| range.start);
+    let mut out = String::with_capacity(xml.len());
+    let mut pos = 0;
+    for (range, new) in edits {
+        out.push_str(&xml[pos..range.start]);
+        out.push_str(&new);
+        pos = range.end;
+    }
+    out.push_str(&xml[pos..]);
+    Ok(out)
+}
+
+/// The types of the `<graphics>` elements of a domain definition, in order.
+///
+/// # Errors
+///
+/// Fails when the XML does not parse.
+pub fn displays(xml: &str) -> Result<Vec<String>> {
+    let doc = roxmltree::Document::parse(xml)?;
+    Ok(doc
+        .root_element()
+        .children()
+        .filter(|n| n.has_tag_name("devices"))
+        .flat_map(graphics_of)
+        .map(|g| g.attribute("type").unwrap_or_default().to_string())
+        .collect())
+}
+
+/// The address and port of the first VNC display in the live definition of a running VM, or `None` when it has none
+/// or no port is assigned yet.
+pub fn vnc_endpoint(live_xml: &str) -> Option<(String, u16)> {
+    let doc = roxmltree::Document::parse(live_xml).ok()?;
+    let devices = doc
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("devices"))?;
+    let g = graphics_of(devices).find(|g| g.attribute("type") == Some("vnc"))?;
+    let port: u16 = g.attribute("port")?.parse().ok().filter(|p| *p > 0)?;
+    let address = g
+        .children()
+        .find(|n| n.has_tag_name("listen"))
+        .and_then(|n| n.attribute("address"))
+        .or(g.attribute("listen"))
+        .unwrap_or(LOOPBACK);
+    Some((address.to_string(), port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VNC: &str = "<graphics type='vnc' autoport='yes' listen='127.0.0.1'>\
+                       <listen type='address' address='127.0.0.1'/></graphics>";
+    const SPICE: &str = "<graphics type='spice' autoport='yes'><listen type='address'/>\
+                         <image compression='off'/></graphics>";
+
+    fn domain(devices: &str) -> String {
+        format!(
+            "<domain type='kvm'><name>t</name><metadata><o xmlns='urn:x' a='1'/></metadata>\
+             <devices><disk type='file'/>{devices}<video><model type='virtio'/></video></devices></domain>"
+        )
+    }
+
+    #[test]
+    fn a_new_vm_gets_spice_as_before_vnc_on_loopback_or_both() {
+        assert_eq!(DisplayKind::default(), DisplayKind::Spice);
+        assert_eq!(DisplayKind::Spice.graphics_xml(), SPICE);
+        assert_eq!(DisplayKind::Vnc.graphics_xml(), VNC);
+        assert_eq!(DisplayKind::Both.graphics_xml(), format!("{SPICE}{VNC}"));
+        assert!(!DisplayKind::Vnc.graphics_xml().contains("passwd"));
+    }
+
+    #[test]
+    fn the_words_are_the_ones_the_parameter_takes() {
+        let words: Vec<_> = [DisplayKind::Spice, DisplayKind::Vnc, DisplayKind::Both]
+            .map(DisplayKind::word)
+            .into();
+        assert_eq!(words, ["spice", "vnc", "both"]);
+        for word in words {
+            let kind: DisplayKind = serde_json::from_value(serde_json::json!(word)).unwrap();
+            assert_eq!(kind.word(), word);
+        }
+        assert!(serde_json::from_value::<DisplayKind>(serde_json::json!("rdp")).is_err());
+    }
+
+    #[test]
+    fn set_display_swaps_only_the_graphics_and_the_spice_audio() {
+        let spice = domain(&format!("{SPICE}<audio id='1' type='spice'/>"));
+        let vnc = with_display(&spice, DisplayKind::Vnc).unwrap();
+        assert_eq!(
+            vnc,
+            domain(&format!("{VNC}<audio id='1' type='none'/>")),
+            "the rest of the definition stays as it was"
+        );
+        let both = with_display(&vnc, DisplayKind::Both).unwrap();
+        assert_eq!(
+            both,
+            domain(&format!("{SPICE}{VNC}<audio id='1' type='none'/>"))
+        );
+        let back = with_display(&both, DisplayKind::Spice).unwrap();
+        assert_eq!(back, domain(&format!("{SPICE}<audio id='1' type='none'/>")));
+    }
+
+    #[test]
+    fn set_display_keeps_a_spice_audio_backend_while_spice_stays() {
+        let both = domain(&format!("{SPICE}{VNC}<audio id='1' type='spice'/>"));
+        assert!(
+            with_display(&both, DisplayKind::Spice)
+                .unwrap()
+                .contains("<audio id='1' type='spice'/>")
+        );
+    }
+
+    #[test]
+    fn set_display_adds_graphics_to_a_definition_without_any() {
+        let none = domain("");
+        let xml = with_display(&none, DisplayKind::Vnc).unwrap();
+        assert_eq!(
+            xml,
+            "<domain type='kvm'><name>t</name><metadata><o xmlns='urn:x' a='1'/></metadata>\
+             <devices><disk type='file'/><video><model type='virtio'/></video>"
+                .to_string()
+                + VNC
+                + "</devices></domain>"
+        );
+    }
+
+    #[test]
+    fn set_display_takes_libvirts_written_back_form() {
+        let written = domain(
+            "<graphics type='vnc' port='5902' autoport='yes' listen='127.0.0.1'>\
+             <listen type='address' address='127.0.0.1'/></graphics>\
+             <graphics type='spice' port='-1' autoport='yes'><listen type='address'/></graphics>",
+        );
+        let xml = with_display(&written, DisplayKind::Vnc).unwrap();
+        assert_eq!(xml, domain(VNC));
+    }
+
+    #[test]
+    fn set_display_refuses_a_display_the_server_did_not_write() {
+        for (what, graphics) in [
+            ("sdl", "<graphics type='sdl'/>"),
+            ("egl", "<graphics type='egl-headless'/>"),
+            (
+                "password",
+                "<graphics type='vnc' port='-1' autoport='yes' passwd='x'/>",
+            ),
+            ("fixed port", "<graphics type='vnc' port='5905'/>"),
+            (
+                "all addresses",
+                "<graphics type='vnc' autoport='yes' listen='0.0.0.0'>\
+                 <listen type='address' address='0.0.0.0'/></graphics>",
+            ),
+            (
+                "socket",
+                "<graphics type='spice' autoport='no'><listen type='socket' socket='/run/s'/></graphics>",
+            ),
+            (
+                "network",
+                "<graphics type='vnc' autoport='yes'><listen type='network' network='lan'/></graphics>",
+            ),
+        ] {
+            let err = with_display(&domain(graphics), DisplayKind::Vnc)
+                .expect_err(what)
+                .to_string();
+            assert!(err.contains("set_display"), "{what}: {err}");
+        }
+        // One refused display refuses the whole change, even beside one that would pass.
+        assert!(
+            with_display(
+                &domain(&format!("{SPICE}<graphics type='sdl'/>")),
+                DisplayKind::Vnc
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn set_display_refuses_a_definition_that_is_not_a_domain() {
+        assert!(with_display("<domain>", DisplayKind::Vnc).is_err());
+        assert!(with_display("<domain><name>t</name></domain>", DisplayKind::Vnc).is_err());
+    }
+
+    #[test]
+    fn displays_lists_the_graphics_types_in_order() {
+        assert!(displays(&domain("")).unwrap().is_empty());
+        assert_eq!(displays(&domain(SPICE)).unwrap(), ["spice"]);
+        assert_eq!(
+            displays(&domain(&format!("{VNC}{SPICE}"))).unwrap(),
+            ["vnc", "spice"]
+        );
+        assert!(displays("<domain").is_err());
+    }
+
+    #[test]
+    fn the_vnc_endpoint_is_the_live_vnc_port() {
+        let live = |g: &str| domain(g);
+        assert_eq!(
+            vnc_endpoint(&live(
+                "<graphics type='spice' port='5903' autoport='yes' listen='127.0.0.1'/>\
+                 <graphics type='vnc' port='5904' autoport='yes' listen='127.0.0.1'>\
+                 <listen type='address' address='127.0.0.1'/></graphics>"
+            )),
+            Some(("127.0.0.1".into(), 5904))
+        );
+        // The address of the `<listen>` child wins over the attribute, and a missing one is the loopback.
+        assert_eq!(
+            vnc_endpoint(&live(
+                "<graphics type='vnc' port='5900' listen='10.0.0.1'><listen type='address' address='127.0.0.1'/></graphics>"
+            )),
+            Some(("127.0.0.1".into(), 5900))
+        );
+        assert_eq!(
+            vnc_endpoint(&live("<graphics type='vnc' port='5901'/>")),
+            Some(("127.0.0.1".into(), 5901))
+        );
+        // No VNC, no port yet, or nonsense.
+        assert_eq!(vnc_endpoint(&live(SPICE)), None);
+        assert_eq!(
+            vnc_endpoint(&live("<graphics type='vnc' port='-1'/>")),
+            None
+        );
+        assert_eq!(vnc_endpoint(&live("<graphics type='vnc' port='x'/>")), None);
+        assert_eq!(vnc_endpoint("<domain"), None);
+    }
+}

@@ -26,6 +26,7 @@ use virt::sys;
 
 use crate::config::{Firmware, GuestOs, Manage, OnCrash, SecureBoot, is_hostname};
 use crate::firmware;
+use crate::graphics::{self, DisplayKind};
 use crate::hypervisor::{self, Hypervisor};
 use crate::seal::{HostProbe, LockProbe, Mark, Sealed};
 use crate::seed;
@@ -571,6 +572,8 @@ pub struct NewVm {
     pub extra_isos: Vec<String>,
     /// Writes `<suspend-to-disk enabled='yes'/>`, so a guest that hibernates shuts the VM off and `start_vm` resumes it.
     pub hibernate: bool,
+    /// The display the VM gets.
+    pub display: DisplayKind,
     pub network: Option<String>,
 }
 
@@ -663,6 +666,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             tpm: tpm_file.as_deref(),
             secure_boot: vm.secure_boot,
             hibernate: vm.hibernate,
+            display: vm.display,
             pinned: None,
             nvram: nvram.as_deref(),
             on_crash: m.on_crash,
@@ -972,6 +976,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                 tpm: None,
                 secure_boot: t.secure_boot,
                 hibernate: false,
+                display: DisplayKind::Spice,
                 pinned: None,
                 nvram: nvram.as_deref(),
                 on_crash: m.on_crash,
@@ -1506,6 +1511,13 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
             })
             .collect())
     })?;
+    // The port exists only while the VM runs, and only the live definition has it.
+    let vnc = if dom.is_active()? {
+        graphics::vnc_endpoint(&dom.get_xml_desc(0)?)
+            .map(|(address, port)| json!({ "address": address, "port": port }))
+    } else {
+        None
+    };
     Ok(json!({
         "name": name,
         "state": hypervisor::state_name(&dom),
@@ -1518,6 +1530,8 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
         "secure_boot_mode": secure_boot_mode,
         "tpm": has("tpm"),
         "hibernate": suspends_to_disk(root),
+        "displays": graphics::displays(&xml)?,
+        "vnc": vnc,
         "disks": disks,
         "interfaces": parse_nics(&xml)?,
         "note": "vcpus/memory are the persistent configuration and take effect at the next boot",
@@ -1720,6 +1734,39 @@ pub fn set_cdrom(
     dom.update_device_flags(&dev, live_and_config(dom)?)
         .map_err(|e| anyhow!("cannot change media in {}: {}", cdrom.target, e.message()))?;
     Ok(format!("{what} in {} of '{name}'", cdrom.target))
+}
+
+/// Replaces the `<graphics>` elements of a shut-off VM's persistent definition with those of `display`, and nothing
+/// else. The VM must be one the server may manage, and not under a seal.
+pub fn set_display(hv: &Hypervisor, name: &str, display: DisplayKind) -> Result<String> {
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
+    if dom.is_active()? {
+        bail!(
+            "VM '{name}' is running; shut it down with stop_vm first (the display changes at the next start)"
+        );
+    }
+    let xml = graphics::with_display(&inactive_xml(dom)?, display)
+        .with_context(|| format!("cannot change the display of VM '{name}'"))?;
+    hv.with_conn(|conn| {
+        Domain::define_xml(conn, &xml)
+            .map_err(|e| anyhow!("cannot redefine '{name}': {}", e.message()))?;
+        Ok(())
+    })?;
+    Ok(format!(
+        "set the display of '{name}' to {}; it applies from the next start, and start_vm names the VNC port",
+        display.word()
+    ))
+}
+
+/// The suffix `start_vm` adds to its reply: where the VNC display of the running VM listens, or nothing when it has
+/// none or the live definition cannot be read.
+pub fn vnc_note(dom: &Domain) -> String {
+    dom.get_xml_desc(0)
+        .ok()
+        .and_then(|xml| graphics::vnc_endpoint(&xml))
+        .map(|(address, port)| format!("; VNC on {address}:{port}"))
+        .unwrap_or_default()
 }
 
 pub fn attach_nic(hv: &Hypervisor, name: &str, network: &str) -> Result<String> {
@@ -2773,6 +2820,8 @@ struct DomainSpec<'a> {
     secure_boot: SecureBoot,
     /// Writes `<suspend-to-disk enabled='yes'/>`.
     hibernate: bool,
+    /// The VM's graphics devices.
+    display: DisplayKind,
     /// With `uefi`, the firmware pinned by path, which replaces `firmware='efi'` and the Secure Boot features.
     pinned: Option<&'a PinnedFirmware>,
     /// With `uefi` and autoselection, the path of the VM's own variables file in `disk_pool`, which libvirt creates
@@ -3160,7 +3209,13 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
             "<channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>",
             "<serial type='pty'><target type='isa-serial'/></serial>",
             "<console type='pty'><target type='serial'/></console>",
-            "<graphics type='spice' autoport='yes'><listen type='address'/><image compression='off'/></graphics>",
+        ]
+        .map(String::from),
+    );
+    // The virtio video device serves SPICE and VNC alike.
+    devices.push(spec.display.graphics_xml());
+    devices.extend(
+        [
             "<video><model type='virtio'/></video>",
             // The stats period makes the balloon report the guest's own memory figures.
             "<memballoon model='virtio'><stats period='5'/></memballoon>",
@@ -3468,6 +3523,7 @@ mod tests {
             tpm: None,
             secure_boot: SecureBoot::On,
             hibernate: false,
+            display: DisplayKind::Spice,
             pinned: None,
             nvram: None,
             on_crash: OnCrash::Preserve,
@@ -3500,6 +3556,33 @@ mod tests {
             .iter()
             .map(|(name, enabled)| ((*name).into(), (*enabled).into()))
             .collect()
+    }
+
+    #[test]
+    fn domain_xml_writes_the_graphics_of_each_display_beside_one_virtio_video_device() {
+        for (display, expected) in [
+            (DisplayKind::Spice, vec!["spice"]),
+            (DisplayKind::Vnc, vec!["vnc"]),
+            (DisplayKind::Both, vec!["spice", "vnc"]),
+        ] {
+            let xml = domain_xml(&DomainSpec {
+                display,
+                ..spec(vec![Disk::Qcow2("/pool/t.qcow2")])
+            });
+            assert_eq!(graphics::displays(&xml).unwrap(), expected);
+            assert_eq!(
+                xml.matches("<video><model type='virtio'/></video>").count(),
+                1
+            );
+            assert!(!xml.contains("passwd"));
+            if display != DisplayKind::Spice {
+                assert!(xml.contains("<listen type='address' address='127.0.0.1'/>"));
+            }
+        }
+        // The default is what a VM got before the display existed.
+        assert!(domain_xml(&spec(vec![])).contains(
+            "<graphics type='spice' autoport='yes'><listen type='address'/><image compression='off'/></graphics>"
+        ));
     }
 
     #[test]

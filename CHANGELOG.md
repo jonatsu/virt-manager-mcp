@@ -5,6 +5,18 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+### Added
+
+- `create_vm` takes `display`: `"spice"` (the default, as before), `"vnc"` or `"both"`. A VNC display listens on
+  127.0.0.1 only, on a port libvirt picks at each start, with no password. `describe_vm` reports the display types
+  (`displays`) and, for a running VM, the VNC address and port (`vnc`), and `start_vm` names the port in its reply. A
+  desktop client such as DeskVNC can then reach a VM during an OS install and after it. `screenshot`, `send_keys`,
+  `type_text` and `mouse` work with a VNC-only VM.
+- `set_display` changes the display of a shut-off VM that the server may manage to `"spice"`, `"vnc"` or `"both"`. It
+  rewrites only the `<graphics>` elements of the persistent definition, and needs `manage.reconfigure`. It refuses a
+  running VM, a VM under a seal, and a display the server did not write: another type than SPICE or VNC, a password, a
+  fixed port, or a listener other than loopback TCP.
+
 ### Changed
 
 - Every management call that changes a VM now refuses a VM that a seal is copying into a template, and names the

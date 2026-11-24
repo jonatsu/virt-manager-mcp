@@ -38,7 +38,7 @@ read_only = false
 [manage]
 create = false        # create_vm
 delete = false        # delete_vm (deletes the VM's disks that are in disk_pool)
-reconfigure = false   # configure_vm, attach_disk, detach_disk, set_cdrom, attach_nic, detach_nic
+reconfigure = false   # configure_vm, attach_disk, detach_disk, set_cdrom, set_display, attach_nic, detach_nic
 snapshots = false     # snapshot_create, snapshot_list, snapshot_revert, snapshot_delete
 # Existing VMs (must also be in allowed_vms) the enabled operations may act on. "*" = every allowed VM.
 manage_vms = []

@@ -1,0 +1,176 @@
+[
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-dv",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-dv' is shut off"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-db",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-db' is shut off"
+    }
+  },
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dv",
+      "display": "spice"
+    },
+    "expect": {
+      "contains": "set the display of 't-dv' to spice"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "matches": "\"displays\": \\[\\s*\"spice\"\\s*\\].*\"vnc\": null"
+    }
+  },
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dv",
+      "display": "both"
+    },
+    "expect": {
+      "contains": "set the display of 't-dv' to both"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "matches": "\"displays\": \\[\\s*\"spice\",\\s*\"vnc\"\\s*\\]"
+    }
+  },
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dv",
+      "display": "vnc"
+    },
+    "expect": {
+      "contains": "set the display of 't-dv' to vnc"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "matches": "\"displays\": \\[\\s*\"vnc\"\\s*\\]"
+    }
+  },
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-db",
+      "display": "spice"
+    },
+    "expect": {
+      "contains": "set the display of 't-db' to spice"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-db",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-db': started",
+      "absent": "VNC on"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-db"
+    },
+    "expect": {
+      "matches": "\"displays\": \\[\\s*\"spice\"\\s*\\].*\"vnc\": null"
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "t-db"
+    },
+    "expect": {
+      "matches": "<image saved to shot-\\d+\\.png>"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-db",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-db' is shut off"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-dv",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-dv': started",
+      "matches": "started.*; VNC on 127\\.0\\.0\\.1:\\d+"
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "matches": "<image saved to shot-\\d+\\.png>"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-dv",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-dv' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "contains": "deleted VM 't-dv'"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-db"
+    },
+    "expect": {
+      "contains": "deleted VM 't-db'"
+    }
+  }
+]

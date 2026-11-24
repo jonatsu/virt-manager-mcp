@@ -1,0 +1,163 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-dv",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "display": "vnc"
+    },
+    "expect": {
+      "contains": "created VM 't-dv'"
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-db",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "display": "both"
+    },
+    "expect": {
+      "contains": "created VM 't-db'"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "matches": "\"displays\": \\[\\s*\"vnc\"\\s*\\].*\"vnc\": null"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-db"
+    },
+    "expect": {
+      "matches": "\"displays\": \\[\\s*\"spice\",\\s*\"vnc\"\\s*\\].*\"vnc\": null"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-dv",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-dv': started",
+      "matches": "started.*; VNC on 127\\.0\\.0\\.1:\\d+"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-db",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-db': started",
+      "matches": "started.*; VNC on 127\\.0\\.0\\.1:\\d+"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "matches": "\"vnc\": \\{\\s*\"address\": \"127\\.0\\.0\\.1\",\\s*\"port\": \\d+"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-db"
+    },
+    "expect": {
+      "matches": "\"vnc\": \\{\\s*\"address\": \"127\\.0\\.0\\.1\",\\s*\"port\": \\d+"
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "t-dv"
+    },
+    "expect": {
+      "matches": "<image saved to shot-\\d+\\.png>"
+    }
+  },
+  {
+    "tool": "screenshot",
+    "args": {
+      "vm": "t-db"
+    },
+    "expect": {
+      "matches": "<image saved to shot-\\d+\\.png>"
+    }
+  },
+  {
+    "tool": "send_keys",
+    "args": {
+      "vm": "t-dv",
+      "keys": [
+        "a",
+        "ctrl+alt+delete"
+      ]
+    },
+    "expect": {}
+  },
+  {
+    "tool": "type_text",
+    "args": {
+      "vm": "t-dv",
+      "text": "hi\n"
+    },
+    "expect": {}
+  },
+  {
+    "tool": "mouse",
+    "args": {
+      "vm": "t-dv",
+      "action": "click",
+      "x": 100,
+      "y": 100,
+      "image_width": 1280,
+      "image_height": 800
+    },
+    "expect": {
+      "contains": "sent the click"
+    }
+  },
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dv",
+      "display": "spice"
+    },
+    "expect": {
+      "error": true,
+      "contains": "is running"
+    }
+  },
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-owrt",
+      "display": "vnc"
+    },
+    "expect": {
+      "error": true,
+      "contains": "t-owrt"
+    }
+  }
+]

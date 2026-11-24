@@ -39,7 +39,7 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
   transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos hibernate uefi-vars tpm templates-expiry
+  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos display hibernate uefi-vars tpm templates-expiry
   templates-expiry-command
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
@@ -52,6 +52,7 @@ declare -A MEMBERS=(
   ["templates-reset"]="templates-reset templates-reset-missing"
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
+  ["display"]="display display-after"
   ["hibernate"]="hibernate hibernate-after"
   ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-reset uefi-vars-virsh uefi-vars-virsh-after uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
   ["tpm"]="tpm-state tpm-state-delete tpm-leftover tpm-leftover-after tpm-refused"
@@ -307,6 +308,48 @@ unit_hibernate() {
   # The first start recorded the pinned firmware, and the mode, which a loader named by path cannot tell from setup.
   check_firmware_record t-hu off hibernate
   run_case hibernate-after "${config}"
+}
+
+# The first twelve bytes a VNC server on 127.0.0.1 port $1 sends, which is its RFB protocol version.
+rfb_banner() {
+  # shellcheck disable=SC2016 # $0 is the subshell's own argument.
+  timeout 5 bash -c 'exec 3<> "/dev/tcp/127.0.0.1/$0" && head -c 12 <&3' "$1" 2> /dev/null
+}
+
+# Prints the VNC port of VM $1 in the last describe_vm reply of the display case's log that names it.
+logged_vnc_port() {
+  awk -v call="### describe_vm {\"vm\": \"$1\"}" '
+    /^### / { on = ($0 == call) }
+    on && /"port":/ { port = $2; gsub(/[^0-9]/, "", port); last = port }
+    END { print last }' "${WORK}/logs/display.out"
+}
+
+# display makes t-dv (VNC) and t-db (SPICE and VNC), starts them and leaves them running. This unit then reads each
+# VM's VNC port from the case's describe_vm reply and expects the RFB version banner from it; display-after changes
+# the displays of the shut-off VMs with set_display and deletes them. Both run under config-templates.toml with
+# max_vms = 6, because the kept t-win11net and the other session's cachyos-gnome count toward max_vms.
+unit_display() {
+  local config=${WORK}/config-display.toml avail vm port
+  if ! sed 's/^max_vms = 3$/max_vms = 6/' "${TESTBED}/config-templates.toml" > "${config}" \
+    || ! grep -qxF 'max_vms = 6' "${config}"; then
+    record display failed "could not write ${config}"
+    return
+  fi
+  avail=$(avail_mib)
+  if ((avail < 2048)); then
+    record display failed "needs 2048 MiB of available memory; the host has ${avail} MiB"
+    return
+  fi
+  run_case display "${config}"
+  for vm in t-dv t-db; do
+    port=$(logged_vnc_port "${vm}")
+    if [[ ! ${port} =~ ^[0-9]+$ ]]; then
+      record display failed "no VNC port of ${vm} in the describe_vm reply"
+    elif [[ $(rfb_banner "${port}") != 'RFB 003.'* ]]; then
+      record display failed "${vm} did not answer the RFB handshake on 127.0.0.1:${port}"
+    fi
+  done
+  run_case display-after "${config}"
 }
 
 # The directory of the pool agent-vms.
@@ -1102,6 +1145,7 @@ run_unit() {
     templates-reset) unit_templates_reset ;;
     templates-reset-uefi) unit_templates_reset_uefi ;;
     extra-isos) unit_extra_isos ;;
+    display) unit_display ;;
     hibernate) unit_hibernate ;;
     uefi-vars) unit_uefi_vars ;;
     tpm) unit_tpm ;;
