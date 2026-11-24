@@ -16,6 +16,8 @@ Each release's section lists what changed for people who run the server and for 
   rewrites only the `<graphics>` elements of the persistent definition, and needs `manage.reconfigure`. It refuses a
   running VM, a VM under a seal, and a display the server did not write: another type than SPICE or VNC, a password, a
   fixed port, or a listener other than loopback TCP.
+- The guest setup guide shows how to enable RDP inside a Windows guest through `exec` and in a GNOME guest with
+  `grdctl`. libvirt on the host offers no RDP display, so RDP comes from the guest.
 
 ### Changed
 

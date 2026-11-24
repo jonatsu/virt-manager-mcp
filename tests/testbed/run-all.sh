@@ -6,9 +6,9 @@
 # creates in pool agent-vms on qemu:///system. The OCR cases run only when VIRTMANAGER_OCR_MODELS names the directory
 # scripts/fetch-ocr-models.sh fills, or, without it, when the directory a server with VIRTMANAGER_OCR_DOWNLOAD=1
 # fills holds both models; they define t-inst and t-win from the XML files here. The Windows cases run on
-# t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off; win-network runs the same way
-# on t-win11net, which create_vm makes (README, "The Windows guest"). The transfer cases share and pull host files only
-# under the run's work directory.
+# t-win11 when it exists, which tests/testbed/win11/build.sh makes, and leave it shut off; win-network and win-rdp run
+# the same way on t-win11net, which create_vm makes (README, "The Windows guest"). The transfer cases share and pull
+# host files only under the run's work directory.
 set -uo pipefail
 
 readonly URI=qemu:///system
@@ -44,7 +44,7 @@ readonly UNITS=(
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
   diag-hidden
-  screen-installer screen-windows win-exec win-screen win-network
+  screen-installer screen-windows win-exec win-screen win-network win-rdp
 )
 # Memory the host must have available before an OCR case starts its VM, in MiB: the VM's own plus 1 GiB.
 declare -A SCREEN_VM_MIB=(["t-inst"]=2048 ["t-win"]=5120)
@@ -53,6 +53,7 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["display"]="display display-after"
+  ["win-rdp"]="win-rdp win-rdp-after"
   ["hibernate"]="hibernate hibernate-after"
   ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-reset uefi-vars-virsh uefi-vars-virsh-after uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
   ["tpm"]="tpm-state tpm-state-delete tpm-leftover tpm-leftover-after tpm-refused"
@@ -1056,6 +1057,55 @@ unit_win_network() {
   win_shut_off t-win11net || record win-network failed "could not shut t-win11net off"
 }
 
+# Whether TCP port $2 at $1 accepts a connection from the host.
+tcp_open() { # ip port
+  # shellcheck disable=SC2016 # $0 and $1 are the subshell's own arguments.
+  timeout 5 bash -c 'exec 3<> "/dev/tcp/$0/$1"' "$1" "$2" 2> /dev/null
+}
+
+# win-rdp runs on t-win11net, as win-network does, and is a unit of its own so that it runs alone:
+# `run-all.sh win-rdp`. It is in the default run, like win-network, because the Windows cases have no opt-in switch;
+# a host without the VM or 9 GiB of memory skips it. The case expects the state of a fresh Windows 11 guest, with
+# Remote Desktop off, enables it through `exec`, and the unit then connects to port 3389 at the address vm_addresses
+# reported. win-rdp-after turns Remote Desktop off again, runs even when win-rdp failed, and the unit expects the
+# port closed before it shuts the VM off.
+unit_win_rdp() {
+  local config=${WORK}/config-win-rdp.toml reason ip
+  reason=$(win_net_blocker)
+  if [[ -n ${reason} ]]; then
+    record win-rdp skipped "${reason}"
+    return
+  fi
+  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-win11net", /' -e 's/^power_vms = \[/power_vms = ["t-win11net", /' \
+    "${TESTBED}/config-templates.toml" > "${config}" \
+    && [[ $(grep -cF -e 'allowed_vms = ["t-win11net", ' -e 'power_vms = ["t-win11net", ' "${config}") == 2 ]] \
+    || reason="could not write ${config}"
+  if [[ -z ${reason} ]]; then
+    win_ready t-win11net || reason="the t-win11net agent did not answer"
+  fi
+  if [[ -z ${reason} ]] && ! wait_until 300 win_net_ssh_open; then
+    reason="the t-win11net SSH port did not open within 300 s"
+  fi
+  if [[ -n ${reason} ]]; then
+    record win-rdp failed "${reason}"
+    win_shut_off t-win11net || record win-rdp failed "could not shut t-win11net off"
+    return
+  fi
+  run_case win-rdp "${config}"
+  ip=$(sed -n '/^### vm_addresses/{n;p;q}' "${WORK}/logs/win-rdp.out" \
+    | jq -r '[.interfaces[] | select(.source == "lease") | .addresses[].address][0] // empty' 2> /dev/null)
+  if [[ ! ${ip} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    record win-rdp failed "no lease address in the vm_addresses reply"
+  else
+    tcp_open "${ip}" 3389 || record win-rdp failed "${ip} port 3389 did not accept a connection after RDP was enabled"
+  fi
+  run_case win-rdp-after "${config}"
+  if [[ ${ip} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && tcp_open "${ip}" 3389; then
+    record win-rdp-after failed "${ip} port 3389 still accepts connections after RDP was disabled"
+  fi
+  win_shut_off t-win11net || record win-rdp-after failed "could not shut t-win11net off"
+}
+
 # Writes $WORK/config-<name>.toml: config-templates.toml with one more line after the line that matches $2.
 write_variant() { # name after-line line
   local file=${WORK}/config-$1.toml
@@ -1166,6 +1216,7 @@ run_unit() {
     win-exec) unit_windows ;;
     win-screen) unit_win_screen ;;
     win-network) unit_win_network ;;
+    win-rdp) unit_win_rdp ;;
     smoke | guest-agent-and-snapshots | lifecycle-guardrails | write-file-mode | exec-args | console-reopen | \
       start-vm-waits-for-agent | console-closed-on-power-off | screenshot-region | screen-settled | \
       screen-no-models) unit_trial "$1" ;;

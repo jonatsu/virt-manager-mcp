@@ -1,0 +1,35 @@
+[
+  {
+    "tool": "vm_addresses",
+    "args": {
+      "vm": "t-win11net"
+    },
+    "expect": {
+      "matches": "\"address\":\"192\\.168\\.122\\.\\d+\""
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11net",
+      "command": "$d = (Get-ItemProperty 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server').fDenyTSConnections; $n = (Get-ItemProperty 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp').UserAuthentication; $f = @(Get-NetFirewallRule -DisplayGroup 'Remote Desktop' | Where-Object { $_.Enabled -eq 'True' }).Count; $l = @(Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue).Count; \"state deny=$d nla=$n rules=$f listening=$l\"",
+      "timeout_secs": 120
+    },
+    "expect": {
+      "matches": "state deny=1 nla=1 rules=0 listening=0",
+      "absent": "CLIXML"
+    }
+  },
+  {
+    "tool": "exec",
+    "args": {
+      "vm": "t-win11net",
+      "command": "Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name fDenyTSConnections -Value 0; Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'; Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name UserAuthentication -Value 1; Start-Service TermService; for ($i = 0; $i -lt 30 -and -not (Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }; $d = (Get-ItemProperty 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server').fDenyTSConnections; $n = (Get-ItemProperty 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp').UserAuthentication; $f = @(Get-NetFirewallRule -DisplayGroup 'Remote Desktop' | Where-Object { $_.Enabled -eq 'True' }).Count; $l = @(Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue).Count; \"state deny=$d nla=$n rules=$f listening=$l\"",
+      "timeout_secs": 120
+    },
+    "expect": {
+      "matches": "state deny=0 nla=1 rules=[1-9]\\d* listening=[1-9]",
+      "absent": "CLIXML"
+    }
+  }
+]

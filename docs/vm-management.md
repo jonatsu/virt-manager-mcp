@@ -56,7 +56,7 @@ max_disk_gib = 32
   seal, and a display the server did not write: another type than SPICE or VNC, a password, a fixed port, or a
   listener other than loopback TCP. One virtio video device serves both displays, and `screenshot`, `send_keys`,
   `type_text` and `mouse` work with either, a VNC-only VM included. libvirt offers no RDP display, so enable RDP
-  inside the guest instead.
+  inside the guest instead ([RDP in the guest setup](guest-setup.md#remote-desktop-rdp)).
 
 - **Hibernation:** `create_vm` with `hibernate: true` turns suspend to disk on and leaves suspend to memory off. A
   guest that hibernates (`systemctl hibernate`) ends up shut off, and `start_vm` resumes it from its swap. libvirt
