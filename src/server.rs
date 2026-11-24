@@ -2538,6 +2538,12 @@ fn manage_instructions(m: &crate::config::Manage) -> String {
         m.max_disk_gib,
         m.max_vms,
     );
+    if let Some(cap) = m.max_total_memory_mib {
+        out.push_str(&format!(
+            " The VMs this server created may use at most {cap} MiB of memory together while running; a start that \
+             would pass it is refused, so stop a VM first."
+        ));
+    }
     if m.create || m.reconfigure {
         if m.networks.is_empty() {
             out.push_str(" No libvirt network is allowed, so VMs cannot get network interfaces.");

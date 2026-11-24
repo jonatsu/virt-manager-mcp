@@ -198,12 +198,13 @@ Reviews of earlier work found these. None blocks the server's use.
     restarts. Third, no test covers a waiting event from an earlier pass followed by its VM's undefine. The fixes are
     to publish the batch as in flight under the queue's lock, to drop a not-found event without caching it, and to add
     the test. They land with the next change to `src/events/worker.rs`, after the 0.3.0 release.
-33. **A cap on the memory of all the server's VMs together.** A Windows test VM needs 12 GiB, 6 vCPUs and an 80 GiB
-    disk, and the 30 GiB host also runs builds and has run out of memory before, so `max_vms` times `max_memory_mib` is
-    a poor guard. `max_total_memory_mib` caps the memory of every VM the server created, checked at `create_vm`,
+33. **Done: a cap on the memory of all the server's VMs together.** A Windows test VM needs 12 GiB, 6 vCPUs and an 80
+    GiB disk, and the 30 GiB host also runs builds and has run out of memory before, so `max_vms` times `max_memory_mib`
+    is a poor guard. `max_total_memory_mib` caps the memory of every VM the server created, checked at `create_vm`,
     `create_vm_from_template`, `start_vm` and `configure_vm`, and a refusal names the numbers. Once it lands, the live
     config sets `max_total_memory_mib = 16384`, `max_memory_mib = 12288`, `max_vcpus = 6`, `max_disk_gib = 80` and
-    `max_vms = 2`: one Windows VM and one small Linux VM fit together, and two desktop VMs do not.
+    `max_vms = 2`: one Windows VM and one small Linux VM fit together, and two desktop VMs do not. `memory-cap.json`
+    shows a second VM's start refused while the first runs, and allowed once it stops.
 34. **A console log that outlives its VM.** The console captured from boot lives in the server's memory, at most
     `limits.console_buffer_bytes` (256 KiB), and goes with `delete_vm`, so an agent that tears a VM down after a failed
     boot loses the log before anyone reads it. The server writes each run's console output to a file in

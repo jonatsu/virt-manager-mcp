@@ -75,6 +75,9 @@ pub struct Manage {
     pub max_vms: u32,
     pub max_vcpus: u32,
     pub max_memory_mib: u64,
+    /// Max memory of every VM created by this server that runs at once, checked whenever one starts. Unset means no
+    /// cap beyond `max_vms` times `max_memory_mib`.
+    pub max_total_memory_mib: Option<u64>,
     /// Max size of a single disk.
     pub max_disk_gib: u64,
     /// Longest lifetime an agent may give a VM made from a template.
@@ -213,6 +216,7 @@ impl Default for Manage {
             max_vms: 2,
             max_vcpus: 2,
             max_memory_mib: 4096,
+            max_total_memory_mib: None,
             max_disk_gib: 32,
             max_lifetime_minutes: 1440,
             templates: BTreeMap::new(),
@@ -310,6 +314,9 @@ impl Config {
         }
         if m.max_lifetime_minutes == 0 {
             bail!("manage.max_lifetime_minutes must be positive");
+        }
+        if m.max_total_memory_mib.is_some_and(|mib| mib < 256) {
+            bail!("manage.max_total_memory_mib must be at least 256, the smallest VM");
         }
         if self.limits.max_events == 0 {
             bail!("limits.max_events must be positive");
@@ -617,6 +624,17 @@ mod tests {
         let mut config: Config = toml::from_str(text)?;
         config.validate()?;
         Ok(config)
+    }
+
+    #[test]
+    fn max_total_memory_mib_is_optional_and_at_least_one_small_vm() {
+        assert_eq!(parse("").unwrap().manage.max_total_memory_mib, None);
+        let config = parse("[manage]\nmax_total_memory_mib = 16384\n").unwrap();
+        assert_eq!(config.manage.max_total_memory_mib, Some(16384));
+        let err = parse("[manage]\nmax_total_memory_mib = 100\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least 256"), "{err}");
     }
 
     #[test]

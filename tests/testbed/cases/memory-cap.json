@@ -1,0 +1,102 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-mc0",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 1024,
+      "disk_gib": 1
+    },
+    "expect": {
+      "error": true,
+      "contains": "memory_mib must be at most 768 (manage.max_total_memory_mib)"
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-mc1",
+      "template": "debian13",
+      "memory_mib": 512
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-mc1' from template 'debian13'",
+        "guest agent is responding"
+      ]
+    }
+  },
+  {
+    "tool": "create_vm_from_template",
+    "args": {
+      "name": "t-mc2",
+      "template": "debian13",
+      "memory_mib": 512
+    },
+    "expect": {
+      "contains": [
+        "created VM 't-mc2' from template 'debian13'",
+        "starting 't-mc2' (512 MiB) would bring this server's running VMs to 512 + 512 MiB, over manage.max_total_memory_mib = 768",
+        "running: t-mc1 512 MiB"
+      ]
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-mc2"
+    },
+    "expect": {
+      "error": true,
+      "contains": "over manage.max_total_memory_mib = 768"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-mc1",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-mc1' is shut off"
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-mc2"
+    },
+    "expect": {
+      "contains": "started"
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-mc2",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-mc2' is shut off"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-mc1"
+    },
+    "expect": {
+      "contains": "deleted VM 't-mc1'"
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-mc2"
+    },
+    "expect": {
+      "contains": "deleted VM 't-mc2'"
+    }
+  }
+]

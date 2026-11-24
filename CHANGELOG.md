@@ -7,6 +7,9 @@ Each release's section lists what changed for people who run the server and for 
 
 ### Added
 
+- `manage.max_total_memory_mib` caps the memory of all the VMs the server created that run at once. A start that
+  would pass it is refused and names the running VMs, and a VM larger than the cap is refused at create and
+  reconfigure. Unset, the default, keeps today's behaviour.
 - A how-to guide, `docs/how-to/agent-test-vms.md`, sets up a server whose agents create, install and delete VMs of
   their own from installer ISOs, while every existing VM stays hidden from them.
 

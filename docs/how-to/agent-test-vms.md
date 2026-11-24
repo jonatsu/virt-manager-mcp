@@ -79,10 +79,12 @@ under the same name, once no VM holds the old file in a CD-ROM. A copy you make 
    max_vms = 2
    max_vcpus = 2
    max_memory_mib = 4096
+   max_total_memory_mib = 6144
    max_disk_gib = 40
    ```
 
-   Choose `max_vms` and `max_memory_mib` so that their product fits in the memory your host can spare. When the
+   Set `max_total_memory_mib` to the memory your host can spare for the agents' VMs. It caps the memory of all the
+   VMs the server created that run at once, so one large VM, such as Windows, and one small one can share it. When the
    server starts, it logs that only VMs it creates will be accessible.
 
 2. If you want agents to wait for text on a VM's screen, such as an installer's prompt, add

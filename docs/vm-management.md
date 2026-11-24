@@ -78,12 +78,15 @@ max_disk_gib = 32
   if it is in `disk_pool`. `set_cdrom` inserts or ejects ISOs, `attach_nic`/`detach_nic` add and
   remove interfaces on allowed networks. `describe_vm` shows targets and MAC addresses.
 
-- **Limits:** `max_vcpus`, `max_memory_mib` and `max_disk_gib` apply to create and reconfigure.
-  `max_vms` caps how many VMs created by the server exist at once. It holds across every server
-  process and `sweep` command of one account, such as several Claude Code sessions: management
-  operations take the lock file `~/.cache/virtmanager-mcp/manage.lock`, and wait up to 30 s for
-  another operation to release it. Processes running as different accounts, or with a different
-  `HOME`, do not share it.
+- **Limits:** `max_vcpus`, `max_memory_mib` and `max_disk_gib` apply to create and reconfigure. `max_total_memory_mib`,
+  unset by default, caps the memory of every VM created by the server that runs, is paused or is suspended, taken
+  together. Every start of such a VM checks it, from `start_vm`, `create_vm_from_template`, `reset_vm` or a revert to a
+  running or paused snapshot, which counts the snapshot's memory, and a start that would pass it is refused with the
+  running VMs named; a VM larger than the cap is refused at create and reconfigure. Other VMs on the host do not count.
+  `max_vms` caps how many VMs created by the server exist at once. It holds across every server process and `sweep`
+  command of one account, such as several Claude Code sessions: management operations take the lock file
+  `~/.cache/virtmanager-mcp/manage.lock`, and wait up to 30 s for another operation to release it. Processes running as
+  different accounts, or with a different `HOME`, do not share it.
 
 - **Paths:** ISOs must be inside `iso_dirs` (resolved like `host_share_dirs`, symlinks
   included), and QEMU (user `libvirt-qemu`/`qemu`) must be able to read them. `list_isos` lists the

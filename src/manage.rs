@@ -51,7 +51,7 @@ fn lock() -> Result<Held> {
 /// A held management lock, released on drop. The release is explicit: a child that another thread forks meanwhile
 /// shares the open file, and closing ours alone would leave the lock held until that child execs.
 #[derive(Debug)]
-struct Held(File);
+pub struct Held(File);
 
 impl Drop for Held {
     fn drop(&mut self) {
@@ -487,9 +487,11 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
         )
     })?;
     let vcpus = vm.vcpus.unwrap_or(TEMPLATE_VCPUS.min(m.max_vcpus));
-    let memory_mib = vm
-        .memory_mib
-        .unwrap_or(TEMPLATE_MEMORY_MIB.min(m.max_memory_mib));
+    let memory_mib = vm.memory_mib.unwrap_or(
+        TEMPLATE_MEMORY_MIB
+            .min(m.max_memory_mib)
+            .min(m.max_total_memory_mib.unwrap_or(u64::MAX)),
+    );
     check_vcpus(m, vcpus)?;
     check_memory(m, memory_mib)?;
     if let Some(gib) = vm.disk_gib {
@@ -1328,7 +1330,12 @@ pub fn snapshot_list(hv: &Hypervisor, name: &str) -> Result<Vec<Value>> {
 pub struct RevertTarget {
     pub dom: Domain,
     pub snap: DomainSnapshot,
+    /// The snapshot was taken while the VM ran, so the revert boots it.
     pub running: bool,
+    /// The revert leaves the VM active, running or paused, so it counts toward `max_total_memory_mib`.
+    pub activates: bool,
+    /// The memory of the domain the revert restores, when the snapshot records it.
+    pub memory_mib: Option<u64>,
 }
 
 /// Looks up the managed VM `name` and its snapshot `snapshot` for a revert.
@@ -1336,19 +1343,66 @@ pub fn snapshot_target(hv: &Hypervisor, name: &str, snapshot: &str) -> Result<Re
     let dom = hv.manage_domain(name)?;
     let snap = DomainSnapshot::lookup_by_name(&dom, snapshot, 0)
         .map_err(|e| anyhow!("snapshot '{snapshot}' not found: {}", e.message()))?;
-    let running = snapshot_was_running(&snap.get_xml_desc(0)?)?;
-    Ok(RevertTarget { dom, snap, running })
+    let xml = snap.get_xml_desc(0)?;
+    let running = snapshot_was_running(&xml)?;
+    let activates = running || snapshot_state(&xml)?.as_deref() == Some("paused");
+    let memory_mib = snapshot_memory_mib(&xml)?;
+    Ok(RevertTarget {
+        dom,
+        snap,
+        running,
+        activates,
+        memory_mib,
+    })
 }
 
-/// Whether a snapshot's XML says the VM was running when it was taken.
-fn snapshot_was_running(xml: &str) -> Result<bool> {
+/// The state a snapshot's XML says the VM was in when it was taken.
+fn snapshot_state(xml: &str) -> Result<Option<String>> {
     let doc = roxmltree::Document::parse(xml)?;
     Ok(doc
         .root_element()
         .children()
         .find(|n| n.has_tag_name("state"))
         .and_then(|n| n.text())
-        == Some("running"))
+        .map(str::to_string))
+}
+
+/// Whether a snapshot's XML says the VM was running when it was taken.
+fn snapshot_was_running(xml: &str) -> Result<bool> {
+    Ok(snapshot_state(xml)?.as_deref() == Some("running"))
+}
+
+/// The memory, in MiB rounded up, of the domain a snapshot restores, from its `<domain><memory>`; `None` when the
+/// snapshot records no domain.
+fn snapshot_memory_mib(xml: &str) -> Result<Option<u64>> {
+    let doc = roxmltree::Document::parse(xml)?;
+    let Some(memory) = doc
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("domain"))
+        .and_then(|d| d.children().find(|n| n.has_tag_name("memory")))
+    else {
+        return Ok(None);
+    };
+    let value: u64 = memory
+        .text()
+        .unwrap_or_default()
+        .trim()
+        .parse()
+        .context("the snapshot's domain memory is not a number")?;
+    let unit: u64 = match memory.attribute("unit").unwrap_or("KiB") {
+        "b" | "bytes" => 1,
+        "KB" => 1000,
+        "k" | "KiB" => 1 << 10,
+        "MB" => 1000 * 1000,
+        "M" | "MiB" => 1 << 20,
+        "GB" => 1000 * 1000 * 1000,
+        "G" | "GiB" => 1 << 30,
+        "TB" => 1000 * 1000 * 1000 * 1000,
+        "T" | "TiB" => 1 << 40,
+        other => bail!("the snapshot's domain memory has an unknown unit '{other}'"),
+    };
+    Ok(Some(value.saturating_mul(unit).div_ceil(1 << 20)))
 }
 
 /// Reverts to `target`'s snapshot: paused when it was running, so the caller can open the console before the guest
@@ -1446,6 +1500,82 @@ fn check_memory(m: &Manage, mib: u64) -> Result<()> {
         bail!(
             "memory_mib must be between 256 and {} (manage.max_memory_mib)",
             m.max_memory_mib
+        );
+    }
+    if let Some(cap) = m.max_total_memory_mib
+        && mib > cap
+    {
+        bail!(
+            "memory_mib must be at most {cap} (manage.max_total_memory_mib), or the VM could never start"
+        );
+    }
+    Ok(())
+}
+
+/// Takes the management lock for the start of `dom`, after checking that the VMs this server created that are running,
+/// paused or suspended, with `dom` added, stay within `manage.max_total_memory_mib`. The caller holds the guard until
+/// libvirt has started the VM, so two starts cannot both pass the check. Returns `None`, and takes no lock, when no
+/// cap is set or `dom` is not a VM this server created.
+///
+/// `memory_mib` replaces `dom`'s own memory, for a revert, which restores the snapshot's.
+pub fn start_guard(hv: &Hypervisor, dom: &Domain, memory_mib: Option<u64>) -> Result<Option<Held>> {
+    let Some(cap) = hv.config.manage.max_total_memory_mib else {
+        return Ok(None);
+    };
+    if !is_owned(dom) {
+        return Ok(None);
+    }
+    let guard = lock()?;
+    let uuid = dom.get_uuid_string()?;
+    let name = dom.get_name()?;
+    let own = match memory_mib {
+        Some(mib) => mib,
+        None => dom.get_max_memory()?.div_ceil(1024),
+    };
+    let running = hv.with_conn(|conn| {
+        // A VM that went away after the listing uses no memory any more; any other error refuses the start, so the
+        // check never passes on a count it could not make.
+        let gone = |e: &virt::error::Error| e.code() == ErrorNumber::NoDomain;
+        let mut running = Vec::new();
+        for d in conn.list_all_domains(sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE)? {
+            let facts = d
+                .get_uuid_string()
+                .and_then(|u| Ok((u, d.get_name()?, d.get_max_memory()?)));
+            match facts {
+                Ok((u, n, kib)) => {
+                    if u != uuid && is_owned(&d) {
+                        running.push((n, kib.div_ceil(1024)));
+                    }
+                }
+                Err(e) if gone(&e) => {}
+                Err(e) => bail!(
+                    "cannot count the memory of running VMs for manage.max_total_memory_mib: {}",
+                    e.message()
+                ),
+            }
+        }
+        Ok(running)
+    })?;
+    check_total_memory(cap, &name, own, &running)?;
+    Ok(Some(guard))
+}
+
+/// Refuses a start of `name`, using `own` MiB, that would bring the server's running VMs past `cap` MiB.
+fn check_total_memory(cap: u64, name: &str, own: u64, running: &[(String, u64)]) -> Result<()> {
+    let used: u64 = running.iter().map(|(_, mib)| mib).sum();
+    if used + own > cap {
+        let list = if running.is_empty() {
+            "none".to_string()
+        } else {
+            running
+                .iter()
+                .map(|(n, mib)| format!("{n} {mib} MiB"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        bail!(
+            "starting '{name}' ({own} MiB) would bring this server's running VMs to {used} + {own} MiB, over \
+             manage.max_total_memory_mib = {cap}; stop one first (running: {list})"
         );
     }
     Ok(())
@@ -1943,6 +2073,63 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_revert_to_a_paused_snapshot_activates_the_vm_and_restores_the_snapshot_s_memory() {
+        let snap = |state: &str, memory: &str| {
+            format!(
+                "<domainsnapshot><state>{state}</state><domain>{memory}</domain></domainsnapshot>"
+            )
+        };
+        for (state, running, active) in [
+            ("running", true, true),
+            ("paused", false, true),
+            ("shutoff", false, false),
+        ] {
+            let xml = snap(state, "");
+            let activates = snapshot_was_running(&xml).unwrap()
+                || snapshot_state(&xml).unwrap().as_deref() == Some("paused");
+            assert_eq!(snapshot_was_running(&xml).unwrap(), running, "{state}");
+            assert_eq!(activates, active, "{state}");
+        }
+        let mib = |memory: &str| snapshot_memory_mib(&snap("running", memory)).unwrap();
+        assert_eq!(mib("<memory unit='KiB'>12582912</memory>"), Some(12288));
+        assert_eq!(mib("<memory>1048576</memory>"), Some(1024));
+        assert_eq!(mib("<memory unit='GiB'>2</memory>"), Some(2048));
+        assert_eq!(mib("<memory unit='b'>1</memory>"), Some(1));
+        assert_eq!(mib(""), None);
+        assert!(snapshot_memory_mib(&snap("running", "<memory unit='parsec'>1</memory>")).is_err());
+    }
+
+    #[test]
+    fn the_total_memory_cap_refuses_a_start_that_would_pass_it_and_names_the_running_vms() {
+        let running = vec![("t-a".to_string(), 4096), ("t-b".to_string(), 2048)];
+        assert!(check_total_memory(16384, "w", 10240, &running).is_ok());
+        let err = check_total_memory(16384, "w", 12288, &running)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("starting 'w' (12288 MiB)"), "{err}");
+        assert!(err.contains("6144 + 12288 MiB"), "{err}");
+        assert!(err.contains("max_total_memory_mib = 16384"), "{err}");
+        assert!(err.contains("t-a 4096 MiB, t-b 2048 MiB"), "{err}");
+        let alone = check_total_memory(1024, "w", 2048, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(alone.contains("running: none"), "{alone}");
+    }
+
+    #[test]
+    fn a_vm_larger_than_the_total_memory_cap_is_refused_at_create_and_configure() {
+        let mut m = Manage {
+            max_memory_mib: 12288,
+            ..Manage::default()
+        };
+        assert!(check_memory(&m, 12288).is_ok());
+        m.max_total_memory_mib = Some(8192);
+        assert!(check_memory(&m, 8192).is_ok());
+        let err = check_memory(&m, 8193).unwrap_err().to_string();
+        assert!(err.contains("manage.max_total_memory_mib"), "{err}");
+    }
 
     #[test]
     fn a_revert_runs_only_a_snapshot_of_a_running_vm() {

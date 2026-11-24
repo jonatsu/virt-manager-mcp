@@ -40,7 +40,7 @@ readonly UNITS=(
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
   screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot templates-expiry
   templates-expiry-command
-  templates-outside-disk manage-lock console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
+  templates-outside-disk manage-lock memory-cap console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
   diag-hidden
   screen-installer screen-windows win-exec win-screen
@@ -283,6 +283,21 @@ unit_manage_lock() {
   sleep 1
   HOME=${home} run_case manage-lock config-templates.toml
   wait "${holder}" || record manage-lock failed "the flock holder failed"
+}
+
+# config-templates.toml with every VM the server created capped at 768 MiB of memory together, so one 512 MiB VM
+# runs and a second waits.
+unit_memory_cap() {
+  sed -e 's/^max_memory_mib = 1024$/&\nmax_total_memory_mib = 768/' "${TESTBED}/config-templates.toml" \
+    > "${WORK}/config-memory-cap.toml" || {
+    record memory-cap failed "could not write config-memory-cap.toml"
+    return
+  }
+  grep -qx 'max_total_memory_mib = 768' "${WORK}/config-memory-cap.toml" || {
+    record memory-cap failed "config-templates.toml has no max_memory_mib = 1024 line"
+    return
+  }
+  run_case memory-cap "${WORK}/config-memory-cap.toml"
 }
 
 unit_jobs() {
@@ -689,6 +704,7 @@ run_unit() {
     diag-hidden) unit_diag_hidden ;;
     transfer-* | addresses) unit_transfer "$1" ;;
     manage-lock) unit_manage_lock ;;
+    memory-cap) unit_memory_cap ;;
     owrt-* | mouse-refusals) unit_owrt "$1" ;;
     screen-installer) unit_screen "$1" t-inst ;;
     screen-windows) unit_screen "$1" t-win ;;

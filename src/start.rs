@@ -176,12 +176,14 @@ fn boot_inner(
 
 /// The libvirt calls of a boot on a real domain.
 struct LibvirtBoot<'a> {
+    hv: &'a Hypervisor,
     dom: &'a Domain,
     name: &'a str,
 }
 
 impl Boot for LibvirtBoot<'_> {
     fn start_paused(&self, flags: u32) -> Result<()> {
+        let _memory = manage::start_guard(self.hv, self.dom, None)?;
         self.dom
             .create_with_flags(flags | sys::VIR_DOMAIN_START_PAUSED)
             .map_err(|e| anyhow!("cannot start '{}': {}", self.name, e.message()))?;
@@ -208,6 +210,7 @@ struct LibvirtRevert<'a> {
 
 impl Boot for LibvirtRevert<'_> {
     fn start_paused(&self, _flags: u32) -> Result<()> {
+        let _memory = manage::start_guard(self.hv, &self.target.dom, self.target.memory_mib)?;
         manage::snapshot_revert(self.target, self.snapshot)
     }
 
@@ -254,7 +257,11 @@ impl State {
         let console = boot(
             &self.consoles,
             &self.events,
-            &LibvirtBoot { dom, name },
+            &LibvirtBoot {
+                hv: &self.hv,
+                dom,
+                name,
+            },
             &LibvirtOpener { hv: &self.hv, dom },
             BootRequest {
                 vm: VmId { uuid, name },
@@ -293,7 +300,13 @@ impl State {
                 Cause::Tool("snapshot_revert"),
                 &[Kind::Shutdown, Kind::Stopped],
             );
-            let reverted = manage::snapshot_revert(&target, snapshot);
+            // A revert to a paused snapshot leaves the VM active, so it passes the memory cap like a start.
+            let reverted = if target.activates {
+                manage::start_guard(&self.hv, &target.dom, target.memory_mib)
+                    .and_then(|_memory| manage::snapshot_revert(&target, snapshot))
+            } else {
+                manage::snapshot_revert(&target, snapshot)
+            };
             self.events.finish(id, now_epoch());
             reverted?;
             return Ok(format!(

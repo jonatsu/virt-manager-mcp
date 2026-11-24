@@ -49,6 +49,7 @@ networks = []
 max_vms = 2           # VMs created by this server that may exist at once
 max_vcpus = 2         # per VM
 max_memory_mib = 4096 # per VM
+# max_total_memory_mib = 16384 # memory of every running VM this server created, together; unset: no cap
 max_disk_gib = 32     # per disk
 max_lifetime_minutes = 1440 # longest lifetime an agent may give a VM made from a template
 on_crash = "preserve"       # or "destroy": what a crashed VM made by this server does; preserve keeps
