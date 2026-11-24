@@ -239,6 +239,12 @@ Reviews of earlier work found these. None blocks the server's use.
     `manage_vms` that the server did not create, that can be a file outside `disk_pool`, against the rule that deletion
     removes only what lies in the pool. Apply the rule TPM state already follows: when the `<nvram>` path is not in the
     pool directory, undefine with `VIR_DOMAIN_UNDEFINE_KEEP_NVRAM` and name the kept file in the reply.
+40. **VNC and RDP for VMs.** A desktop client such as DeskVNC must reach a VM during an OS install and after it.
+    `create_vm` takes `display`: `"spice"` (default), `"vnc"` or `"both"`; VNC listens on 127.0.0.1 with an automatic
+    port and no password, as SPICE already does, and `describe_vm` and `start_vm` report the port. `set_display` makes
+    the same choice for a shut-off VM. libvirt on this host offers no RDP display, so RDP comes from the guest: the
+    guest setup guide shows how to enable it in Windows through `exec` and in GNOME, and a test-bed check reaches port
+    3389 at the address `vm_addresses` reports. Built after unit 9 of outcome 5 and released as 0.5.1.
 
 ## Outcomes
 
