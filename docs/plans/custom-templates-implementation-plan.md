@@ -448,13 +448,16 @@ naming the rule, and `delete_vm` removes `<vm>.tpm`. `tpm-state.json` (gate pass
 **Result.** When the server makes a UEFI VM's first start, it records the firmware code file's path and SHA-256 in the
 VM's owner element. A seal reads it later. Design: Sealing a VM (step 1, firmware bullet); Risks 02.
 
-**Changes.** `Owner` gains `firmware_code` and `firmware_sha256`, written by `element()` and read by `from_node`. The
-unit follows unit 1's note on what the live and inactive definitions hold. Before a start, `State::boot_claimed`
-refreshes the pool and looks up the VM's `.vars` volume, so the later "no `.vars` yet" decision rests on a current
-listing, not on libvirt's cached one. After a successful start, it checks whether the VM is owned, has an `<nvram>`
-naming its pool `.vars`, had no `.vars` volume before the start and carries no record. If so, under the manage lock, it
-refreshes the pool, reads the loader path from the live definition, hashes the file with `sha2`, and rewrites the owner
-element through `replace_owner` and `define_xml`. A failure is logged and does not fail the start.
+**Changes.** `Owner` gains `firmware_code` and `firmware_sha256`, written by `element()` and read by `from_node`.
+`create` also writes `secure_boot`, the mode asked for, into the new VM's owner element, because a pinned loader cannot
+tell setup from on (unit 5); `secure_boot_state` prefers it to the variables template's file name, which stays the
+fallback for VMs made earlier. The unit follows unit 1's note on what the live and inactive definitions hold. Before a
+start, `State::boot_claimed` refreshes the pool and looks up the VM's `.vars` volume, so the later "no `.vars` yet"
+decision rests on a current listing, not on libvirt's cached one. After a successful start, it checks whether the VM is
+owned, has an `<nvram>` naming its pool `.vars`, had no `.vars` volume before the start and carries no record. If so,
+under the manage lock, it refreshes the pool, reads the loader path from the live definition, hashes the file with
+`sha2`, and rewrites the owner element through `replace_owner` and `define_xml`. A failure is logged and does not fail
+the start.
 
 This unit rewrites owner attributes on an existing VM, as a reset does, so it carries the guardrail change. The
 `AGENTS.md` Guardrails sentence now says that the server rewrites owner attributes (`generation`, `expires` and the
@@ -1113,7 +1116,7 @@ The run's goal:
 | 2 Volume names | `805602b` | Gate green, 446 tests; `check_vm_name` refuses `tpl`, tested at the function, not through `create`, which needs libvirt | Self-review by the main session |
 | 3 `secure_boot` modes | `5fc9a20` | Gate green, 450 tests; `firmware-secure-boot` passes and the setup guest reads `SetupMode` 1, `SecureBoot` 0; `templates-create` fails only because the kept VM `t-win11net` counts toward `max_vms = 3` (its `list_templates` pattern passed with the cap raised) | Self-review by the main session |
 | 4 More CD-ROMs | `b1519e1` | Gate green, 460 tests; `extra-isos` passes: targets `sda` to `sde`, `set_cdrom` adds at `sdf` and refuses a seventh SATA device, the guest shows `/dev/sr0` and `/dev/sr1`; the case's ISOs live in `/var/tmp`, because `libvirt-qemu` cannot enter the repository | Self-review by the main session |
-| 5 Hibernation |  |  |  |
+| 5 Hibernation | `e2fd8b2` | Gate green, 475 tests; `hibernate` passes: a UEFI VM keeps its UUID across the redefine and ends with an explicit loader and `<suspend-to-disk enabled='yes'/>`; a secure loader needs `<smm state='on'/>`; setup and on are told apart by the variables template's file name until unit 8 records the mode | Self-review by the main session |
 | 6 UEFI variables in the pool |  |  |  |
 | 7 TPM state in the pool |  |  |  |
 | 8 Firmware record in the owner element |  |  |  |
