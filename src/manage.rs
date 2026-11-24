@@ -256,14 +256,24 @@ fn seal_state(vm: &impl SealSubject, now: u64, probe: &impl LockProbe) -> Result
     Ok(SealState::Stale)
 }
 
-/// Takes the lock through `locker`, then refuses a VM under a live seal mark and clears a stale mark. A VM without an
-/// owner element has neither mark nor journal, and none can be added to it, so it takes no lock and skips both checks:
-/// the result is `None`. The owner element is read before the lock, to tell the two apart, and again under it. The lock
-/// is held for the caller on success and released on any failure.
+/// What a call that changes a VM does with a stale seal mark, one that no longer claims the VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StaleMark {
+    /// Rewrites the definition without the mark.
+    Clear,
+    /// Treats the mark as absent and leaves the definition alone.
+    Ignore,
+}
+
+/// Takes the lock through `locker`, then refuses a VM under a live seal mark and clears a stale mark when `stale` says
+/// so. A VM without an owner element has neither mark nor journal, and none can be added to it, so it takes no lock
+/// and skips both checks: the result is `None`. The owner element is read before the lock, to tell the two apart, and
+/// again under it. The lock is held for the caller on success and released on any failure.
 fn lock_checked(
     locker: &impl Locker,
     vm: &impl SealSubject,
     checks: Checks,
+    stale: StaleMark,
     now: u64,
     probe: &impl LockProbe,
 ) -> Result<Option<Held>> {
@@ -272,7 +282,7 @@ fn lock_checked(
     }
     let guard = locker.acquire()?;
     let state = seal_state(vm, now, probe)?;
-    if let SealState::Stale = state {
+    if matches!(state, SealState::Stale) && stale == StaleMark::Clear {
         vm.clear_mark()?;
     }
     if checks == Checks::MarkAndJournal && !matches!(state, SealState::Unowned) {
@@ -367,9 +377,9 @@ pub fn clear_mark(hv: &Hypervisor, _held: &Held, dom: &Domain) -> Result<()> {
 
 /// The entry point of a call that changes a VM that exists: looks `target` up, reads the persistent owner element, and
 /// for a VM that has one takes the management lock once, refuses the VM when a live seal mark claims it, clears a stale
-/// mark, and returns the VM with the guard. A VM without an owner element, such as one in `manage_vms` or `power_vms`
-/// that the server did not create, has no mark, and none can be added to it, so the call takes no lock and the guard is
-/// `None`.
+/// mark when `Hypervisor::can_manage` allows the server to change the VM, and returns the VM with the guard. A VM
+/// without an owner element, such as one in `manage_vms` or `power_vms` that the server did not create, has no mark,
+/// and none can be added to it, so the call takes no lock and the guard is `None`.
 ///
 /// # Errors
 ///
@@ -393,7 +403,14 @@ pub fn lock_for_change<'a>(
         hv: Some(hv),
         dom: &dom,
     };
-    let guard = lock_checked(&HomeLock, &vm, checks, now_epoch(), &HostProbe)?;
+    // A stale mark is rewritten only where the server may change the VM: it is no mark for a VM that `can_manage`
+    // refuses, such as an owned VM while management is off, and its definition stays as it is.
+    let stale = if hv.can_manage(&dom) {
+        StaleMark::Clear
+    } else {
+        StaleMark::Ignore
+    };
+    let guard = lock_checked(&HomeLock, &vm, checks, stale, now_epoch(), &HostProbe)?;
     Ok(Changing { dom, guard })
 }
 
@@ -5558,7 +5575,8 @@ mod tests {
     fn a_live_mark_is_refused_naming_the_template_and_the_lock_is_let_go() {
         let (vm, locker) = (FakeVm::marked(&seal_mark()), FileLock::new("live"));
         for checks in [Checks::Mark, Checks::MarkAndJournal] {
-            let refused = lock_checked(&locker, &vm, checks, NOW, &SEAL_HELD).unwrap_err();
+            let refused =
+                lock_checked(&locker, &vm, checks, StaleMark::Clear, NOW, &SEAL_HELD).unwrap_err();
             let sealed = refused.downcast_ref::<Sealed>().expect("a Sealed refusal");
             assert_eq!(sealed.template, "t-base");
             assert!(refused.to_string().contains("'t-base'"), "{refused}");
@@ -5572,7 +5590,15 @@ mod tests {
     #[test]
     fn a_stale_mark_goes_on_and_is_cleared() {
         let (vm, locker) = (FakeVm::marked(&seal_mark()), FileLock::new("stale"));
-        let guard = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).unwrap();
+        let guard = lock_checked(
+            &locker,
+            &vm,
+            Checks::Mark,
+            StaleMark::Clear,
+            NOW,
+            &SEAL_FREE,
+        )
+        .unwrap();
         assert!(guard.is_some());
         assert_eq!(vm.cleared.get(), 1);
         assert_eq!(vm.owner.borrow().as_ref().unwrap().sealing, None);
@@ -5584,6 +5610,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_mark_is_left_in_the_definition_when_the_call_may_not_rewrite_it() {
+        let (vm, locker) = (FakeVm::marked(&seal_mark()), FileLock::new("ignore"));
+        let guard = lock_checked(
+            &locker,
+            &vm,
+            Checks::Mark,
+            StaleMark::Ignore,
+            NOW,
+            &SEAL_FREE,
+        )
+        .unwrap();
+        // The call goes on as with no mark, under the lock, and nothing is redefined.
+        assert!(guard.is_some());
+        assert_eq!(vm.cleared.get(), 0);
+        assert!(vm.owner.borrow().as_ref().unwrap().sealing.is_some());
+        drop(guard);
+        // A live mark still refuses the call.
+        let refused = lock_checked(
+            &locker,
+            &vm,
+            Checks::Mark,
+            StaleMark::Ignore,
+            NOW,
+            &SEAL_HELD,
+        );
+        assert!(refused.unwrap_err().downcast_ref::<Sealed>().is_some());
+        locker.remove();
+    }
+
+    #[test]
     fn a_mark_of_another_process_is_live_for_24_hours_whatever_its_lock_says() {
         let locker = FileLock::new("foreign");
         let other = FakeProbe {
@@ -5591,12 +5647,27 @@ mod tests {
             held: false,
         };
         let young = FakeVm::marked(&seal_mark());
-        let refused = lock_checked(&locker, &young, Checks::Mark, 1_000_000 + 23 * 3600, &other);
+        let refused = lock_checked(
+            &locker,
+            &young,
+            Checks::Mark,
+            StaleMark::Clear,
+            1_000_000 + 23 * 3600,
+            &other,
+        );
         assert!(refused.unwrap_err().downcast_ref::<Sealed>().is_some());
         assert_eq!(young.cleared.get(), 0);
 
         let old = FakeVm::marked(&seal_mark());
-        lock_checked(&locker, &old, Checks::Mark, 1_000_000 + 25 * 3600, &other).unwrap();
+        lock_checked(
+            &locker,
+            &old,
+            Checks::Mark,
+            StaleMark::Clear,
+            1_000_000 + 25 * 3600,
+            &other,
+        )
+        .unwrap();
         assert_eq!(old.cleared.get(), 1);
         locker.remove();
     }
@@ -5607,7 +5678,15 @@ mod tests {
             FakeVm::with(Some(Owner::default())),
             FileLock::new("nomark"),
         );
-        let guard = lock_checked(&locker, &vm, Checks::MarkAndJournal, NOW, &SEAL_HELD).unwrap();
+        let guard = lock_checked(
+            &locker,
+            &vm,
+            Checks::MarkAndJournal,
+            StaleMark::Clear,
+            NOW,
+            &SEAL_HELD,
+        )
+        .unwrap();
         // A VM with an owner element takes the lock whether or not it carries a mark.
         assert!(guard.is_some());
         assert!(locker.acquire().is_err());
@@ -5629,7 +5708,8 @@ mod tests {
     fn a_vm_without_an_owner_element_takes_no_lock_skips_both_checks_and_is_never_given_a_mark() {
         let vm = FakeVm::with(None);
         for checks in [Checks::Mark, Checks::MarkAndJournal] {
-            let guard = lock_checked(&NoLock, &vm, checks, NOW, &SEAL_HELD).unwrap();
+            let guard =
+                lock_checked(&NoLock, &vm, checks, StaleMark::Clear, NOW, &SEAL_HELD).unwrap();
             assert!(guard.is_none());
         }
         check_unlocked(&vm, NOW, &SEAL_HELD).unwrap();
@@ -5670,7 +5750,15 @@ mod tests {
     fn a_vm_deleted_before_or_during_the_checks_is_told_apart_from_any_other_failure() {
         let locker = FileLock::new("gone");
         let gone = GoneVm(no_domain_error());
-        let err = lock_checked(&locker, &gone, Checks::Mark, NOW, &SEAL_FREE).unwrap_err();
+        let err = lock_checked(
+            &locker,
+            &gone,
+            Checks::Mark,
+            StaleMark::Clear,
+            NOW,
+            &SEAL_FREE,
+        )
+        .unwrap_err();
         assert!(is_no_domain(&err), "{err:#}");
         // A context layer on top keeps the libvirt error findable.
         assert!(is_no_domain(&err.context("checking the VM")));
@@ -5681,6 +5769,7 @@ mod tests {
             &locker,
             &FakeVm::marked(&seal_mark()),
             Checks::Mark,
+            StaleMark::Clear,
             NOW,
             &SEAL_HELD,
         )
@@ -5701,9 +5790,16 @@ mod tests {
             ..Owner::default()
         }));
         let locker = FileLock::new("garbled");
-        let refused = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE)
-            .unwrap_err()
-            .to_string();
+        let refused = lock_checked(
+            &locker,
+            &vm,
+            Checks::Mark,
+            StaleMark::Clear,
+            NOW,
+            &SEAL_FREE,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             refused.contains("t-a") && refused.contains("unreadable"),
             "{refused}"
@@ -5720,11 +5816,26 @@ mod tests {
             FakeVm::with(Some(Owner::default())),
             FileLock::new("nested"),
         );
-        let _guard = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE)
-            .unwrap()
-            .expect("an owned VM takes the lock");
+        let _guard = lock_checked(
+            &locker,
+            &vm,
+            Checks::Mark,
+            StaleMark::Clear,
+            NOW,
+            &SEAL_FREE,
+        )
+        .unwrap()
+        .expect("an owned VM takes the lock");
         for second in [
-            lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).map(drop),
+            lock_checked(
+                &locker,
+                &vm,
+                Checks::Mark,
+                StaleMark::Clear,
+                NOW,
+                &SEAL_FREE,
+            )
+            .map(drop),
             lock_open(&locker).map(drop),
         ] {
             let started = Instant::now();
@@ -5838,6 +5949,32 @@ mod tests {
             l.contains("HomeLock") && !l.contains("struct HomeLock") && !l.contains("for HomeLock")
         });
         assert_eq!(named, ["lock_for_change", "lock_for_create", "start_guard"]);
+        // Opening the lock file is `lock`'s job, and the test locker's, which `FileLock` alone is.
+        assert_eq!(owners(&|l| calls(l, "lock_file")), ["acquire", "lock"]);
+        // The only lockers: the home lock, and `FileLock` under `cfg(test)`.
+        assert_eq!(
+            locker_impls(code),
+            [
+                ("impl Locker for HomeLock {".to_string(), false),
+                ("impl Locker for FileLock {".to_string(), true),
+            ]
+        );
+    }
+
+    /// The `impl ... Locker for` lines of `code`, each with whether `#[cfg(test)]` stands on the line before it.
+    fn locker_impls(code: &str) -> Vec<(String, bool)> {
+        let lines: Vec<&str> = code.lines().collect();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.trim_start().starts_with("impl") && l.contains("Locker for "))
+            .map(|(i, l)| {
+                (
+                    l.trim().to_string(),
+                    i > 0 && lines[i - 1].trim() == "#[cfg(test)]",
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -5854,6 +5991,26 @@ mod tests {
         assert!(!calls("file.try_lock()", "lock"));
         assert!(!calls("self.0.unlock();", "lock"));
         assert!(!calls("fn lock() -> Result<Held> {", "lock"));
+
+        // The same for opening the lock file, and for a new `Locker`, whether or not it is marked as a test's.
+        let stray = "fn record_it() {\n    let _guard = lock_file(&path, wait)?;\n}\n\
+            impl Locker for Sneaky {\n}\n\
+            #[cfg(test)]\nimpl<'a> Locker for &'a Quiet {\n}\n\
+            // impl Locker for Commented {\n";
+        let found: Vec<String> = lines_by_function(stray)
+            .into_iter()
+            .filter(|(_, l)| calls(l, "lock_file"))
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(found, ["record_it"]);
+        assert!(!calls("fn lock_file(path: &Path) {", "lock_file"));
+        assert_eq!(
+            locker_impls(stray),
+            [
+                ("impl Locker for Sneaky {".to_string(), false),
+                ("impl<'a> Locker for &'a Quiet {".to_string(), true),
+            ]
+        );
     }
 
     const OWNED_DOMAIN: &str = "<domain type='kvm'><name>t-a</name><metadata>\
