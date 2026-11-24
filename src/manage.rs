@@ -707,6 +707,18 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
     })
 }
 
+/// The owner element a reset writes: every attribute of the element in `persistent_xml`, with `generation` set to
+/// `next`. It reads the persistent definition, not `owner_of`: a running VM's live element lacks the firmware record,
+/// which only the persistent definition holds until the next start.
+fn reset_owner(persistent_xml: &str, next: u32) -> Result<Owner> {
+    let owner = owner_in_domain_xml(persistent_xml)?
+        .ok_or_else(|| anyhow!("the VM has no owner element"))?;
+    Ok(Owner {
+        generation: Some(next),
+        ..owner
+    })
+}
+
 /// Returns a VM made from a template to the template's state, keeping its name, UUID, MAC address, hardware and
 /// expiry. The new disks exist before the old ones are deleted, so a failure leaves the VM with one complete set.
 /// The VM is left shut off; `start_after_reset` starts it. `before_power_off` runs once every check has passed,
@@ -789,10 +801,7 @@ pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Re
         let redefined = (|| -> Result<Vec<DiskInfo>> {
             let old_xml = inactive_xml(&dom)?;
             let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
-            let new_owner = Owner {
-                generation: Some(next),
-                ..owner.clone()
-            };
+            let new_owner = reset_owner(&old_xml, next)?;
             let (xml, old) = replace_disks(
                 &old_xml,
                 &[Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
@@ -4810,6 +4819,33 @@ mod tests {
         let plain = "<domain><name>x</name><metadata><o:owner xmlns:o='http://example.com/o'/></metadata></domain>";
         assert!(replace_owner(plain, &next).is_err());
         assert!(replace_owner("<domain><name>x</name></domain>", &next).is_err());
+    }
+
+    #[test]
+    fn a_reset_keeps_the_firmware_record_of_the_persistent_definition() {
+        // A running VM's live element lacks the record that `record_firmware` wrote to the persistent one.
+        let live = Owner {
+            template: Some("debian13".into()),
+            generation: Some(1),
+            expires: Some(99),
+            secure_boot: Some(SecureBoot::On),
+            ..Owner::default()
+        };
+        let persistent = Owner {
+            firmware_code: Some("/o/CODE.fd".into()),
+            firmware_sha256: Some("ab".repeat(32)),
+            ..live.clone()
+        };
+        assert!(!live.has_firmware_record());
+        let xml = replace_owner(&template_vm_xml(), &persistent).unwrap();
+        let next = reset_owner(&xml, 2).unwrap();
+        assert_eq!(
+            next,
+            Owner {
+                generation: Some(2),
+                ..persistent
+            }
+        );
     }
 
     #[test]
