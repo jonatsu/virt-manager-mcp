@@ -5,14 +5,20 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+## 0.4.0
+
+### Changed
+
+- `copy_from_vm` and `copy_dir_from_vm` refuse a destination in or at `console/` in the first pull directory, which
+  now holds the console logs, so no pull can replace or delete a log. Pull into another path.
+
 ### Added
 
 - With `host_pull_dirs` set, every console session the server opens also writes its output to
   `console/<vm>/<UTC start>-g<generation>.log` in the first pull directory, so a boot log survives `delete_vm`. The
   replies of `console_open` and of a boot name the file. The server never overwrites or deletes a log, and a log stops
   at `limits.console_log_bytes`, 64 MiB by default. A log that cannot be written leaves the capture running, and the
-  reply says why. Read-only mode writes no logs. A pull into or onto `console/` in the first pull directory is
-  refused, so no pull can replace or delete a log.
+  reply says why. Read-only mode writes no logs.
 - `manage.max_total_memory_mib` caps the memory of all the VMs the server created that run at once. A start that
   would pass it is refused and names the running VMs, and a VM larger than the cap is refused at create and
   reconfigure. Unset, the default, keeps today's behaviour.
