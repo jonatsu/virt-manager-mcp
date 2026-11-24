@@ -1225,7 +1225,11 @@ impl VirtServer {
             // Only the session open before the stop is marked, not one a concurrent start and open made meanwhile.
             // power_domain refuses a VM the server may not power before any expectation is recorded, so a refused
             // call claims none of the guest's own events.
-            let uuid = s.hv.power_domain(&p.vm)?.get_uuid_string()?;
+            let dom = s.hv.power_domain(&p.vm)?;
+            // A VM under a live seal is refused before any expectation is recorded; `stop` checks again under the
+            // management lock.
+            manage::check_sealing(&dom)?;
+            let uuid = dom.get_uuid_string()?;
             let vm = VmId {
                 uuid: &uuid,
                 name: &p.vm,

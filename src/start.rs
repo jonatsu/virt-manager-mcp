@@ -2,7 +2,7 @@
 //! output from its first byte. `start_vm`, `create_vm_from_template` and `reset_vm` all boot through it.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Result, anyhow, bail};
 use virt::domain::Domain;
@@ -14,7 +14,7 @@ use crate::console::{
 use crate::consolelog::LogTarget;
 use crate::events::{Cause, Events, Kind};
 use crate::hypervisor::{self, Hypervisor};
-use crate::manage::{self, RevertTarget, now_epoch};
+use crate::manage::{self, Held, RevertTarget, now_epoch};
 use crate::server::State;
 use crate::tpm;
 
@@ -193,7 +193,13 @@ struct LibvirtBoot<'a> {
 
 impl Boot for LibvirtBoot<'_> {
     fn start_paused(&self, flags: u32) -> Result<()> {
-        let _memory = manage::start_guard(self.hv, self.dom, None)?;
+        // The lock covers the seal check, the memory check and libvirt's create call, not the rest of the boot.
+        let changing = manage::lock_for_change(
+            self.hv,
+            manage::Target::Domain(self.dom),
+            manage::Checks::Mark,
+        )?;
+        let _memory = manage::start_guard(self.hv, self.dom, None, Some(&changing.guard))?;
         self.dom
             .create_with_flags(flags | sys::VIR_DOMAIN_START_PAUSED)
             .map_err(|e| {
@@ -227,18 +233,41 @@ impl Boot for LibvirtBoot<'_> {
     }
 }
 
+/// Runs `run` with the management lock that `held` carries, and lets go of the lock when it returns, so the rest of a
+/// boot, such as the console open, runs without it. The guard is single use.
+fn run_under_guard(
+    held: &Mutex<Option<Held>>,
+    run: impl FnOnce(&Held) -> Result<()>,
+) -> Result<()> {
+    let guard = held
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .ok_or_else(|| anyhow!("the revert's management lock was already used"))?;
+    run(&guard)
+}
+
 /// The libvirt calls of a revert to a running snapshot, which starts the VM as a boot does.
 struct LibvirtRevert<'a> {
     hv: &'a Hypervisor,
     target: &'a RevertTarget,
     uuid: &'a str,
     snapshot: &'a str,
+    /// The management lock `State::revert` took once; `start_paused` uses it and lets it go.
+    held: Mutex<Option<Held>>,
 }
 
 impl Boot for LibvirtRevert<'_> {
     fn start_paused(&self, _flags: u32) -> Result<()> {
-        let _memory = manage::start_guard(self.hv, &self.target.dom, self.target.memory_mib)?;
-        manage::snapshot_revert(self.target, self.snapshot)
+        run_under_guard(&self.held, |held| {
+            let _memory = manage::start_guard(
+                self.hv,
+                &self.target.dom,
+                self.target.memory_mib,
+                Some(held),
+            )?;
+            manage::snapshot_revert(self.target, self.snapshot)
+        })
     }
 
     fn domain_id(&self) -> Option<u32> {
@@ -266,6 +295,8 @@ impl State {
     ///
     /// Fails as `boot` does, or while the VM is already starting.
     pub fn boot(&self, dom: &Domain, name: &str, flags: u32, tool: &'static str) -> Result<String> {
+        // The first refusal of a VM under a live seal; `start_paused` checks again under the lock.
+        manage::check_sealing(dom)?;
         let uuid = dom.get_uuid_string()?;
         let _guard = self.starting.claim(&uuid, name)?;
         self.boot_claimed(dom, &uuid, name, flags, tool)
@@ -335,6 +366,13 @@ impl State {
         let target = manage::snapshot_target(&self.hv, name, snapshot)?;
         let uuid = target.dom.get_uuid_string()?;
         let _guard = self.starting.claim(&uuid, name)?;
+        // The one take of the management lock for the whole revert: a VM under a live seal is refused here, before
+        // the console session ends. A revert to a running snapshot hands the guard to its start.
+        let manage::Changing { guard: held, .. } = manage::lock_for_change(
+            &self.hv,
+            manage::Target::Domain(&target.dom),
+            manage::Checks::MarkAndJournal,
+        )?;
         // A revert replaces the guest's state under the console, so the session ends here, running or not.
         let closed = if self.consoles.close(&uuid, "closed by snapshot_revert") {
             "; the console session before it moved to the previous run (console_read run: \"previous\")"
@@ -350,7 +388,7 @@ impl State {
             );
             // A revert to a paused snapshot leaves the VM active, so it passes the memory cap like a start.
             let reverted = if target.activates {
-                manage::start_guard(&self.hv, &target.dom, target.memory_mib)
+                manage::start_guard(&self.hv, &target.dom, target.memory_mib, Some(&held))
                     .and_then(|_memory| manage::snapshot_revert(&target, snapshot))
             } else {
                 manage::snapshot_revert(&target, snapshot)
@@ -370,6 +408,7 @@ impl State {
                 target: &target,
                 uuid: &uuid,
                 snapshot,
+                held: Mutex::new(Some(held)),
             },
             &LibvirtOpener {
                 hv: &self.hv,
@@ -395,6 +434,8 @@ impl State {
     /// Fails for a VM the server may not power, a crashed VM, a VM that is starting, or a libvirt refusal.
     pub fn start_vm(&self, name: &str) -> Result<String> {
         let dom = self.hv.power_domain(name)?;
+        // Without the lock, so a resume or a wake, which take none, are refused too; a boot checks again under it.
+        manage::check_sealing(&dom)?;
         let uuid = dom.get_uuid_string()?;
         // Held for the whole start, so a second start cannot resume the guest before its console opens.
         let _guard = self.starting.claim(&uuid, name)?;
@@ -456,6 +497,38 @@ mod tests {
             let refused = d(state, reason).unwrap_err().to_string();
             assert!(refused.contains("has crashed"), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_reverts_lock_reaches_the_start_without_a_second_take_and_goes_with_it() {
+        use crate::manage::{FileLock, Locker};
+        let dir =
+            std::env::temp_dir().join(format!("virtmanager-mcp-revert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let locker = FileLock::at(dir.join("manage.lock"));
+        let held = Mutex::new(Some(locker.acquire().unwrap()));
+
+        // `start_guard` takes its lock through `guard_for`, which a passed guard turns into no take at all: a second
+        // take by the same process would wait and fail.
+        let mut seen = Vec::new();
+        run_under_guard(&held, |guard| {
+            seen.push(manage::guard_for(Some(guard), &locker).unwrap().is_none());
+            // The lock is still held while the start runs.
+            seen.push(locker.acquire().is_err());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, [true, true]);
+        // The start let go of it: the rest of the boot, and the next call, run without it.
+        drop(locker.acquire().unwrap());
+        // The guard serves one start.
+        let again = run_under_guard(&held, |_| Ok(())).unwrap_err().to_string();
+        assert!(again.contains("already used"), "{again}");
+        // A failed start lets go of it as well.
+        *held.lock().unwrap() = Some(locker.acquire().unwrap());
+        assert!(run_under_guard(&held, |_| bail!("refused")).is_err());
+        drop(locker.acquire().unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

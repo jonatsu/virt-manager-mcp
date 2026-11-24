@@ -18,6 +18,7 @@ mod ocrfetch;
 mod pull;
 mod pulldir;
 mod push;
+mod seal;
 mod seed;
 mod server;
 mod start;

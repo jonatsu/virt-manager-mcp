@@ -6,6 +6,7 @@
 
 use std::ffi::OsString;
 use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
+use std::ops::Deref;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -26,6 +27,7 @@ use virt::sys;
 use crate::config::{Firmware, GuestOs, Manage, OnCrash, SecureBoot, is_hostname};
 use crate::firmware;
 use crate::hypervisor::{self, Hypervisor};
+use crate::seal::{HostProbe, LockProbe, Mark, Sealed};
 use crate::seed;
 use crate::tpm::{self, SwtpmIds};
 use crate::volnames;
@@ -137,6 +139,292 @@ fn lock_file(path: &Path, wait: Duration) -> Result<Held> {
     }
 }
 
+/// Where the management lock comes from, so that tests can take it on a temporary file with a short wait.
+pub trait Locker {
+    /// Takes the lock, waiting for another holder as `lock_file` does.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lock is not free in time or its file cannot be opened.
+    fn acquire(&self) -> Result<Held>;
+}
+
+/// The management lock of this account, the only `Locker` outside tests. Only `lock_for_change`, `lock_for_create`
+/// and `start_guard` name it, which a source test in this file holds them to.
+struct HomeLock;
+
+impl Locker for HomeLock {
+    fn acquire(&self) -> Result<Held> {
+        lock()
+    }
+}
+
+/// What a call that changes a VM checks under the lock, beyond the seal mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checks {
+    /// The seal mark. Delete, reset and expiry use it.
+    Mark,
+    /// The seal mark and, once a revert can leave a journal (unit 23), the journal.
+    MarkAndJournal,
+}
+
+/// The VM a call that changes it acts on, as the call has it.
+pub enum Target<'a> {
+    /// A name, through `Hypervisor::manage_domain`.
+    Managed(&'a str),
+    /// A name, through `Hypervisor::power_domain`, which also reaches VMs in `power_vms` that the server does not
+    /// manage.
+    Powered(&'a str),
+    /// A UUID, with no check of the allow-lists: the expiry sweep and the firmware record make their own.
+    Uuid(&'a str),
+    /// A domain the caller already looked up.
+    Domain(&'a Domain),
+}
+
+/// A domain that `Changing` owns or borrows from its caller.
+pub enum DomRef<'a> {
+    Owned(Domain),
+    Borrowed(&'a Domain),
+}
+
+impl Deref for DomRef<'_> {
+    type Target = Domain;
+
+    fn deref(&self) -> &Domain {
+        match self {
+            DomRef::Owned(dom) => dom,
+            DomRef::Borrowed(dom) => dom,
+        }
+    }
+}
+
+/// A VM that a call may change: the management lock is held and the VM is under no live seal. A function below the
+/// entry point takes `&Changing`, or `&Held` where the guard is all it needs, as proof of the lock, and never takes
+/// the lock again: a second take in one process waits `LOCK_WAIT` and fails.
+pub struct Changing<'a> {
+    pub dom: DomRef<'a>,
+    pub guard: Held,
+}
+
+/// What `lock_checked` and `check_unlocked` need of a VM, apart so that tests need no libvirt.
+trait SealSubject {
+    /// The VM's name, for the refusal.
+    fn name(&self) -> String;
+    /// The owner element of the persistent definition, or `None` when it has none. It is the persistent one, not the
+    /// live one: a redefinition of a running VM changes only the persistent definition.
+    fn persistent_owner(&self) -> Result<Option<Owner>>;
+    /// Removes the seal mark from the persistent definition.
+    fn clear_mark(&self) -> Result<()>;
+}
+
+/// What the owner element says about a seal.
+enum SealState {
+    /// No owner element, which no mark and no journal can belong to.
+    Unowned,
+    /// An owner element without a mark.
+    Unmarked,
+    /// A mark that no longer claims the VM.
+    Stale,
+}
+
+/// Reads the seal mark of `vm` at `now`. A live mark is the refusal `Sealed`; an unreadable one fails too.
+fn seal_state(vm: &impl SealSubject, now: u64, probe: &impl LockProbe) -> Result<SealState> {
+    let Some(owner) = vm.persistent_owner()? else {
+        return Ok(SealState::Unowned);
+    };
+    let name = vm.name();
+    let Some(mark) = owner
+        .mark()
+        .with_context(|| format!("VM '{name}' has an unreadable seal mark and is refused; remove the sealing attribute from its owner element once no seal runs"))?
+    else {
+        return Ok(SealState::Unmarked);
+    };
+    let live = mark
+        .live(now, probe)
+        .with_context(|| format!("cannot tell whether the seal of VM '{name}' is still running"))?;
+    if live {
+        return Err(Sealed {
+            vm: name,
+            template: mark.template,
+            seal_id: mark.seal_id,
+        }
+        .into());
+    }
+    Ok(SealState::Stale)
+}
+
+/// Takes the lock through `locker`, then refuses a VM under a live seal mark and clears a stale mark. A VM without an
+/// owner element has neither mark nor journal, so it skips both checks. The lock is held for the caller on success and
+/// released on any failure.
+fn lock_checked(
+    locker: &impl Locker,
+    vm: &impl SealSubject,
+    checks: Checks,
+    now: u64,
+    probe: &impl LockProbe,
+) -> Result<Held> {
+    let guard = locker.acquire()?;
+    let state = seal_state(vm, now, probe)?;
+    if let SealState::Stale = state {
+        vm.clear_mark()?;
+    }
+    if checks == Checks::MarkAndJournal && !matches!(state, SealState::Unowned) {
+        check_journal(vm)?;
+    }
+    Ok(guard)
+}
+
+/// Refuses a VM whose last revert left a journal of its variables and TPM state. A revert's journal lands in unit 23;
+/// until then there is none to find.
+fn check_journal(_vm: &impl SealSubject) -> Result<()> {
+    Ok(())
+}
+
+/// Reads the seal mark of `vm` at `now` without a lock and clears nothing: a live mark is refused, a stale or absent
+/// one passes.
+fn check_unlocked(vm: &impl SealSubject, now: u64, probe: &impl LockProbe) -> Result<()> {
+    seal_state(vm, now, probe).map(drop)
+}
+
+/// Takes the lock for a call that makes a VM, and checks nothing else.
+fn lock_open(locker: &impl Locker) -> Result<Held> {
+    locker.acquire()
+}
+
+/// The guard a function takes when its caller may already hold the lock: none when it does, else a new one.
+pub(crate) fn guard_for(held: Option<&Held>, locker: &impl Locker) -> Result<Option<Held>> {
+    match held {
+        Some(_) => Ok(None),
+        None => locker.acquire().map(Some),
+    }
+}
+
+/// A real domain, for `lock_checked` and `check_unlocked`. A check that clears nothing needs no `Hypervisor`.
+struct LibvirtVm<'a> {
+    hv: Option<&'a Hypervisor>,
+    dom: &'a Domain,
+}
+
+impl SealSubject for LibvirtVm<'_> {
+    fn name(&self) -> String {
+        self.dom.get_name().unwrap_or_default()
+    }
+
+    fn persistent_owner(&self) -> Result<Option<Owner>> {
+        owner_in_domain_xml(&inactive_xml(self.dom)?)
+    }
+
+    fn clear_mark(&self) -> Result<()> {
+        let hv = self
+            .hv
+            .ok_or_else(|| anyhow!("a check without the lock clears no mark"))?;
+        redefine_with_sealing(hv, self.dom, None)
+    }
+}
+
+/// Redefines `dom` from its persistent definition with the seal mark set to `mark`, or removed with `None`.
+fn redefine_with_sealing(hv: &Hypervisor, dom: &Domain, mark: Option<&Mark>) -> Result<()> {
+    let xml = with_sealing(&inactive_xml(dom)?, mark)?;
+    hv.with_conn(|conn| {
+        Domain::define_xml(conn, &xml).map_err(|e| {
+            anyhow!(
+                "cannot rewrite the seal mark of '{}': {}",
+                dom.get_name().unwrap_or_default(),
+                e.message()
+            )
+        })?;
+        Ok(())
+    })
+}
+
+/// Writes `mark` into the owner element of `dom`, which the seal's caller holds the management lock for (`_held`). It
+/// refuses a VM without an owner element and one that carries a mark already.
+///
+/// # Errors
+///
+/// Fails as `with_sealing` does, or when libvirt refuses the redefinition.
+#[expect(dead_code, reason = "first caller: unit 19")]
+pub fn set_mark(hv: &Hypervisor, _held: &Held, dom: &Domain, mark: &Mark) -> Result<()> {
+    redefine_with_sealing(hv, dom, Some(mark))
+}
+
+/// Removes the seal mark from the owner element of `dom`, under the management lock (`_held`).
+///
+/// # Errors
+///
+/// Fails when the VM has no owner element or libvirt refuses the redefinition.
+#[expect(dead_code, reason = "first caller: unit 19")]
+pub fn clear_mark(hv: &Hypervisor, _held: &Held, dom: &Domain) -> Result<()> {
+    redefine_with_sealing(hv, dom, None)
+}
+
+/// The entry point of a call that changes a VM that exists: looks `target` up, takes the management lock once, refuses
+/// the VM when a live seal mark claims it, clears a stale mark, and returns the VM with the guard. A VM without an
+/// owner element, such as one in `manage_vms` or `power_vms`, has no mark, so the checks pass it.
+///
+/// # Errors
+///
+/// Fails when the VM cannot be looked up, the lock is not free in time, a live mark claims the VM (`Sealed`), a mark is
+/// unreadable, or libvirt refuses to clear a stale one.
+pub fn lock_for_change<'a>(
+    hv: &Hypervisor,
+    target: Target<'a>,
+    checks: Checks,
+) -> Result<Changing<'a>> {
+    let dom = match target {
+        Target::Managed(name) => DomRef::Owned(hv.manage_domain(name)?),
+        Target::Powered(name) => DomRef::Owned(hv.power_domain(name)?),
+        Target::Uuid(uuid) => DomRef::Owned(hv.with_conn(|conn| {
+            Domain::lookup_by_uuid_string(conn, uuid)
+                .map_err(|e| anyhow!("cannot find VM {uuid}: {}", e.message()))
+        })?),
+        Target::Domain(dom) => DomRef::Borrowed(dom),
+    };
+    let vm = LibvirtVm {
+        hv: Some(hv),
+        dom: &dom,
+    };
+    let guard = lock_checked(&HomeLock, &vm, checks, now_epoch(), &HostProbe)?;
+    Ok(Changing { dom, guard })
+}
+
+/// The entry point of a call that makes a VM or a template: takes the management lock and nothing else.
+///
+/// # Errors
+///
+/// Fails when the lock is not free in time.
+pub fn lock_for_create(_hv: &Hypervisor) -> Result<Held> {
+    lock_open(&HomeLock)
+}
+
+/// Refuses a VM under a live seal mark, without the lock and without clearing a stale mark. It serves a caller that
+/// holds no lock and acts later under `lock_for_change`, such as `start_vm`, so that a refusal comes before the work
+/// that precedes the lock.
+///
+/// # Errors
+///
+/// Fails as `lock_for_change` does about the mark.
+pub fn check_sealing(dom: &Domain) -> Result<()> {
+    check_unlocked(&LibvirtVm { hv: None, dom }, now_epoch(), &HostProbe)
+}
+
+/// `xml` with its owner element's `sealing` attribute set to `mark`, or removed with `None`. The attribute never
+/// creates the element: a definition without one is refused. A mark does not replace another: a second seal of the
+/// same VM is refused.
+fn with_sealing(xml: &str, mark: Option<&Mark>) -> Result<String> {
+    let owner = owner_in_domain_xml(xml)?.ok_or_else(|| anyhow!("the VM has no owner element"))?;
+    if mark.is_some() && owner.sealing.is_some() {
+        bail!("the VM's owner element already carries a seal mark");
+    }
+    replace_owner(
+        xml,
+        &Owner {
+            sealing: mark.map(Mark::encode),
+            ..owner
+        },
+    )
+}
+
 /// Whether `dom` was created by this server.
 pub fn is_owned(dom: &Domain) -> bool {
     dom.get_metadata(sys::VIR_DOMAIN_METADATA_ELEMENT as i32, Some(OWNER_NS), 0)
@@ -144,10 +432,10 @@ pub fn is_owned(dom: &Domain) -> bool {
 }
 
 /// Attributes of the owner element. A UEFI VM carries the Secure Boot mode it was asked for; VMs made from a template
-/// carry the template's name and the disk generation, and an expiry when they have a lifetime; and a UEFI VM the
-/// server started first carries the firmware record. Only the server writes them: the create tools when they define
-/// a domain, and, on a VM that already carries the element, a reset (`generation`, `expires`) and the first start
-/// (the firmware record).
+/// carry the template's name and the disk generation, and an expiry when they have a lifetime; a UEFI VM the server
+/// started first carries the firmware record; and a VM that a seal is copying carries the seal mark. Only the server
+/// writes them: the create tools when they define a domain, and, on a VM that already carries the element, a reset
+/// (`generation`, `expires`), the first start (the firmware record) and a seal (`sealing`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Owner {
     pub template: Option<String>,
@@ -161,6 +449,9 @@ pub struct Owner {
     pub firmware_code: Option<String>,
     /// The SHA-256 of that file at that start, in lower-case hex.
     pub firmware_sha256: Option<String>,
+    /// The value of the `sealing` attribute, as `Mark::encode` writes it, while a seal copies the VM. It stays text
+    /// here, so that a rewrite of the element keeps a value this server cannot read; `mark` reads it.
+    pub sealing: Option<String>,
 }
 
 impl Owner {
@@ -185,6 +476,9 @@ impl Owner {
         if let Some(sum) = &self.firmware_sha256 {
             attrs.push_str(&format!(" firmware_sha256='{}'", esc(sum)));
         }
+        if let Some(mark) = &self.sealing {
+            attrs.push_str(&format!(" sealing='{}'", esc(mark)));
+        }
         format!("<vmm:owner xmlns:vmm='{OWNER_NS}'{attrs}/>")
     }
 
@@ -205,6 +499,7 @@ impl Owner {
                 .and_then(SecureBoot::from_word),
             firmware_code: node.attribute("firmware_code").map(str::to_string),
             firmware_sha256: node.attribute("firmware_sha256").map(str::to_string),
+            sealing: node.attribute("sealing").map(str::to_string),
         }
     }
 
@@ -220,6 +515,20 @@ impl Owner {
     /// Whether the element carries any part of the firmware record.
     pub fn has_firmware_record(&self) -> bool {
         self.firmware_code.is_some() || self.firmware_sha256.is_some()
+    }
+
+    /// The seal mark, or `None` when the element has none.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the attribute holds a value `Mark::encode` did not write. Callers refuse the VM then, because a
+    /// mark that cannot be read cannot be called stale.
+    pub fn mark(&self) -> Result<Option<Mark>> {
+        self.sealing
+            .as_deref()
+            .map(Mark::decode)
+            .transpose()
+            .context("the owner element's sealing attribute is unreadable")
     }
 }
 
@@ -298,7 +607,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         None => m.networks.first().cloned(),
     };
 
-    let _guard = lock()?;
+    let _guard = lock_for_create(hv)?;
     hv.with_conn(|conn| {
         if let Some(n) = &network {
             check_network(conn, m, n)?;
@@ -617,7 +926,7 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
     let expires = expiry(m, vm.lifetime_minutes, now_epoch())?;
     let network = vm.network.clone().or_else(|| m.networks.first().cloned());
 
-    let _guard = lock()?;
+    let _guard = lock_for_create(hv)?;
     hv.with_conn(|conn| {
         if let Some(n) = &network {
             check_network(conn, m, n)?;
@@ -725,11 +1034,11 @@ fn reset_owner(persistent_xml: &str, next: u32) -> Result<Owner> {
 /// just before the VM is forced off, so a refused reset leaves the caller's state, such as its console, alone.
 pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Result<String> {
     let m = &hv.config.manage;
-    let dom = hv.manage_domain(name)?;
-    let _guard = lock()?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
     // can_manage also passes VMs listed in manage_vms, so ownership and the template come from the owner element.
     let owner =
-        owner_of(&dom).ok_or_else(|| anyhow!("VM '{name}' was not created by this server"))?;
+        owner_of(dom).ok_or_else(|| anyhow!("VM '{name}' was not created by this server"))?;
     let (Some(template_name), Some(generation)) = (owner.template.clone(), owner.generation) else {
         bail!(
             "VM '{name}' was not made from a template; only VMs from create_vm_from_template can be reset"
@@ -799,7 +1108,7 @@ pub fn reset(hv: &Hypervisor, name: &str, before_power_off: impl FnOnce()) -> Re
 
         // 4. The same domain with the new disks and owner attributes.
         let redefined = (|| -> Result<Vec<DiskInfo>> {
-            let old_xml = inactive_xml(&dom)?;
+            let old_xml = inactive_xml(dom)?;
             let (overlay_path, seed_path) = (overlay.get_path()?, seed_vol.get_path()?);
             let new_owner = reset_owner(&old_xml, next)?;
             let (xml, old) = replace_disks(
@@ -938,16 +1247,28 @@ pub fn owned_with_expiry(hv: &Hypervisor) -> Result<Vec<(String, Owner)>> {
 /// `None` when there was nothing to do.
 pub fn expire(hv: &Hypervisor, uuid: &str, now: u64) -> Result<Option<String>> {
     let m = &hv.config.manage;
-    let _guard = lock()?;
+    // Another process may delete the VM at any step; finding it gone means the work is done.
+    let gone = |e: &virt::error::Error| e.code() == ErrorNumber::NoDomain;
+    let found = hv.with_conn(|conn| match Domain::lookup_by_uuid_string(conn, uuid) {
+        Ok(dom) => Ok(Some(dom)),
+        Err(e) if gone(&e) => Ok(None),
+        Err(e) => bail!("cannot look up VM {uuid}: {}", e.message()),
+    })?;
+    let Some(dom) = found else {
+        return Ok(None);
+    };
+    // A VM under a live seal is left for the next sweep, not reported as a failure.
+    let changing = match lock_for_change(hv, Target::Domain(&dom), Checks::Mark) {
+        Ok(changing) => changing,
+        Err(e) if e.downcast_ref::<Sealed>().is_some() => {
+            tracing::info!("the sweep leaves VM {uuid} for a later sweep: {e}");
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    let dom = &*changing.dom;
     hv.with_conn(|conn| {
-        // Another process may delete the VM at any step; finding it gone means the work is done.
-        let gone = |e: &virt::error::Error| e.code() == ErrorNumber::NoDomain;
-        let dom = match Domain::lookup_by_uuid_string(conn, uuid) {
-            Ok(dom) => dom,
-            Err(e) if gone(&e) => return Ok(None),
-            Err(e) => bail!("cannot look up VM {uuid}: {}", e.message()),
-        };
-        if !should_expire(owner_of(&dom).as_ref(), now) {
+        if !should_expire(owner_of(dom).as_ref(), now) {
             return Ok(None);
         }
         let name = dom.get_name()?;
@@ -1071,12 +1392,12 @@ pub fn is_expired(owner: &Owner, now: u64) -> bool {
 
 /// Undefines a shut-off VM and deletes its disk volumes that are in the disk pool.
 pub fn delete(hv: &Hypervisor, name: &str) -> Result<String> {
-    let dom = hv.manage_domain(name)?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
     if dom.is_active()? {
         bail!("VM '{name}' is running; shut it down with stop_vm first");
     }
-    let _guard = lock()?;
-    let xml = inactive_xml(&dom)?;
+    let xml = inactive_xml(dom)?;
     let disks: Vec<DiskInfo> = parse_disks(&xml)?
         .into_iter()
         .filter(|d| d.device == "disk")
@@ -1214,8 +1535,9 @@ pub fn set_resources(
     if vcpus.is_none() && memory_mib.is_none() {
         bail!("provide vcpus and/or memory_mib");
     }
-    let dom = hv.manage_domain(name)?;
-    let xml = inactive_xml(&dom)?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
+    let xml = inactive_xml(dom)?;
     let doc = roxmltree::Document::parse(&xml)?;
     let cfg = sys::VIR_DOMAIN_AFFECT_CONFIG;
     let mut done = Vec::new();
@@ -1265,9 +1587,9 @@ pub fn set_resources(
 pub fn attach_disk(hv: &Hypervisor, name: &str, size_gib: u64) -> Result<String> {
     let m = &hv.config.manage;
     check_disk(m, size_gib)?;
-    let dom = hv.manage_domain(name)?;
-    let _guard = lock()?;
-    let used: Vec<String> = parse_disks(&inactive_xml(&dom)?)?
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
+    let used: Vec<String> = parse_disks(&inactive_xml(dom)?)?
         .into_iter()
         .map(|d| d.target)
         .collect();
@@ -1286,9 +1608,9 @@ pub fn attach_disk(hv: &Hypervisor, name: &str, size_gib: u64) -> Result<String>
              <source file='{}'/><target dev='{target}' bus='virtio'/></disk>",
             esc(&vol.get_path()?)
         );
-        if let Err(e) = dom.attach_device_flags(&xml, live_and_config(&dom)?) {
+        if let Err(e) = dom.attach_device_flags(&xml, live_and_config(dom)?) {
             let _ = vol.delete(0);
-            bail!("cannot attach disk: {}{}", e.message(), running_hint(&dom));
+            bail!("cannot attach disk: {}{}", e.message(), running_hint(dom));
         }
         Ok(format!(
             "attached new {size_gib} GiB disk {}/{vol_name} to '{name}' as {target}",
@@ -1300,14 +1622,14 @@ pub fn attach_disk(hv: &Hypervisor, name: &str, size_gib: u64) -> Result<String>
 /// Detaches a disk from a shut-off VM and deletes its volume if it is in the disk pool.
 pub fn detach_disk(hv: &Hypervisor, name: &str, target: &str) -> Result<String> {
     let m = &hv.config.manage;
-    let dom = hv.manage_domain(name)?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
     if dom.is_active()? {
         bail!(
             "VM '{name}' is running; shut it down with stop_vm first (the disk is deleted after detaching)"
         );
     }
-    let _guard = lock()?;
-    let xml = inactive_xml(&dom)?;
+    let xml = inactive_xml(dom)?;
     let disk = parse_disks(&xml)?
         .into_iter()
         .find(|d| d.target == target && d.device == "disk")
@@ -1349,14 +1671,14 @@ pub fn set_cdrom(
     iso: Option<&str>,
 ) -> Result<String> {
     let iso = iso.map(|p| hv.config.iso_file(p)).transpose()?;
-    let dom = hv.manage_domain(name)?;
-    let _guard = lock()?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
     let active = dom.is_active()?;
     // The live definition carries the fields libvirt compares when changing media.
     let xml = if active {
         dom.get_xml_desc(0)?
     } else {
-        inactive_xml(&dom)?
+        inactive_xml(dom)?
     };
     let disks = parse_disks(&xml)?;
     let source = iso
@@ -1395,16 +1717,17 @@ pub fn set_cdrom(
         &el[body_start..cut.start],
         &el[cut.end..]
     );
-    dom.update_device_flags(&dev, live_and_config(&dom)?)
+    dom.update_device_flags(&dev, live_and_config(dom)?)
         .map_err(|e| anyhow!("cannot change media in {}: {}", cdrom.target, e.message()))?;
     Ok(format!("{what} in {} of '{name}'", cdrom.target))
 }
 
 pub fn attach_nic(hv: &Hypervisor, name: &str, network: &str) -> Result<String> {
     let m = &hv.config.manage;
-    let dom = hv.manage_domain(name)?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
     hv.with_conn(|conn| check_network(conn, m, network))?;
-    let before: Vec<String> = parse_nics(&inactive_xml(&dom)?)?
+    let before: Vec<String> = parse_nics(&inactive_xml(dom)?)?
         .into_iter()
         .map(|n| n.mac)
         .collect();
@@ -1412,15 +1735,15 @@ pub fn attach_nic(hv: &Hypervisor, name: &str, network: &str) -> Result<String> 
         "<interface type='network'><source network='{}'/><model type='virtio'/></interface>",
         esc(network)
     );
-    dom.attach_device_flags(&xml, live_and_config(&dom)?)
+    dom.attach_device_flags(&xml, live_and_config(dom)?)
         .map_err(|e| {
             anyhow!(
                 "cannot attach network interface: {}{}",
                 e.message(),
-                running_hint(&dom)
+                running_hint(dom)
             )
         })?;
-    let mac = parse_nics(&inactive_xml(&dom)?)?
+    let mac = parse_nics(&inactive_xml(dom)?)?
         .into_iter()
         .map(|n| n.mac)
         .find(|mac| !before.contains(mac))
@@ -1431,13 +1754,14 @@ pub fn attach_nic(hv: &Hypervisor, name: &str, network: &str) -> Result<String> 
 }
 
 pub fn detach_nic(hv: &Hypervisor, name: &str, mac: &str) -> Result<String> {
-    let dom = hv.manage_domain(name)?;
-    let xml = inactive_xml(&dom)?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
+    let xml = inactive_xml(dom)?;
     let nic = parse_nics(&xml)?
         .into_iter()
         .find(|n| n.mac.eq_ignore_ascii_case(mac))
         .with_context(|| format!("VM '{name}' has no network interface with MAC {mac}"))?;
-    dom.detach_device_flags(&xml[nic.range.clone()], live_and_config(&dom)?)
+    dom.detach_device_flags(&xml[nic.range.clone()], live_and_config(dom)?)
         .map_err(|e| anyhow!("cannot detach network interface: {}", e.message()))?;
     Ok(format!(
         "detached network interface {} from '{name}'",
@@ -1452,13 +1776,14 @@ pub fn snapshot_create(
     description: Option<&str>,
 ) -> Result<String> {
     check_name(snapshot, "snapshot name")?;
-    let dom = hv.manage_domain(name)?;
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let dom = &*changing.dom;
     let xml = format!(
         "<domainsnapshot><name>{}</name><description>{}</description></domainsnapshot>",
         esc(snapshot),
         esc(description.unwrap_or_default())
     );
-    DomainSnapshot::create_xml(&dom, &xml, 0).map_err(|e| {
+    DomainSnapshot::create_xml(dom, &xml, 0).map_err(|e| {
         let mut msg = format!("cannot create snapshot '{snapshot}': {}", e.message());
         if e.message().contains("pflash") {
             msg.push_str(
@@ -1469,7 +1794,7 @@ pub fn snapshot_create(
     })?;
     Ok(format!(
         "created snapshot '{snapshot}' of '{name}' ({})",
-        hypervisor::state_name(&dom)
+        hypervisor::state_name(dom)
     ))
 }
 
@@ -1589,8 +1914,8 @@ pub fn snapshot_revert(target: &RevertTarget, snapshot: &str) -> Result<()> {
 }
 
 pub fn snapshot_delete(hv: &Hypervisor, name: &str, snapshot: &str) -> Result<String> {
-    let dom = hv.manage_domain(name)?;
-    let snap = DomainSnapshot::lookup_by_name(&dom, snapshot, 0)
+    let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
+    let snap = DomainSnapshot::lookup_by_name(&changing.dom, snapshot, 0)
         .map_err(|e| anyhow!("snapshot '{snapshot}' not found: {}", e.message()))?;
     snap.delete(0)
         .map_err(|e| anyhow!("cannot delete snapshot '{snapshot}': {}", e.message()))?;
@@ -1689,20 +2014,26 @@ fn check_memory(m: &Manage, mib: u64) -> Result<()> {
     Ok(())
 }
 
-/// Takes the management lock for the start of `dom`, after checking that the VMs this server created that are running,
-/// paused or suspended, with `dom` added, stay within `manage.max_total_memory_mib`. The caller holds the guard until
-/// libvirt has started the VM, so two starts cannot both pass the check. Returns `None`, and takes no lock, when no
-/// cap is set or `dom` is not a VM this server created.
+/// Checks that the VMs this server created that are running, paused or suspended, with `dom` added, stay within
+/// `manage.max_total_memory_mib`, under the management lock, which the caller keeps until libvirt has started the VM,
+/// so two starts cannot both pass the check. A caller that holds the lock already passes its guard as `held`, and
+/// gets `None` back: the lock is never taken twice. Without `held`, it takes the lock itself and returns the guard,
+/// except that it takes none, and returns `None`, when no cap is set or `dom` is not a VM this server created.
 ///
 /// `memory_mib` replaces `dom`'s own memory, for a revert, which restores the snapshot's.
-pub fn start_guard(hv: &Hypervisor, dom: &Domain, memory_mib: Option<u64>) -> Result<Option<Held>> {
+pub fn start_guard(
+    hv: &Hypervisor,
+    dom: &Domain,
+    memory_mib: Option<u64>,
+    held: Option<&Held>,
+) -> Result<Option<Held>> {
     let Some(cap) = hv.config.manage.max_total_memory_mib else {
         return Ok(None);
     };
     if !is_owned(dom) {
         return Ok(None);
     }
-    let guard = lock()?;
+    let guard = guard_for(held, &HomeLock)?;
     let uuid = dom.get_uuid_string()?;
     let name = dom.get_name()?;
     let own = match memory_mib {
@@ -1734,7 +2065,7 @@ pub fn start_guard(hv: &Hypervisor, dom: &Domain, memory_mib: Option<u64>) -> Re
         Ok(running)
     })?;
     check_total_memory(cap, &name, own, &running)?;
-    Ok(Some(guard))
+    Ok(guard)
 }
 
 /// Refuses a start of `name`, using `own` MiB, that would bring the server's running VMs past `cap` MiB.
@@ -2056,10 +2387,10 @@ pub fn firmware_record_due(hv: &Hypervisor, dom: &Domain, name: &str) -> bool {
 /// Fails when the lock is not free in time, the VM is gone or no longer qualifies, the loader or its file cannot be
 /// read, or libvirt refuses the redefinition. The start has already succeeded, so the caller logs it.
 pub fn record_firmware(hv: &Hypervisor, uuid: &str, name: &str) -> Result<()> {
-    let _guard = lock()?;
+    // The record rewrites the VM's owner element, so a VM under a live seal gets none.
+    let changing = lock_for_change(hv, Target::Uuid(uuid), Checks::Mark)?;
     hv.with_conn(|conn| {
-        let dom = Domain::lookup_by_uuid_string(conn, uuid)
-            .map_err(|e| anyhow!("cannot find VM '{name}': {}", e.message()))?;
+        let dom = &*changing.dom;
         if dom.get_name()? != name {
             bail!("VM '{name}' was renamed");
         }
@@ -2076,13 +2407,13 @@ pub fn record_firmware(hv: &Hypervisor, uuid: &str, name: &str) -> Result<()> {
         })?;
         let dir = pool_dir(&pool)?.ok_or_else(|| anyhow!("the pool has no directory"))?;
         // The listing was checked before the start; here only the VM's own state is. It is read again after the
-        // hash, because the hash takes time and `configure`, `attach_nic` and `detach_nic` change the persistent
-        // definition without the lock; redefining a copy read earlier would undo their change.
+        // hash, because the hash takes time and another libvirt client, which takes no lock, may change the
+        // persistent definition meanwhile; redefining a copy read earlier would undo its change.
         let qualifying_definition = || -> Result<String> {
-            let inactive = inactive_xml(&dom)?;
+            let inactive = inactive_xml(dom)?;
             let owner = owner_in_domain_xml(&inactive)?;
             if !firmware::should_record(
-                hv.can_manage(&dom),
+                hv.can_manage(dom),
                 owner.as_ref(),
                 &inactive,
                 &dir,
@@ -2911,9 +3242,34 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
     )
 }
 
+/// The management lock on a temporary file, with the short wait tests give it, for the tests here and in `start`.
+#[cfg(test)]
+pub(crate) struct FileLock {
+    path: PathBuf,
+    wait: Duration,
+}
+
+#[cfg(test)]
+impl FileLock {
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self {
+            path,
+            wait: Duration::from_millis(200),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Locker for FileLock {
+    fn acquire(&self) -> Result<Held> {
+        lock_file(&self.path, self.wait)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seal;
 
     #[test]
     fn a_revert_to_a_paused_snapshot_activates_the_vm_and_restores_the_snapshot_s_memory() {
@@ -4504,6 +4860,7 @@ mod tests {
             secure_boot: Some(SecureBoot::Setup),
             firmware_code: Some("/o/it's \"CODE\" <4M>&.fd".into()),
             firmware_sha256: Some("ab".repeat(32)),
+            sealing: Some(seal_mark().encode()),
         };
         assert_eq!(Owner::from_element(&owner.element()).unwrap(), owner);
         assert_eq!(
@@ -5005,5 +5362,399 @@ mod tests {
         let (a, b) = (new_uuid(), new_uuid());
         assert_ne!(a, b);
         assert_eq!(a.len(), 36);
+    }
+
+    fn seal_mark() -> Mark {
+        Mark {
+            template: "t-base".into(),
+            seal_id: "0b9f6c2e".into(),
+            started: 1_000_000,
+            uid: 1000,
+            lock_path: seal::lock_path(Some("/home/me".into()), "t-base").unwrap(),
+        }
+    }
+
+    /// A probe of the process "uid 1000, HOME /home/me" whose seal locks are all held, or all free.
+    struct FakeProbe {
+        uid: u32,
+        held: bool,
+    }
+
+    impl LockProbe for FakeProbe {
+        fn uid(&self) -> u32 {
+            self.uid
+        }
+        fn lock_path(&self, template: &str) -> Option<PathBuf> {
+            seal::lock_path(Some("/home/me".into()), template)
+        }
+        fn held(&self, _path: &Path) -> Result<bool> {
+            Ok(self.held)
+        }
+    }
+
+    const SEAL_HELD: FakeProbe = FakeProbe {
+        uid: 1000,
+        held: true,
+    };
+    const SEAL_FREE: FakeProbe = FakeProbe {
+        uid: 1000,
+        held: false,
+    };
+
+    impl FileLock {
+        fn new(name: &str) -> Self {
+            Self::at(lock_test_dir(name).join("manage.lock"))
+        }
+
+        fn remove(self) {
+            std::fs::remove_dir_all(self.path.parent().unwrap()).unwrap();
+        }
+    }
+
+    /// A VM whose persistent owner element is `owner`, counting the times a mark was cleared.
+    struct FakeVm {
+        owner: std::cell::RefCell<Option<Owner>>,
+        cleared: std::cell::Cell<u32>,
+    }
+
+    impl FakeVm {
+        fn marked(mark: &Mark) -> Self {
+            Self::with(Some(Owner {
+                sealing: Some(mark.encode()),
+                ..Owner::default()
+            }))
+        }
+
+        fn with(owner: Option<Owner>) -> Self {
+            Self {
+                owner: owner.into(),
+                cleared: 0.into(),
+            }
+        }
+    }
+
+    impl SealSubject for FakeVm {
+        fn name(&self) -> String {
+            "t-a".into()
+        }
+        fn persistent_owner(&self) -> Result<Option<Owner>> {
+            Ok(self.owner.borrow().clone())
+        }
+        fn clear_mark(&self) -> Result<()> {
+            self.cleared.set(self.cleared.get() + 1);
+            if let Some(owner) = self.owner.borrow_mut().as_mut() {
+                owner.sealing = None;
+            }
+            Ok(())
+        }
+    }
+
+    const NOW: u64 = 1_000_100;
+
+    #[test]
+    fn a_live_mark_is_refused_naming_the_template_and_the_lock_is_let_go() {
+        let (vm, locker) = (FakeVm::marked(&seal_mark()), FileLock::new("live"));
+        for checks in [Checks::Mark, Checks::MarkAndJournal] {
+            let refused = lock_checked(&locker, &vm, checks, NOW, &SEAL_HELD).unwrap_err();
+            let sealed = refused.downcast_ref::<Sealed>().expect("a Sealed refusal");
+            assert_eq!(sealed.template, "t-base");
+            assert!(refused.to_string().contains("'t-base'"), "{refused}");
+            // The refusal returns no guard, so the next call can take the lock at once.
+            drop(locker.acquire().unwrap());
+        }
+        assert_eq!(vm.cleared.get(), 0);
+        locker.remove();
+    }
+
+    #[test]
+    fn a_stale_mark_goes_on_and_is_cleared() {
+        let (vm, locker) = (FakeVm::marked(&seal_mark()), FileLock::new("stale"));
+        let guard = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).unwrap();
+        assert_eq!(vm.cleared.get(), 1);
+        assert_eq!(vm.owner.borrow().as_ref().unwrap().sealing, None);
+        // The lock is the caller's, held until it drops the guard.
+        assert!(locker.acquire().is_err());
+        drop(guard);
+        drop(locker.acquire().unwrap());
+        locker.remove();
+    }
+
+    #[test]
+    fn a_mark_of_another_process_is_live_for_24_hours_whatever_its_lock_says() {
+        let locker = FileLock::new("foreign");
+        let other = FakeProbe {
+            uid: 1001,
+            held: false,
+        };
+        let young = FakeVm::marked(&seal_mark());
+        let refused = lock_checked(&locker, &young, Checks::Mark, 1_000_000 + 23 * 3600, &other);
+        assert!(refused.unwrap_err().downcast_ref::<Sealed>().is_some());
+        assert_eq!(young.cleared.get(), 0);
+
+        let old = FakeVm::marked(&seal_mark());
+        lock_checked(&locker, &old, Checks::Mark, 1_000_000 + 25 * 3600, &other).unwrap();
+        assert_eq!(old.cleared.get(), 1);
+        locker.remove();
+    }
+
+    #[test]
+    fn no_mark_goes_on_and_clears_nothing() {
+        let (vm, locker) = (
+            FakeVm::with(Some(Owner::default())),
+            FileLock::new("nomark"),
+        );
+        lock_checked(&locker, &vm, Checks::MarkAndJournal, NOW, &SEAL_HELD).unwrap();
+        assert_eq!(vm.cleared.get(), 0);
+        locker.remove();
+    }
+
+    #[test]
+    fn a_vm_without_an_owner_element_skips_both_checks_and_is_never_given_a_mark() {
+        let (vm, locker) = (FakeVm::with(None), FileLock::new("unowned"));
+        for checks in [Checks::Mark, Checks::MarkAndJournal] {
+            lock_checked(&locker, &vm, checks, NOW, &SEAL_HELD).unwrap();
+        }
+        check_unlocked(&vm, NOW, &SEAL_HELD).unwrap();
+        assert_eq!(vm.cleared.get(), 0);
+        assert_eq!(*vm.owner.borrow(), None);
+        locker.remove();
+    }
+
+    #[test]
+    fn a_mark_that_cannot_be_read_is_refused_not_called_stale() {
+        let vm = FakeVm::with(Some(Owner {
+            sealing: Some("v9:garbled".into()),
+            ..Owner::default()
+        }));
+        let locker = FileLock::new("garbled");
+        let refused = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("t-a") && refused.contains("unreadable"),
+            "{refused}"
+        );
+        assert!(check_unlocked(&vm, NOW, &SEAL_FREE).is_err());
+        assert_eq!(vm.cleared.get(), 0);
+        drop(locker.acquire().unwrap());
+        locker.remove();
+    }
+
+    #[test]
+    fn a_body_that_takes_the_lock_again_inside_the_guard_fails_within_the_wait() {
+        let (vm, locker) = (
+            FakeVm::with(Some(Owner::default())),
+            FileLock::new("nested"),
+        );
+        let _guard = lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).unwrap();
+        for second in [
+            lock_checked(&locker, &vm, Checks::Mark, NOW, &SEAL_FREE).map(drop),
+            lock_open(&locker).map(drop),
+        ] {
+            let started = Instant::now();
+            let _ = second.as_ref().expect_err("a second take is refused");
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+        let started = Instant::now();
+        let err = locker.acquire().unwrap_err().to_string();
+        assert!(err.contains("has held the management lock"), "{err}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200)
+                && started.elapsed() < Duration::from_secs(5)
+        );
+        drop(_guard);
+        locker.remove();
+    }
+
+    #[test]
+    fn the_create_entry_point_takes_the_lock_and_checks_nothing_else() {
+        let locker = FileLock::new("create");
+        let guard = lock_open(&locker).unwrap();
+        assert!(lock_open(&locker).is_err());
+        drop(guard);
+        drop(lock_open(&locker).unwrap());
+        locker.remove();
+    }
+
+    #[test]
+    fn the_unlocked_check_refuses_a_live_mark_and_leaves_a_stale_one_alone() {
+        // It takes no locker, so a held management lock cannot stop it.
+        let locker = FileLock::new("unlocked");
+        let _held = locker.acquire().unwrap();
+        let vm = FakeVm::marked(&seal_mark());
+        let refused = check_unlocked(&vm, NOW, &SEAL_HELD).unwrap_err();
+        assert!(refused.downcast_ref::<Sealed>().is_some(), "{refused}");
+        check_unlocked(&vm, NOW, &SEAL_FREE).unwrap();
+        assert_eq!(vm.cleared.get(), 0);
+        assert!(vm.owner.borrow().as_ref().unwrap().sealing.is_some());
+        drop(_held);
+        locker.remove();
+    }
+
+    #[test]
+    fn a_function_that_is_passed_the_guard_never_takes_the_lock_and_one_without_takes_it() {
+        let locker = FileLock::new("passed");
+        let held = locker.acquire().unwrap();
+        // With the caller's guard, a second take would wait and fail.
+        assert!(guard_for(Some(&held), &locker).unwrap().is_none());
+        assert!(guard_for(None, &locker).is_err());
+        drop(held);
+        let own = guard_for(None, &locker)
+            .unwrap()
+            .expect("a guard of its own");
+        assert!(locker.acquire().is_err());
+        drop(own);
+        locker.remove();
+    }
+
+    /// The name of the function around each line of `code`, with the line.
+    fn lines_by_function(code: &str) -> Vec<(String, &str)> {
+        let mut current = String::new();
+        let mut out = Vec::new();
+        for line in code.lines() {
+            let t = line.trim_start();
+            let signature = t
+                .strip_prefix("pub(crate) ")
+                .or_else(|| t.strip_prefix("pub "))
+                .unwrap_or(t);
+            if let Some(rest) = signature.strip_prefix("fn ") {
+                current = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+            }
+            if !t.starts_with("//") {
+                out.push((current.clone(), line));
+            }
+        }
+        out
+    }
+
+    /// Whether `line` calls the function `name`: the name, then `(`, not part of a longer name or a method.
+    fn calls(line: &str, name: &str) -> bool {
+        line.match_indices(&format!("{name}(")).any(|(i, _)| {
+            let before = line[..i].chars().next_back();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                && !line[..i].trim_end().ends_with("fn")
+        })
+    }
+
+    #[test]
+    fn only_the_entry_points_and_start_guard_name_the_management_lock() {
+        let source = include_str!("manage.rs");
+        let (code, _) = source
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("the tests module follows the code");
+        let lines = lines_by_function(code);
+        let owners = |f: &dyn Fn(&str) -> bool| {
+            let mut names: Vec<&str> = lines
+                .iter()
+                .filter(|(_, line)| f(line))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            names.sort_unstable();
+            names
+        };
+        // The one call of lock() is the home lock's own.
+        assert_eq!(owners(&|l| calls(l, "lock")), ["acquire"]);
+        // The home lock itself is named by the two entry points and start_guard, each once, and by nothing else.
+        let named = owners(&|l| {
+            l.contains("HomeLock") && !l.contains("struct HomeLock") && !l.contains("for HomeLock")
+        });
+        assert_eq!(named, ["lock_for_change", "lock_for_create", "start_guard"]);
+    }
+
+    #[test]
+    fn the_source_check_sees_a_call_it_should_refuse() {
+        // The check must be able to fail: a stray call in another function shows up.
+        let stray = "fn record_it() {\n    let _guard = lock()?;\n}\n";
+        let lines = lines_by_function(stray);
+        let found: Vec<&str> = lines
+            .iter()
+            .filter(|(_, l)| calls(l, "lock"))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(found, ["record_it"]);
+        assert!(!calls("file.try_lock()", "lock"));
+        assert!(!calls("self.0.unlock();", "lock"));
+        assert!(!calls("fn lock() -> Result<Held> {", "lock"));
+    }
+
+    const OWNED_DOMAIN: &str = "<domain type='kvm'><name>t-a</name><metadata>\
+        <vmm:owner xmlns:vmm='http://virtmanager-mcp/owner/1' template='debian13' generation='3'/>\
+        </metadata><memory>1</memory></domain>";
+
+    #[test]
+    fn a_mark_is_set_and_cleared_through_the_owner_element_and_changes_nothing_else() {
+        let mark = seal_mark();
+        let marked = with_sealing(OWNED_DOMAIN, Some(&mark)).unwrap();
+        let owner = owner_in_domain_xml(&marked).unwrap().unwrap();
+        assert_eq!(owner.mark().unwrap(), Some(mark));
+        assert_eq!(owner.template.as_deref(), Some("debian13"));
+        assert_eq!(owner.generation, Some(3));
+        assert!(marked.ends_with("<memory>1</memory></domain>"));
+        // Clearing gives the definition back as it was, and clearing an unmarked one changes nothing.
+        let cleared = with_sealing(&marked, None).unwrap();
+        assert_eq!(
+            owner_in_domain_xml(&cleared).unwrap().unwrap().sealing,
+            None
+        );
+        assert_eq!(
+            owner_in_domain_xml(&cleared).unwrap(),
+            owner_in_domain_xml(OWNED_DOMAIN).unwrap()
+        );
+        assert_eq!(with_sealing(OWNED_DOMAIN, None).unwrap(), cleared);
+    }
+
+    #[test]
+    fn a_mark_never_gives_a_vm_an_owner_element() {
+        // The guardrail: only the create tools set the owner element, so a mark written to a definition without one
+        // fails, and never claims the VM.
+        let mark = seal_mark();
+        let set = |xml: &str| with_sealing(xml, Some(&mark));
+        assert!(set("<domain><name>x</name></domain>").is_err());
+        assert!(set("<domain><name>x</name><metadata/></domain>").is_err());
+        let foreign = "<domain><name>x</name><metadata>\
+                       <o:owner xmlns:o='http://example.com/o'/></metadata></domain>";
+        let err = set(foreign).unwrap_err().to_string();
+        assert!(err.contains("no owner element"), "{err}");
+        assert!(with_sealing(foreign, None).is_err());
+    }
+
+    #[test]
+    fn a_second_seal_does_not_take_over_a_mark() {
+        let marked = with_sealing(OWNED_DOMAIN, Some(&seal_mark())).unwrap();
+        let other = Mark {
+            seal_id: "other".into(),
+            ..seal_mark()
+        };
+        let err = with_sealing(&marked, Some(&other)).unwrap_err().to_string();
+        assert!(err.contains("already carries a seal mark"), "{err}");
+    }
+
+    #[test]
+    fn a_vm_made_by_create_vm_carries_no_mark() {
+        assert_eq!(Owner::for_new_vm(true, SecureBoot::On).sealing, None);
+        assert_eq!(Owner::for_new_vm(false, SecureBoot::On).sealing, None);
+        let xml = domain_xml(&spec(vec![]));
+        assert!(!xml.contains("sealing"), "{xml}");
+        assert_eq!(
+            owner_in_domain_xml(&xml).unwrap().unwrap().mark().unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_other_rewrites_of_the_owner_element_keep_the_mark() {
+        let marked = with_sealing(&template_vm_xml(), Some(&seal_mark())).unwrap();
+        // A reset reads the persistent definition, so it keeps the mark that definition holds, and only there.
+        let reset = reset_owner(&marked, 4).unwrap();
+        assert_eq!(reset.generation, Some(4));
+        assert_eq!(reset.mark().unwrap(), Some(seal_mark()));
+        // The record of the first start keeps it as well.
+        let recorded = with_firmware_record(&marked, "/o/CODE.fd", &"ab".repeat(32)).unwrap();
+        let owner = owner_in_domain_xml(&recorded).unwrap().unwrap();
+        assert_eq!(owner.mark().unwrap(), Some(seal_mark()));
+        assert!(owner.has_firmware_record());
     }
 }

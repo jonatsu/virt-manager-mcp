@@ -5,6 +5,20 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+### Changed
+
+- Every management call that changes a VM now refuses a VM that a seal is copying into a template, and names the
+  template: `start_vm`, `stop_vm`, `configure_vm`, `attach_disk`, `detach_disk`, `set_cdrom`, `attach_nic`,
+  `detach_nic`, `snapshot_create`, `snapshot_revert`, `snapshot_delete`, `reset_vm`, `delete_vm` and the expiry sweep.
+  The server marks a VM in its owner metadata (`sealing`) for the length of a seal, and clears a mark that a crashed
+  seal left. A process of another account, or with another `HOME`, honours a mark for 24 hours, because it cannot see
+  the seal's lock. Nothing writes a mark yet, so no VM is refused until sealing arrives. A mark that the server cannot
+  read refuses the VM until you remove the `sealing` attribute from its owner element with `virsh edit`.
+- `configure_vm`, `attach_nic`, `detach_nic`, `snapshot_create`, `snapshot_delete` and `stop_vm` now take the
+  management lock, as the other changing calls do. While another call holds it, they wait up to 30 seconds and then
+  fail with "another virtmanager-mcp operation has held the management lock". `stop_vm` holds it only while it asks
+  for the shutdown, not while it waits for the guest.
+
 ## 0.5.0
 
 ### Added
