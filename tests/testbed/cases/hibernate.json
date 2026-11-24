@@ -1,0 +1,207 @@
+[
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-hs",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi",
+      "secure_boot": "setup",
+      "hibernate": true
+    },
+    "expect": {
+      "contains": "created VM 't-hs'"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-hs"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"uefi\"",
+        "\"secure_boot\": false",
+        "\"secure_boot_mode\": \"setup\"",
+        "\"hibernate\": true"
+      ]
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-hs"
+    },
+    "expect": {
+      "contains": "deleted VM 't-hs'"
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-ho",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi",
+      "secure_boot": "on",
+      "hibernate": true
+    },
+    "expect": {
+      "contains": "created VM 't-ho'"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-ho"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"uefi\"",
+        "\"secure_boot\": true",
+        "\"secure_boot_mode\": \"on\"",
+        "\"hibernate\": true"
+      ]
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-ho"
+    },
+    "expect": {
+      "contains": "deleted VM 't-ho'"
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-hd",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi",
+      "secure_boot": false
+    },
+    "expect": {
+      "contains": "created VM 't-hd'"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-hd"
+    },
+    "expect": {
+      "contains": [
+        "\"hibernate\": false",
+        "\"secure_boot_mode\": \"off\""
+      ]
+    }
+  },
+  {
+    "tool": "delete_vm",
+    "args": {
+      "vm": "t-hd"
+    },
+    "expect": {
+      "contains": "deleted VM 't-hd'"
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-hb",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "bios",
+      "hibernate": true
+    },
+    "expect": {
+      "contains": "created VM 't-hb'"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-hb"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"bios\"",
+        "\"hibernate\": true",
+        "\"secure_boot_mode\": \"off\""
+      ]
+    }
+  },
+  {
+    "tool": "create_vm",
+    "args": {
+      "name": "t-hu",
+      "os": "linux",
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_gib": 1,
+      "firmware": "uefi",
+      "secure_boot": false,
+      "hibernate": true
+    },
+    "expect": {
+      "contains": "UEFI without Secure Boot"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-hu"
+    },
+    "expect": {
+      "contains": [
+        "\"firmware\": \"uefi\"",
+        "\"secure_boot\": false",
+        "\"secure_boot_mode\": \"off\"",
+        "\"hibernate\": true"
+      ]
+    }
+  },
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-hu",
+      "wait_for_agent_secs": 0
+    },
+    "expect": {
+      "contains": "VM 't-hu': started"
+    }
+  },
+  {
+    "tool": "describe_vm",
+    "args": {
+      "vm": "t-hu"
+    },
+    "expect": {
+      "contains": [
+        "\"state\": \"running\"",
+        "\"secure_boot_mode\": \"off\"",
+        "\"hibernate\": true"
+      ]
+    }
+  },
+  {
+    "tool": "stop_vm",
+    "args": {
+      "vm": "t-hu",
+      "force": true
+    },
+    "expect": {
+      "contains": "VM 't-hu' is shut off"
+    }
+  }
+]

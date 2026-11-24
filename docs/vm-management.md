@@ -41,6 +41,16 @@ max_disk_gib = 32
   s, and `manage.on_crash` as its crash action: `preserve` (the default) keeps a crashed VM stopped in place, holding
   its memory, until `stop_vm` with `force: true`, and `destroy` stops it. The VM is created shut off.
 
+- **Hibernation:** `create_vm` with `hibernate: true` turns suspend to disk on and leaves suspend to memory off. A
+  guest that hibernates (`systemctl hibernate`) ends up shut off, and `start_vm` resumes it from its swap. libvirt
+  keeps no saved state for it, so `vm_events` is where you see it: a `pmsuspended` event with the reason disk comes
+  just before the shutdown, and `reset_vm` or `delete_vm` discards the saved state without a warning. The guest needs
+  swap at least as large as its memory and the `resume` settings of its own. A UEFI VM with `hibernate` has its
+  firmware named by path in its definition, not chosen by libvirt, because libvirt's automatic choice refuses suspend
+  to disk; `describe_vm` still reports the mode. A Linux guest with `secure_boot` `"on"` runs under kernel lockdown,
+  which refuses hibernation, so use `"off"` or `"setup"` for a VM that has to hibernate. The server does not refuse the
+  combination, because another guest may allow it. `describe_vm` shows `hibernate`.
+
 - **Disposable VMs from templates:** `create_vm_from_template` makes a VM in seconds from a template
   volume the operator prepared, such as a Debian 13 cloud image with the guest agent installed
   ([docs/templates.md](templates.md) builds one with `scripts/make-template.sh`). The VM gets a

@@ -39,7 +39,7 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
   transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos templates-expiry
+  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos hibernate templates-expiry
   templates-expiry-command
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
@@ -52,6 +52,7 @@ declare -A MEMBERS=(
   ["templates-reset"]="templates-reset templates-reset-missing"
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
+  ["hibernate"]="hibernate hibernate-after"
   ["jobs"]="jobs jobs-reopen"
   ["diag-stats"]="diag-stats diag-stats-read-only diag-stats-after"
   ["transfer-pull"]="transfer-pull transfer-pull-caps"
@@ -259,6 +260,46 @@ unit_extra_isos() {
   fi
   rm -rf -- "${ISO_DIR:?}" "${WORK:?}/vars.json"
   ISO_DIR=
+}
+
+# The hibernate case leaves t-hb (BIOS) and t-hu (UEFI, Secure Boot off) defined, and this reads their inactive
+# definitions with virsh: both have suspend to disk on and suspend to memory off, and t-hu, which libvirt first
+# resolved by autoselection and the server then redefined, carries the explicit flash loader and variables template
+# and neither the `firmware` attribute nor `<firmware>` features. The second case deletes them. The case runs under
+# config-templates.toml with max_vms = 4, because the kept t-win11net counts toward max_vms.
+unit_hibernate() {
+  local config=${WORK}/config-hibernate.toml vm xml avail
+  if ! sed 's/^max_vms = 3$/max_vms = 4/' "${TESTBED}/config-templates.toml" > "${config}" \
+    || ! grep -qxF 'max_vms = 4' "${config}"; then
+    record hibernate failed "could not write ${config}"
+    return
+  fi
+  avail=$(avail_mib)
+  if ((avail < 1024)); then
+    record hibernate failed "needs 1024 MiB of available memory; the host has ${avail} MiB"
+    return
+  fi
+  run_case hibernate "${config}"
+  for vm in t-hb t-hu; do
+    xml=${WORK}/${vm}.inactive.xml
+    vsh dumpxml --inactive "${vm}" > "${xml}" || {
+      record hibernate failed "could not read the definition of ${vm}"
+      continue
+    }
+    [[ $(xmllint --xpath "count(//pm/suspend-to-disk[@enabled='yes'])" "${xml}") == 1 &&
+    $(xmllint --xpath "count(//pm/suspend-to-mem[@enabled='no'])" "${xml}") == 1 ]] \
+      || record hibernate failed "${vm} has no suspend to disk on and suspend to memory off"
+  done
+  [[ $(xmllint --xpath "count(//os/loader)" "${WORK}/t-hb.inactive.xml") == 0 ]] \
+    || record hibernate failed "t-hb is BIOS and has a loader"
+  xml=${WORK}/t-hu.inactive.xml
+  [[ $(xmllint --xpath "count(//os/@firmware) + count(//os/firmware)" "${xml}") == 0 &&
+  $(xmllint --xpath "string(//os/loader/@type)" "${xml}") == pflash &&
+  $(xmllint --xpath "string(//os/loader/@secure)" "${xml}") == no &&
+  $(xmllint --xpath "string(//os/loader)" "${xml}") == /*OVMF_CODE*.fd &&
+  $(xmllint --xpath "string(//os/nvram/@template)" "${xml}") == /*OVMF_VARS*.fd ]] \
+    || record hibernate failed "t-hu does not hold the explicit firmware form, see ${xml}"
+  run_case hibernate-after "${config}"
 }
 
 unit_templates_expiry() {
@@ -838,6 +879,7 @@ run_unit() {
     templates-reset) unit_templates_reset ;;
     templates-reset-uefi) unit_templates_reset_uefi ;;
     extra-isos) unit_extra_isos ;;
+    hibernate) unit_hibernate ;;
     templates-expiry) unit_templates_expiry ;;
     templates-expiry-command) unit_templates_expiry_command ;;
     templates-outside-disk) unit_templates_outside_disk ;;

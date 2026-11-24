@@ -19,6 +19,12 @@ Each release's section lists what changed for people who run the server and for 
 - `set_cdrom` on a shut-off VM adds a CD-ROM drive at a free target of the form `sd<letter>` that you name, such as
   `sdc`. It refuses a target that a disk uses, a name that is not `sd<letter>`, a running VM, and a seventh SATA
   device. Without a `target` it behaves as before.
+- `create_vm` takes `hibernate`, which turns suspend to disk on and leaves suspend to memory off, so a guest can
+  hibernate. A hibernated VM is shut off, and `start_vm` resumes it. `describe_vm` reports `hibernate`. libvirt's
+  automatic firmware choice refuses suspend to disk, so a UEFI VM with `hibernate` is defined twice: first by
+  automatic choice, then, with the same name, UUID and MAC address, with the firmware files libvirt chose written
+  into its definition. A Linux guest with `secure_boot` `"on"` runs under kernel lockdown and refuses to hibernate;
+  use `"off"` or `"setup"`. `describe_vm` still reports `secure_boot_mode` for such a VM.
 
 ### Changed
 

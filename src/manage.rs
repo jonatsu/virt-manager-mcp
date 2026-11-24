@@ -204,6 +204,8 @@ pub struct NewVm {
     pub driver_iso: Option<String>,
     /// More read-only SATA CD-ROMs after the installer and driver drives, at most `MAX_EXTRA_ISOS`.
     pub extra_isos: Vec<String>,
+    /// Writes `<suspend-to-disk enabled='yes'/>`, so a guest that hibernates shuts the VM off and `start_vm` resumes it.
+    pub hibernate: bool,
     pub network: Option<String>,
 }
 
@@ -257,7 +259,7 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
         let vol = create_volume(&pool, &vol_name, vm.disk_gib)?;
         let disk = vol.get_path()?;
         let disks = create_disks(&disk, iso.as_deref(), driver_iso.as_deref(), &extra_isos);
-        let xml = domain_xml(&DomainSpec {
+        let spec = DomainSpec {
             name: &vm.name,
             windows: vm.windows,
             vcpus: vm.vcpus,
@@ -265,17 +267,16 @@ pub fn create(hv: &Hypervisor, vm: NewVm) -> Result<String> {
             uefi: vm.uefi,
             tpm: vm.tpm,
             secure_boot: vm.secure_boot,
+            hibernate: vm.hibernate,
+            pinned: None,
             on_crash: m.on_crash,
             disks,
             network: network.as_deref(),
             uuid: None,
             mac: None,
             owner: Owner::default(),
-        });
-        if let Err(e) = Domain::define_xml(conn, &xml) {
-            let _ = vol.delete(0);
-            bail!("cannot define VM '{}': {}", vm.name, e.message());
-        }
+        };
+        define_new_vm(&spec, &mut LibvirtDefiner { conn, name: &vm.name, volumes: vec![&vol] })?;
         let mut msg = format!(
             "created VM '{}' ({} vCPUs, {} MiB, {} GiB disk {}/{}, {}{}); it is shut off, start it with start_vm",
             vm.name,
@@ -555,6 +556,8 @@ pub fn create_from_template(hv: &Hypervisor, vm: NewTemplateVm) -> Result<String
                 uefi: t.firmware == Firmware::Uefi,
                 tpm: false,
                 secure_boot: t.secure_boot,
+                hibernate: false,
+                pinned: None,
                 on_crash: m.on_crash,
                 disks: vec![Disk::Qcow2(&overlay_path), Disk::ReadOnlyRaw(&seed_path)],
                 network: network.as_deref(),
@@ -1029,6 +1032,7 @@ pub fn describe(hv: &Hypervisor, name: &str) -> Result<Value> {
         "secure_boot": secure_boot,
         "secure_boot_mode": secure_boot_mode,
         "tpm": has("tpm"),
+        "hibernate": suspends_to_disk(root),
         "disks": disks,
         "interfaces": parse_nics(&xml)?,
         "note": "vcpus/memory are the persistent configuration and take effect at the next boot",
@@ -1601,8 +1605,9 @@ fn check_disk(m: &Manage, gib: u64) -> Result<()> {
 }
 
 /// A UEFI domain's Secure Boot mode, from its `secure-boot` and `enrolled-keys` firmware features or, when they are
-/// absent, from its loader's `secure` attribute, which libvirt fills in when it picks the firmware. Secure Boot
-/// without enrolled keys is setup mode. `None` when nothing says, as for a loader named by path alone.
+/// absent, from its loader's `secure` attribute, which libvirt fills in when it picks the firmware and which the
+/// explicit form (a VM that hibernates, or one from a sealed template) always carries. Secure Boot without enrolled
+/// keys is setup mode. `None` when nothing says, as for a loader named by path alone.
 fn secure_boot_state(os: roxmltree::Node<'_, '_>) -> Option<SecureBoot> {
     let feature = |name: &str| {
         child(os, "firmware").and_then(|f| {
@@ -1614,10 +1619,32 @@ fn secure_boot_state(os: roxmltree::Node<'_, '_>) -> Option<SecureBoot> {
     let loader = child(os, "loader").and_then(|l| l.attribute("secure"));
     match feature("secure-boot").or(loader)? {
         "yes" if feature("enrolled-keys") == Some("no") => Some(SecureBoot::Setup),
+        "yes" if feature("secure-boot").is_none() && template_without_keys(os) => {
+            Some(SecureBoot::Setup)
+        }
         "yes" => Some(SecureBoot::On),
         "no" => Some(SecureBoot::Off),
         _ => None,
     }
+}
+
+/// Whether a domain's variables template is one without enrolled keys. The explicit form has no `enrolled-keys`
+/// feature, so the template says it: Debian names the keyed one `OVMF_VARS_4M.ms.fd` and Fedora
+/// `OVMF_VARS.secboot.fd`, and the template of setup and off is the plain `OVMF_VARS*.fd`. A domain without a
+/// template says nothing, so it reads as on.
+fn template_without_keys(os: roxmltree::Node<'_, '_>) -> bool {
+    child(os, "nvram")
+        .and_then(|n| n.attribute("template"))
+        .and_then(|t| t.rsplit('/').next())
+        .is_some_and(|file| !file.contains(".ms.") && !file.contains(".secboot."))
+}
+
+/// Whether a domain's `<pm>` enables suspend to disk.
+fn suspends_to_disk(root: roxmltree::Node<'_, '_>) -> bool {
+    child(root, "pm")
+        .and_then(|pm| child(pm, "suspend-to-disk"))
+        .and_then(|n| n.attribute("enabled"))
+        == Some("yes")
 }
 
 /// The `secure_boot` boolean and the `secure_boot_mode` word `describe_vm` reports. Setup mode reads as false in the
@@ -1928,6 +1955,7 @@ fn esc(s: &str) -> String {
 
 /// A disk of a new domain. Every disk refers to its file by path: a seed given as a pool-volume reference failed
 /// to open on a later start (`docs/research/2026-11-10-fatfs-seed-boot.md`).
+#[derive(Clone)]
 enum Disk<'a> {
     /// A writable qcow2 disk on the virtio bus.
     Qcow2(&'a str),
@@ -1938,6 +1966,7 @@ enum Disk<'a> {
 }
 
 /// Everything `domain_xml` puts into a new domain.
+#[derive(Clone)]
 struct DomainSpec<'a> {
     name: &'a str,
     windows: bool,
@@ -1947,6 +1976,10 @@ struct DomainSpec<'a> {
     tpm: bool,
     /// With `uefi`, the Secure Boot features the firmware is asked for.
     secure_boot: SecureBoot,
+    /// Writes `<suspend-to-disk enabled='yes'/>`.
+    hibernate: bool,
+    /// With `uefi`, the firmware pinned by path, which replaces `firmware='efi'` and the Secure Boot features.
+    pinned: Option<&'a PinnedFirmware>,
     /// The domain's `<on_crash>` action.
     on_crash: OnCrash,
     /// In order: the first writable disk boots first, the first CD-ROM second.
@@ -2104,6 +2137,196 @@ fn plan_cdrom(
     Ok(CdromPlan::Add(target))
 }
 
+/// The UEFI firmware a VM that hibernates is pinned to: libvirt's autoselection refuses `<suspend-to-disk>`, so the
+/// server reads what autoselection resolved and writes it back as an explicit loader and variables template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinnedFirmware {
+    /// The code file.
+    loader: String,
+    /// The loader's `secure` attribute.
+    secure: bool,
+    /// The variables template.
+    template: String,
+    /// The VM's own variables file.
+    vars: String,
+}
+
+/// What a VM's first, autoselected definition resolved, which the redefinition keeps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedDefinition {
+    firmware: PinnedFirmware,
+    uuid: String,
+    /// `None` for a VM without a network interface.
+    mac: Option<String>,
+}
+
+impl ResolvedDefinition {
+    /// Reads the resolved firmware, the UUID and the MAC address from a VM's inactive definition. Refuses a
+    /// definition that lacks the loader, the variables template or the variables file, because pinning a guess
+    /// would define a VM that cannot start.
+    fn from_inactive_xml(xml: &str) -> Result<Self> {
+        let doc = roxmltree::Document::parse(xml).context("the definition is not XML")?;
+        let root = doc.root_element();
+        let text = |node: Option<roxmltree::Node<'_, '_>>| {
+            node.and_then(|n| n.text())
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+        };
+        let uuid = text(child(root, "uuid")).context("the definition has no uuid")?;
+        let os = child(root, "os").context("the definition has no <os>")?;
+        let loader_node = child(os, "loader");
+        let loader = text(loader_node).context("the definition has no <loader> path")?;
+        let nvram = child(os, "nvram");
+        let template = nvram
+            .and_then(|n| n.attribute("template"))
+            .filter(|t| !t.is_empty())
+            .context("the <nvram> has no template")?;
+        let vars = text(nvram).context("the definition has no <nvram> variables path")?;
+        let mac = child(root, "devices")
+            .and_then(|d| child(d, "interface"))
+            .and_then(|i| child(i, "mac"))
+            .and_then(|m| m.attribute("address"))
+            .map(String::from);
+        Ok(Self {
+            firmware: PinnedFirmware {
+                loader,
+                secure: loader_node.and_then(|l| l.attribute("secure")) == Some("yes"),
+                template: template.to_string(),
+                vars,
+            },
+            uuid,
+            mac,
+        })
+    }
+}
+
+impl PinnedFirmware {
+    /// The explicit `<os>` element: no `firmware` attribute and no `<firmware>` features, a read-only flash loader
+    /// and a variables file with its template, all in raw format. `secure` is always written, so that
+    /// `secure_boot_state` can tell Secure Boot off from a loader that says nothing.
+    fn os_xml(&self) -> String {
+        format!(
+            "<os><type arch='x86_64' machine='q35'>hvm</type>\
+             <loader readonly='yes' secure='{}' type='pflash' format='raw'>{}</loader>\
+             <nvram template='{}' templateFormat='raw' format='raw'>{}</nvram></os>",
+            if self.secure { "yes" } else { "no" },
+            esc(&self.loader),
+            esc(&self.template),
+            esc(&self.vars),
+        )
+    }
+}
+
+/// The libvirt calls that define a new VM, so a test can fail each of them.
+trait VmDefiner {
+    fn define(&mut self, xml: &str) -> Result<()>;
+    fn inactive_xml(&mut self) -> Result<String>;
+    /// Undefines the VM, which an earlier `define` made.
+    fn undefine(&mut self);
+    /// Deletes the volumes the VM was to use.
+    fn delete_disks(&mut self);
+}
+
+/// Defines a new VM. A UEFI VM that hibernates is defined twice, because libvirt's firmware autoselection refuses
+/// `<suspend-to-disk enabled='yes'/>` (`docs/research/2026-11-24-custom-templates-build-probes.md`, probes 3 and
+/// 8): first by autoselection without `<pm>`, then, under the same name, UUID and MAC address, with the firmware
+/// it resolved written out as an explicit loader and variables template, plus `<pm>`. A step that fails undefines
+/// what was defined and deletes the disks, and the error names the step.
+fn define_new_vm(spec: &DomainSpec<'_>, definer: &mut impl VmDefiner) -> Result<()> {
+    let name = spec.name;
+    if let Err(e) = definer.define(&domain_xml(spec)) {
+        definer.delete_disks();
+        bail!("cannot define VM '{name}': {e:#}");
+    }
+    if spec.uefi
+        && spec.hibernate
+        && let Err(e) = pin_firmware(spec, definer)
+    {
+        definer.undefine();
+        definer.delete_disks();
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// The second step of `define_new_vm` for a UEFI VM that hibernates.
+fn pin_firmware(spec: &DomainSpec<'_>, definer: &mut impl VmDefiner) -> Result<()> {
+    let name = spec.name;
+    let xml = definer.inactive_xml().map_err(|e| {
+        anyhow!("cannot read VM '{name}' after defining it, to pin its firmware: {e:#}")
+    })?;
+    let resolved = ResolvedDefinition::from_inactive_xml(&xml)
+        .map_err(|e| anyhow!("cannot pin the firmware of VM '{name}': {e:#}"))?;
+    let pinned = DomainSpec {
+        pinned: Some(&resolved.firmware),
+        uuid: Some(&resolved.uuid),
+        mac: resolved.mac.as_deref(),
+        ..spec.clone()
+    };
+    definer.define(&domain_xml(&pinned)).map_err(|e| {
+        anyhow!("cannot redefine VM '{name}' with its firmware pinned for hibernation: {e:#}")
+    })
+}
+
+/// The libvirt calls of `define_new_vm`, on the volumes the new VM was to use.
+struct LibvirtDefiner<'a> {
+    conn: &'a Connect,
+    name: &'a str,
+    volumes: Vec<&'a StorageVol>,
+}
+
+impl VmDefiner for LibvirtDefiner<'_> {
+    fn define(&mut self, xml: &str) -> Result<()> {
+        Domain::define_xml(self.conn, xml)
+            .map(drop)
+            .map_err(|e| anyhow!("{}", e.message()))
+    }
+
+    fn inactive_xml(&mut self) -> Result<String> {
+        let dom =
+            Domain::lookup_by_name(self.conn, self.name).map_err(|e| anyhow!("{}", e.message()))?;
+        inactive_xml(&dom)
+    }
+
+    fn undefine(&mut self) {
+        if let Ok(dom) = Domain::lookup_by_name(self.conn, self.name)
+            && let Err(e) = dom.undefine_flags(UNDEFINE_FLAGS)
+        {
+            tracing::warn!(
+                "cannot undefine '{}' after a failed create: {}",
+                self.name,
+                e.message()
+            );
+        }
+    }
+
+    fn delete_disks(&mut self) {
+        for vol in &self.volumes {
+            let _ = vol.delete(0);
+        }
+    }
+}
+
+/// The Secure Boot features and loader that ask libvirt's autoselection for a UEFI VM's firmware. Without features,
+/// libvirt picks the host's preferred descriptor, which may not be the mode asked for. With them alone it may pick a
+/// stateless ROM build such as OVMF.amdsev.fd, which keeps no boot entries, so the loader type asks for flash with
+/// its own variables.
+fn autoselection_features(spec: &DomainSpec<'_>) -> String {
+    if !spec.uefi {
+        return String::new();
+    }
+    let (secure, keys) = match spec.secure_boot {
+        SecureBoot::Off => ("no", "no"),
+        SecureBoot::On => ("yes", "yes"),
+        SecureBoot::Setup => ("yes", "no"),
+    };
+    format!(
+        "<firmware><feature enabled='{secure}' name='secure-boot'/>\
+         <feature enabled='{keys}' name='enrolled-keys'/></firmware><loader type='pflash'/>"
+    )
+}
+
 fn domain_xml(spec: &DomainSpec<'_>) -> String {
     // Root ports for every PCIe device plus spares, so disks and NICs can be hot-plugged.
     let mut devices = vec!["<controller type='pci' index='0' model='pcie-root'/>".to_string()];
@@ -2166,12 +2389,12 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
          <metadata>{owner}</metadata>\
          <memory unit='MiB'>{mem}</memory><currentMemory unit='MiB'>{mem}</currentMemory>\
          <vcpu>{vcpus}</vcpu>\
-         <os{firmware}><type arch='x86_64' machine='q35'>hvm</type>{firmware_features}</os>\
-         <features>{features}</features>\
+         {os}\
+         <features>{features}{smm}</features>\
          <cpu mode='host-passthrough'/>\
          {clock}\
          <on_crash>{on_crash}</on_crash>\
-         <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='no'/></pm>\
+         {pm}\
          <devices>{devices}</devices>\
          </domain>",
         name = esc(spec.name),
@@ -2183,22 +2406,28 @@ fn domain_xml(spec: &DomainSpec<'_>) -> String {
         mem = spec.memory_mib,
         vcpus = spec.vcpus,
         on_crash = spec.on_crash.as_xml(),
-        firmware = if spec.uefi { " firmware='efi'" } else { "" },
-        // Without features, libvirt picks the host's preferred descriptor, which may not be the mode asked for. With
-        // them alone it may pick a stateless ROM build such as OVMF.amdsev.fd, which keeps no boot entries, so the
-        // loader type asks for flash with its own variables.
-        firmware_features = if spec.uefi {
-            let (secure, keys) = match spec.secure_boot {
-                SecureBoot::Off => ("no", "no"),
-                SecureBoot::On => ("yes", "yes"),
-                SecureBoot::Setup => ("yes", "no"),
-            };
-            format!(
-                "<firmware><feature enabled='{secure}' name='secure-boot'/>\
-                 <feature enabled='{keys}' name='enrolled-keys'/></firmware><loader type='pflash'/>"
-            )
+        os = match spec.pinned.filter(|_| spec.uefi) {
+            Some(pinned) => pinned.os_xml(),
+            None => format!(
+                "<os{}><type arch='x86_64' machine='q35'>hvm</type>{}</os>",
+                if spec.uefi { " firmware='efi'" } else { "" },
+                autoselection_features(spec),
+            ),
+        },
+        // libvirt refuses a secure loader without SMM, and fills SMM in itself only under autoselection.
+        smm = if spec.pinned.is_some_and(|p| p.secure) && spec.uefi {
+            "<smm state='on'/>"
         } else {
+            ""
+        },
+        // Autoselection refuses suspend to disk, so a UEFI VM that hibernates gets `<pm>` with the pinned firmware.
+        pm = if spec.uefi && spec.hibernate && spec.pinned.is_none() {
             String::new()
+        } else {
+            format!(
+                "<pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='{}'/></pm>",
+                if spec.hibernate { "yes" } else { "no" }
+            )
         },
         devices = devices.concat(),
     )
@@ -2404,6 +2633,8 @@ mod tests {
             uefi: false,
             tpm: false,
             secure_boot: SecureBoot::On,
+            hibernate: false,
+            pinned: None,
             on_crash: OnCrash::Preserve,
             disks,
             network: Some("net"),
@@ -2630,6 +2861,443 @@ mod tests {
         let (xml, _) = replace_disks(&old, &[Disk::Qcow2("/pool/t-g2.qcow2")]).unwrap();
         let xml = replace_owner(&xml, &Owner::default()).unwrap();
         assert_eq!(crash_devices(&xml), (Some("destroy".into()), vec![], None));
+    }
+
+    const POOL: &str = "/var/lib/libvirt/images/agent-vms";
+    const UUID: &str = "c29b872d-e13c-4c6a-8477-154fd6b9940e";
+    const MAC: &str = "52:54:00:fb:99:ec";
+
+    /// A VM's inactive definition right after its first define by autoselection, with the `<os>` element of each
+    /// Secure Boot mode as probe 8 recorded it (`docs/research/2026-11-24-custom-templates-build-probes.md`).
+    fn autoselected(mode: SecureBoot) -> String {
+        let (secure, keys, loader, template, smm) = match mode {
+            SecureBoot::Off => (
+                "no",
+                "no",
+                "<loader readonly='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>",
+                "/usr/share/OVMF/OVMF_VARS_4M.fd",
+                "",
+            ),
+            SecureBoot::Setup => (
+                "yes",
+                "no",
+                "<loader readonly='yes' secure='yes' type='pflash' format='raw'>\
+                 /usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>",
+                "/usr/share/OVMF/OVMF_VARS_4M.fd",
+                "<smm state='on'/>",
+            ),
+            SecureBoot::On => (
+                "yes",
+                "yes",
+                "<loader readonly='yes' secure='yes' type='pflash' format='raw'>\
+                 /usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>",
+                "/usr/share/OVMF/OVMF_VARS_4M.ms.fd",
+                "<smm state='on'/>",
+            ),
+        };
+        format!(
+            "<domain type='kvm'><name>t-ph</name><uuid>{UUID}</uuid>\
+             <os firmware='efi'><type arch='x86_64' machine='pc-q35-10.2'>hvm</type>\
+             <firmware><feature enabled='{keys}' name='enrolled-keys'/>\
+             <feature enabled='{secure}' name='secure-boot'/></firmware>{loader}\
+             <nvram template='{template}' templateFormat='raw' format='raw'>{POOL}/t-ph.vars</nvram>\
+             <boot dev='hd'/></os><features><acpi/><apic/>{smm}</features>\
+             <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='no'/></pm>\
+             <devices><interface type='network'><mac address='{MAC}'/><source network='default'/>\
+             <model type='virtio'/></interface></devices></domain>"
+        )
+    }
+
+    fn pinned(mode: SecureBoot) -> PinnedFirmware {
+        ResolvedDefinition::from_inactive_xml(&autoselected(mode))
+            .unwrap()
+            .firmware
+    }
+
+    /// The `<suspend-to-mem>` and `<suspend-to-disk>` values of a domain's `<pm>`, or `None` without `<pm>`.
+    fn pm(xml: &str) -> Option<(String, String)> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let pm = child(doc.root_element(), "pm")?;
+        let enabled = |tag: &str| {
+            child(pm, tag)
+                .and_then(|n| n.attribute("enabled"))
+                .unwrap_or("absent")
+                .to_string()
+        };
+        Some((enabled("suspend-to-mem"), enabled("suspend-to-disk")))
+    }
+
+    fn pm_is(mem: &str, disk: &str) -> Option<(String, String)> {
+        Some((mem.into(), disk.into()))
+    }
+
+    #[test]
+    fn hibernate_sets_suspend_to_disk_and_leaves_suspend_to_memory_off() {
+        let xml = |uefi, hibernate| {
+            domain_xml(&DomainSpec {
+                uefi,
+                hibernate,
+                ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+            })
+        };
+        assert_eq!(pm(&xml(false, true)), pm_is("no", "yes"));
+        assert_eq!(pm(&xml(false, false)), pm_is("no", "no"));
+        assert_eq!(pm(&xml(true, false)), pm_is("no", "no"));
+    }
+
+    #[test]
+    fn a_uefi_vm_that_hibernates_is_first_defined_without_pm() {
+        // Autoselection refuses `<suspend-to-disk enabled='yes'/>`, so the first definition leaves `<pm>` out.
+        let xml = domain_xml(&DomainSpec {
+            uefi: true,
+            hibernate: true,
+            ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+        });
+        assert_eq!(pm(&xml), None);
+        assert!(xml.contains("<os firmware='efi'>"), "{xml}");
+    }
+
+    #[test]
+    fn the_explicit_os_names_the_resolved_files_of_each_mode() {
+        // Probe 8: libvirt resolved these files, and accepted the explicit form with `<pm>` for each mode.
+        let want = [
+            (SecureBoot::Off, "OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd", None),
+            (
+                SecureBoot::Setup,
+                "OVMF_CODE_4M.secboot.fd",
+                "OVMF_VARS_4M.fd",
+                Some("yes"),
+            ),
+            (
+                SecureBoot::On,
+                "OVMF_CODE_4M.ms.fd",
+                "OVMF_VARS_4M.ms.fd",
+                Some("yes"),
+            ),
+        ];
+        for (mode, code, vars, secure) in want {
+            let os = pinned(mode).os_xml();
+            let doc = roxmltree::Document::parse(&os).unwrap();
+            let os = doc.root_element();
+            assert_eq!(os.tag_name().name(), "os", "{mode:?}");
+            assert_eq!(os.attribute("firmware"), None, "{mode:?}");
+            assert!(child(os, "firmware").is_none(), "{mode:?}");
+            let loader = child(os, "loader").unwrap();
+            assert_eq!(
+                loader.text(),
+                Some(format!("/usr/share/OVMF/{code}").as_str()),
+                "{mode:?}"
+            );
+            assert_eq!(loader.attribute("type"), Some("pflash"));
+            assert_eq!(loader.attribute("readonly"), Some("yes"));
+            assert_eq!(loader.attribute("format"), Some("raw"));
+            // Secure Boot off is written as `secure='no'`, so that the reader still sees a mode.
+            assert_eq!(loader.attribute("secure"), Some(secure.unwrap_or("no")));
+            let nvram = child(os, "nvram").unwrap();
+            assert_eq!(
+                nvram.attribute("template"),
+                Some(format!("/usr/share/OVMF/{vars}").as_str())
+            );
+            assert_eq!(nvram.attribute("templateFormat"), Some("raw"));
+            assert_eq!(nvram.attribute("format"), Some("raw"));
+            assert_eq!(nvram.text(), Some(format!("{POOL}/t-ph.vars").as_str()));
+        }
+    }
+
+    #[test]
+    fn the_resolved_definition_keeps_the_uuid_and_the_mac_address() {
+        let resolved =
+            ResolvedDefinition::from_inactive_xml(&autoselected(SecureBoot::Off)).unwrap();
+        assert_eq!(resolved.uuid, UUID);
+        assert_eq!(resolved.mac.as_deref(), Some(MAC));
+        let without_nic = autoselected(SecureBoot::Off)
+            .replace(&format!("<mac address='{MAC}'/>"), "")
+            .replace("<interface type='network'>", "<interface type='user'>");
+        assert!(
+            ResolvedDefinition::from_inactive_xml(&without_nic)
+                .unwrap()
+                .mac
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_definition_without_a_loader_a_template_or_variables_is_refused() {
+        let off = autoselected(SecureBoot::Off);
+        let loader = "<loader readonly='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>";
+        let template = " template='/usr/share/OVMF/OVMF_VARS_4M.fd'";
+        let vars = format!("{POOL}/t-ph.vars");
+        let cases = [
+            ("loader", off.replace(loader, "")),
+            (
+                "loader",
+                off.replace(">/usr/share/OVMF/OVMF_CODE_4M.fd</loader>", "></loader>"),
+            ),
+            ("template", off.replace(template, "")),
+            ("nvram", off.replace(&vars, "")),
+            ("uuid", off.replace(&format!("<uuid>{UUID}</uuid>"), "")),
+        ];
+        for (missing, xml) in cases {
+            let err = ResolvedDefinition::from_inactive_xml(&xml)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(missing), "{missing}: {err}");
+        }
+        assert!(ResolvedDefinition::from_inactive_xml("<domain><name>x</name></domain>").is_err());
+    }
+
+    #[test]
+    fn the_second_definition_is_explicit_and_carries_pm_smm_uuid_and_mac() {
+        for mode in [SecureBoot::Off, SecureBoot::Setup, SecureBoot::On] {
+            let resolved = ResolvedDefinition::from_inactive_xml(&autoselected(mode)).unwrap();
+            let xml = domain_xml(&DomainSpec {
+                uefi: true,
+                secure_boot: mode,
+                hibernate: true,
+                pinned: Some(&resolved.firmware),
+                uuid: Some(&resolved.uuid),
+                mac: resolved.mac.as_deref(),
+                ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+            });
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let root = doc.root_element();
+            let os = child(root, "os").unwrap();
+            assert_eq!(os.attribute("firmware"), None, "{mode:?}");
+            assert!(firmware_features(&xml).is_empty(), "{mode:?}");
+            assert_eq!(pm(&xml), pm_is("no", "yes"), "{mode:?}");
+            assert_eq!(
+                child(root, "uuid").and_then(|n| n.text()),
+                Some(UUID),
+                "{mode:?}"
+            );
+            assert!(xml.contains(&format!("<mac address='{MAC}'/>")), "{mode:?}");
+            // libvirt refuses a secure loader without SMM: "Secure boot requires SMM feature enabled".
+            let smm =
+                child(child(root, "features").unwrap(), "smm").and_then(|n| n.attribute("state"));
+            assert_eq!(smm, (mode != SecureBoot::Off).then_some("on"), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_explicit_form_still_shows_its_secure_boot_mode() {
+        for mode in [SecureBoot::Off, SecureBoot::Setup, SecureBoot::On] {
+            let xml = domain_xml(&DomainSpec {
+                uefi: true,
+                secure_boot: mode,
+                hibernate: true,
+                pinned: Some(&pinned(mode)),
+                ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+            });
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let os = child(doc.root_element(), "os");
+            assert_eq!(os.and_then(secure_boot_state), Some(mode), "{mode:?}");
+            let (boolean, word) = secure_boot_fields(true, os);
+            assert_eq!(boolean, Some(mode == SecureBoot::On), "{mode:?}");
+            assert_eq!(word, Some(mode.as_str()), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn setup_and_on_differ_in_the_explicit_form_by_their_variables_template() {
+        let state = |loader: &str, template: &str| {
+            let xml = format!(
+                "<domain><os><loader secure='yes' type='pflash'>{loader}</loader>\
+                 <nvram template='{template}'>/v.vars</nvram></os></domain>"
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            secure_boot_state(child(doc.root_element(), "os").unwrap())
+        };
+        // Debian's names and Fedora's, where the keys are in the `.ms` or `.secboot` variables.
+        assert_eq!(
+            state("/o/CODE_4M.secboot.fd", "/o/VARS_4M.fd"),
+            Some(SecureBoot::Setup)
+        );
+        assert_eq!(
+            state("/o/CODE_4M.ms.fd", "/o/VARS_4M.ms.fd"),
+            Some(SecureBoot::On)
+        );
+        assert_eq!(
+            state("/o/CODE.secboot.fd", "/o/VARS.secboot.fd"),
+            Some(SecureBoot::On)
+        );
+        assert_eq!(
+            state("/o/CODE.secboot.fd", "/o/VARS.fd"),
+            Some(SecureBoot::Setup)
+        );
+        // Without a template to tell, a secure loader reads as on, as it did before this form existed.
+        let xml =
+            "<domain><os><loader secure='yes' type='pflash'>/o/CODE.fd</loader></os></domain>";
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert_eq!(
+            secure_boot_state(child(doc.root_element(), "os").unwrap()),
+            Some(SecureBoot::On)
+        );
+    }
+
+    #[test]
+    fn describe_reports_hibernate_from_the_persistent_definition() {
+        let reads = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            suspends_to_disk(doc.root_element())
+        };
+        let xml = |hibernate| {
+            domain_xml(&DomainSpec {
+                hibernate,
+                ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+            })
+        };
+        assert!(reads(&xml(true)));
+        assert!(!reads(&xml(false)));
+        // A VM without `<pm>`, as virt-manager defines one.
+        assert!(!reads("<domain><name>x</name></domain>"));
+    }
+
+    /// A fake libvirt that records its calls and fails the one named.
+    #[derive(Default)]
+    struct FakeLibvirt {
+        calls: Vec<String>,
+        defined: Vec<String>,
+        /// Fails the call with this number, counting `define` and `inactive_xml` together from 1.
+        fail_at: Option<usize>,
+        /// What `inactive_xml` returns.
+        inactive: String,
+    }
+
+    impl FakeLibvirt {
+        fn step(&mut self, what: &str) -> Result<()> {
+            self.calls.push(what.into());
+            if self.fail_at == Some(self.calls.len()) {
+                bail!("{what} failed in libvirt");
+            }
+            Ok(())
+        }
+    }
+
+    impl VmDefiner for FakeLibvirt {
+        fn define(&mut self, xml: &str) -> Result<()> {
+            self.step("define")?;
+            self.defined.push(xml.into());
+            Ok(())
+        }
+
+        fn inactive_xml(&mut self) -> Result<String> {
+            self.step("inactive_xml")?;
+            Ok(self.inactive.clone())
+        }
+
+        fn undefine(&mut self) {
+            self.calls.push("undefine".into());
+        }
+
+        fn delete_disks(&mut self) {
+            self.calls.push("delete_disks".into());
+        }
+    }
+
+    fn hibernating(uefi: bool) -> DomainSpec<'static> {
+        DomainSpec {
+            uefi,
+            hibernate: true,
+            secure_boot: SecureBoot::Off,
+            ..spec(vec![Disk::Qcow2("/p/t.qcow2")])
+        }
+    }
+
+    #[test]
+    fn a_bios_vm_that_hibernates_is_defined_once_with_pm() {
+        let mut libvirt = FakeLibvirt::default();
+        define_new_vm(&hibernating(false), &mut libvirt).unwrap();
+        assert_eq!(libvirt.calls, ["define"]);
+        assert_eq!(pm(&libvirt.defined[0]), pm_is("no", "yes"));
+    }
+
+    #[test]
+    fn a_uefi_vm_without_hibernate_is_defined_once_by_autoselection() {
+        let mut libvirt = FakeLibvirt::default();
+        let spec = DomainSpec {
+            hibernate: false,
+            ..hibernating(true)
+        };
+        define_new_vm(&spec, &mut libvirt).unwrap();
+        assert_eq!(libvirt.calls, ["define"]);
+        assert!(libvirt.defined[0].contains("firmware='efi'"));
+        assert_eq!(pm(&libvirt.defined[0]), pm_is("no", "no"));
+    }
+
+    #[test]
+    fn a_uefi_vm_that_hibernates_is_defined_twice_and_the_second_keeps_its_identity() {
+        let mut libvirt = FakeLibvirt {
+            inactive: autoselected(SecureBoot::Off),
+            ..Default::default()
+        };
+        define_new_vm(&hibernating(true), &mut libvirt).unwrap();
+        assert_eq!(libvirt.calls, ["define", "inactive_xml", "define"]);
+        let (first, second) = (&libvirt.defined[0], &libvirt.defined[1]);
+        assert_eq!(pm(first), None);
+        assert!(first.contains("firmware='efi'"));
+        assert_eq!(pm(second), pm_is("no", "yes"));
+        assert!(!second.contains("firmware"), "{second}");
+        assert!(second.contains(&format!("<uuid>{UUID}</uuid>")));
+        assert!(second.contains(&format!("<mac address='{MAC}'/>")));
+        assert!(second.contains("OVMF_CODE_4M.fd"));
+    }
+
+    #[test]
+    fn each_failed_step_discards_the_vm_and_names_the_step() {
+        // (call that fails, text the error names, calls made)
+        let cases: [(usize, &str, &[&str]); 3] = [
+            // A define that failed made nothing to undefine.
+            (1, "cannot define VM 't'", &["define", "delete_disks"]),
+            (
+                2,
+                "read VM 't' after defining it",
+                &["define", "inactive_xml", "undefine", "delete_disks"],
+            ),
+            (
+                3,
+                "redefine VM 't'",
+                &[
+                    "define",
+                    "inactive_xml",
+                    "define",
+                    "undefine",
+                    "delete_disks",
+                ],
+            ),
+        ];
+        for (fail_at, names, calls) in cases {
+            let mut libvirt = FakeLibvirt {
+                inactive: autoselected(SecureBoot::Off),
+                fail_at: Some(fail_at),
+                ..Default::default()
+            };
+            let err = define_new_vm(&hibernating(true), &mut libvirt).unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains(names), "{err}");
+            assert!(err.contains("failed in libvirt"), "{err}");
+            assert_eq!(libvirt.calls, calls, "{err}");
+        }
+    }
+
+    #[test]
+    fn a_definition_that_resolved_no_loader_is_refused_and_discarded() {
+        let mut libvirt = FakeLibvirt {
+            inactive: autoselected(SecureBoot::Off)
+                .replace(">/usr/share/OVMF/OVMF_CODE_4M.fd</loader>", "></loader>"),
+            ..Default::default()
+        };
+        let err = format!(
+            "{:#}",
+            define_new_vm(&hibernating(true), &mut libvirt).unwrap_err()
+        );
+        assert!(
+            err.contains("pin the firmware of VM 't'") && err.contains("loader"),
+            "{err}"
+        );
+        assert_eq!(
+            libvirt.calls,
+            ["define", "inactive_xml", "undefine", "delete_disks"]
+        );
     }
 
     fn extra_isos(names: &[&str]) -> Vec<String> {

@@ -549,6 +549,11 @@ pub struct CreateVmParams {
     /// ports, and every CD-ROM uses one.
     #[serde(default)]
     pub extra_isos: Vec<String>,
+    /// Let the guest hibernate (default `false`). The VM then has suspend to disk on and suspend to memory off. A guest
+    /// that hibernates ends up shut off, and `start_vm` resumes it. The guest needs swap and resume settings of its
+    /// own, and a Linux guest with Secure Boot `"on"` refuses to hibernate under kernel lockdown.
+    #[serde(default)]
+    pub hibernate: bool,
     /// libvirt network to connect to (default: the first allowed network; none if no network is allowed).
     pub network: Option<String>,
 }
@@ -1933,6 +1938,7 @@ impl VirtServer {
                     iso: p.iso,
                     driver_iso: p.driver_iso,
                     extra_isos: p.extra_isos,
+                    hibernate: p.hibernate,
                     network: p.network,
                 },
             )?;
@@ -2983,6 +2989,26 @@ mod tests {
         for bad in [json!("/isos/a.iso"), json!([1]), json!({"a": 1})] {
             assert!(base(Some(bad.clone())).is_err(), "{bad} was accepted");
         }
+    }
+
+    #[test]
+    fn create_vm_hibernate_defaults_to_off_and_takes_only_a_boolean() {
+        let base = |hibernate: Option<Value>| {
+            let mut params = json!({
+                "name": "t-x", "os": "linux", "vcpus": 1, "memory_mib": 512, "disk_gib": 1
+            });
+            if let Some(v) = hibernate {
+                params["hibernate"] = v;
+            }
+            serde_json::from_value::<CreateVmParams>(params)
+        };
+        assert!(!base(None).unwrap().hibernate);
+        assert!(base(Some(json!(true))).unwrap().hibernate);
+        for bad in [json!("yes"), json!(1), json!(null)] {
+            assert!(base(Some(bad.clone())).is_err(), "{bad} was accepted");
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(CreateVmParams)).unwrap();
+        assert_eq!(schema["properties"]["hibernate"]["type"], "boolean");
     }
 
     #[test]
