@@ -1,6 +1,6 @@
 # Custom templates and images: design
 
-Status: draft, awaiting approval. Its decisions came from an interview, and two of them are provisional until the
+Status: accepted. Its decisions came from an interview, and two of them are provisional until the
 test-bed probes under Checks settle them. The text is revised for a plan-critic review, its scoped re-review, an
 architecture review and the needs checks of the two projects that asked for it; none of them changed a decision. Once
 built, the code wins and this design follows it.
