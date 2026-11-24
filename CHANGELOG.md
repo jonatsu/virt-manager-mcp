@@ -36,6 +36,7 @@ Each release's section lists what changed for people who run the server and for 
 - `create_vm` and `create_vm_from_template` refuse a UEFI VM whose `<name>.vars` already exists in the pool, a
   leftover of an earlier VM, because libvirt would reuse its variables. The error names the volume and the command
   that removes it, `virsh -c <uri> vol-delete --pool <disk_pool> <name>.vars`; nothing is created.
+  The check rescans the pool first, and a rescan that fails now fails the create instead of passing on a stale listing.
 - `create_vm` with `secure_boot` on, the default, now asks libvirt for firmware with Secure Boot and the enrolled keys,
   instead of leaving the choice to libvirt. A VM with `firmware: "bios"` and `secure_boot: false` now fails with
   `secure_boot "off" and "setup" need firmware "uefi"`. VMs that exist keep their definition.

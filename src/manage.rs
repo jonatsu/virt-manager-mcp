@@ -1704,22 +1704,56 @@ fn leftover_vars_error(uri: &str, pool: &str, vm: &str) -> anyhow::Error {
     )
 }
 
-/// Refuses a UEFI create while `<vm>.vars` is in the pool, which the caller has refreshed. libvirt would reuse the
-/// file at the first start, so a leftover of an earlier VM would give the new one its variables, boot entries and
-/// keys.
-fn check_no_leftover_vars(hv: &Hypervisor, pool: &StoragePool, vm: &str) -> Result<()> {
-    if vars_volume(pool, vm).is_some() {
-        return Err(leftover_vars_error(
-            &hv.config.uri,
-            &hv.config.manage.disk_pool,
-            vm,
-        ));
+/// A pool's volume listing, apart so a test can stand in for the pool.
+trait PoolListing {
+    /// Rescans the pool, so the listing shows files libvirt made outside the server's own calls.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the pool refuses the scan.
+    fn refresh(&self) -> Result<()>;
+    /// Whether the listing holds a volume named `name`.
+    fn has_volume(&self, name: &str) -> bool;
+}
+
+impl PoolListing for StoragePool {
+    fn refresh(&self) -> Result<()> {
+        let name = self.get_name().unwrap_or_default();
+        StoragePool::refresh(self, 0)
+            .map(drop)
+            .map_err(|e| anyhow!("cannot refresh storage pool '{name}': {}", e.message()))
+    }
+
+    fn has_volume(&self, name: &str) -> bool {
+        StorageVol::lookup_by_name(self, name).is_ok()
+    }
+}
+
+/// Refuses a create while the pool lists `volume`, after a rescan whose failure fails the check: a listing that could
+/// not be refreshed may be stale, and a stale listing without the leftover must not pass. libvirt reuses a state file
+/// at a VM's first start, so a leftover of an earlier VM would give the new one its variables or TPM state.
+fn check_no_leftover(
+    pool: &impl PoolListing,
+    volume: &str,
+    refusal: impl FnOnce() -> anyhow::Error,
+) -> Result<()> {
+    pool.refresh()?;
+    if pool.has_volume(volume) {
+        return Err(refusal());
     }
     Ok(())
 }
 
+/// Refuses a UEFI create while `<vm>.vars` is in the pool, after `check_no_leftover`'s rescan.
+fn check_no_leftover_vars(hv: &Hypervisor, pool: &StoragePool, vm: &str) -> Result<()> {
+    check_no_leftover(pool, &volnames::vars_name(vm), || {
+        leftover_vars_error(&hv.config.uri, &hv.config.manage.disk_pool, vm)
+    })
+}
+
 /// The volume `<vm>.vars` holds a UEFI VM's variables in `pool`. The pool lists it only after `refresh_pool`
 /// follows the VM's first start.
+#[expect(dead_code, reason = "first caller: unit 8")]
 fn vars_volume(pool: &StoragePool, vm: &str) -> Option<StorageVol> {
     StorageVol::lookup_by_name(pool, &volnames::vars_name(vm)).ok()
 }
@@ -3394,6 +3428,66 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("nothing was created"), "{err}");
+    }
+
+    /// A pool that answers from a fixed listing and records the calls made to it.
+    struct FakePool {
+        refresh: std::result::Result<(), &'static str>,
+        volumes: Vec<&'static str>,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl PoolListing for FakePool {
+        fn refresh(&self) -> Result<()> {
+            self.calls.borrow_mut().push("refresh");
+            self.refresh.map_err(|m| anyhow!("{m}"))
+        }
+
+        fn has_volume(&self, name: &str) -> bool {
+            self.calls.borrow_mut().push("has_volume");
+            self.volumes.contains(&name)
+        }
+    }
+
+    fn fake_pool(
+        refresh: std::result::Result<(), &'static str>,
+        volumes: &[&'static str],
+    ) -> FakePool {
+        FakePool {
+            refresh,
+            volumes: volumes.to_vec(),
+            calls: Default::default(),
+        }
+    }
+
+    fn refusal() -> anyhow::Error {
+        anyhow!("leftover refusal")
+    }
+
+    #[test]
+    fn a_failed_pool_refresh_fails_the_leftover_check_instead_of_reading_a_stale_listing() {
+        // The stale listing has no leftover, and the check must still not pass.
+        let pool = fake_pool(Err("pool is busy"), &[]);
+        let err = check_no_leftover(&pool, "t-lv.vars", refusal).unwrap_err();
+        assert!(format!("{err:#}").contains("pool is busy"), "{err:#}");
+        assert!(!format!("{err:#}").contains("leftover refusal"), "{err:#}");
+        // The listing is not read after the refresh failed.
+        assert_eq!(*pool.calls.borrow(), ["refresh"]);
+    }
+
+    #[test]
+    fn the_leftover_check_refreshes_the_pool_before_it_reads_the_listing() {
+        let pool = fake_pool(Ok(()), &[]);
+        check_no_leftover(&pool, "t-lv.vars", refusal).unwrap();
+        assert_eq!(*pool.calls.borrow(), ["refresh", "has_volume"]);
+    }
+
+    #[test]
+    fn the_leftover_check_refuses_a_volume_the_refreshed_pool_lists() {
+        let pool = fake_pool(Ok(()), &["t-lv.vars", "t-other.vars"]);
+        let err = check_no_leftover(&pool, "t-lv.vars", refusal).unwrap_err();
+        assert_eq!(err.to_string(), "leftover refusal");
+        check_no_leftover(&pool, "t-lv.tpm", refusal).unwrap();
     }
 
     #[test]
