@@ -490,11 +490,13 @@ changes no behaviour for existing configs. Design: Sealing a VM (step 2); Invari
   free; any other mark is live until it is 24 hours old. The probe is a trait, so tests need no files.
 - **Two entry points.** Only they take the manage lock, besides `start_guard`'s fallback below.
   - `manage::lock_for_change(hv, target, checks)` serves a call on an existing VM. `target` is a name, a UUID or a
-    domain. It looks the VM up, takes the lock once, runs the seal-mark check by the template's name, clears a stale
-    mark through `replace_owner`, and returns `Changing { dom, guard }`. `checks` is `Checks::Mark` or
-    `Checks::MarkAndJournal`; the journal check is a no-op until unit 23, and delete, reset and expiry use
-    `Checks::Mark`. For a VM without an owner element, such as one in `manage_vms` or `power_vms`, it skips both
-    checks, because such a VM can have no mark and no journal. Callers are `set_resources`, `attach_disk`,
+    domain. It looks the VM up and reads the persistent owner element. For a VM that has one, it takes the lock once,
+    runs the seal-mark check by the template's name, clears a stale mark through `replace_owner` when
+    `Hypervisor::can_manage` allows it (otherwise the stale mark counts as no mark and the definition stays), and
+    returns `Changing { dom, guard }`. `checks` is `Checks::Mark` or `Checks::MarkAndJournal`; the journal check is a
+    no-op until unit 23, and delete, reset and expiry use `Checks::Mark`. For a VM without an owner element, such as
+    one in `manage_vms` or `power_vms`, it takes no lock and skips both checks, because such a VM can have no mark and
+    no journal, and `guard` is `None`. Callers are `set_resources`, `attach_disk`,
     `detach_disk`, `set_cdrom`, `attach_nic`, `detach_nic`, `snapshot_create`, `snapshot_delete`, `reset`, `delete`,
     `expire`, `State::revert`, `Hypervisor::stop` and `LibvirtBoot::start_paused`.
   - `manage::lock_for_create(hv)` serves a call with no VM yet: `create`, `create_from_template`, and, as they land,
