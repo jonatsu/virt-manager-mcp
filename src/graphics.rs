@@ -324,6 +324,26 @@ mod tests {
     }
 
     #[test]
+    fn set_display_refuses_a_password_in_the_form_libvirt_returns_with_the_secure_flag() {
+        // `virsh dumpxml --inactive --security-info` of a VNC display with a password, and the same with a validity.
+        for graphics in [
+            "<graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1' passwd='testpw'>\
+             <listen type='address' address='127.0.0.1'/></graphics>",
+            "<graphics type='vnc' port='-1' autoport='yes' passwd='testpw' passwdValidTo='2030-01-01T00:00:00'>\
+             <listen type='address'/></graphics>",
+        ] {
+            let err = with_display(&domain(graphics), DisplayKind::Spice)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("with a password"), "{err}");
+            assert!(
+                !err.contains("testpw"),
+                "the error must not repeat the password: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn set_display_refuses_a_definition_that_is_not_a_domain() {
         assert!(with_display("<domain>", DisplayKind::Vnc).is_err());
         assert!(with_display("<domain><name>t</name></domain>", DisplayKind::Vnc).is_err());

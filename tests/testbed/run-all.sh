@@ -39,7 +39,7 @@ readonly UNITS=(
   smoke guest-agent-and-snapshots lifecycle-guardrails write-file-mode exec-args transfer-file transfer-push
   transfer-pull transfer-background addresses console-reopen console-stall
   start-vm-waits-for-agent console-closed-on-power-off console-after-start screenshot-region screen-settled
-  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos display hibernate uefi-vars tpm templates-expiry
+  screen-no-models templates-create templates-reset templates-reset-uefi firmware-secure-boot extra-isos display display-password hibernate uefi-vars tpm templates-expiry
   templates-expiry-command
   templates-outside-disk manage-lock memory-cap console-log console-generation console-refusals job-wait jobs wait-for owrt-boot owrt-wait owrt-pacing mouse-refusals
   diag-start-capture diag-crash-preserve diag-crash-destroy diag-attribution diag-wait-event diag-stats diag-identity
@@ -351,6 +351,39 @@ unit_display() {
     fi
   done
   run_case display-after "${config}"
+}
+
+# display-password defines t-dpw with virsh: a VNC display with the password testpw, a definition libvirt returns
+# without the password unless asked for the security info. The case config lists the VM in manage_vms, so the case
+# expects set_display to refuse it and not to repeat the password; this unit then expects the password still in the
+# persistent definition. Nothing here starts a VM.
+unit_display_password() {
+  local config=${WORK}/config-display-password.toml
+  if vsh dominfo t-dpw > /dev/null 2>&1; then
+    record display-password failed "t-dpw exists already"
+    return
+  fi
+  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-dpw", /' -e 's/^manage_vms = \[/manage_vms = ["t-dpw", /' \
+    "${TESTBED}/config-templates.toml" > "${config}" \
+    && [[ $(grep -cF -e 'allowed_vms = ["t-dpw", ' -e 'manage_vms = ["t-dpw", ' "${config}") == 2 ]] || {
+    record display-password failed "could not write ${config}"
+    return
+  }
+  printf '%s\n' "<domain type='kvm'><name>t-dpw</name><memory unit='MiB'>128</memory><vcpu>1</vcpu>" \
+    "<os><type arch='x86_64' machine='q35'>hvm</type></os><devices>" \
+    "<graphics type='vnc' autoport='yes' listen='127.0.0.1' passwd='testpw'>" \
+    "<listen type='address' address='127.0.0.1'/></graphics></devices></domain>" > "${WORK}/t-dpw.xml"
+  vsh define "${WORK}/t-dpw.xml" > /dev/null || {
+    record display-password failed "could not define t-dpw"
+    return
+  }
+  if vsh dumpxml t-dpw --inactive | grep -qF 'passwd='; then
+    record display-password failed "libvirt returned the password without the security info"
+  fi
+  run_case display-password "${config}"
+  vsh dumpxml t-dpw --inactive --security-info | grep -qF "passwd='testpw'" \
+    || record display-password failed "the password of t-dpw is gone from its definition"
+  vsh undefine t-dpw > /dev/null || record display-password failed "could not undefine t-dpw"
 }
 
 # The directory of the pool agent-vms.
@@ -1196,6 +1229,7 @@ run_unit() {
     templates-reset-uefi) unit_templates_reset_uefi ;;
     extra-isos) unit_extra_isos ;;
     display) unit_display ;;
+    display-password) unit_display_password ;;
     hibernate) unit_hibernate ;;
     uefi-vars) unit_uefi_vars ;;
     tpm) unit_tpm ;;

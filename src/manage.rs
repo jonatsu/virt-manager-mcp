@@ -1773,8 +1773,14 @@ pub fn set_cdrom(
     Ok(format!("{what} in {} of '{name}'", cdrom.target))
 }
 
+/// The flags `set_display` reads a definition with: the persistent one, with the security info. libvirt leaves
+/// `passwd` and `passwdValidTo` out of `<graphics>` unless `VIR_DOMAIN_XML_SECURE` is set, so without it a password
+/// would be neither seen nor kept when the definition is written back.
+const SET_DISPLAY_XML_FLAGS: u32 = sys::VIR_DOMAIN_XML_INACTIVE | sys::VIR_DOMAIN_XML_SECURE;
+
 /// Replaces the `<graphics>` elements of a shut-off VM's persistent definition with those of `display`, and nothing
-/// else. The VM must be one the server may manage, and not under a seal.
+/// else. The VM must be one the server may manage, and not under a seal. The definition it reads holds secrets, so it
+/// serves the check and the rewrite only, and no log line, error or reply carries any of it.
 pub fn set_display(hv: &Hypervisor, name: &str, display: DisplayKind) -> Result<String> {
     let changing = lock_for_change(hv, Target::Managed(name), Checks::Mark)?;
     let dom = &*changing.dom;
@@ -1783,7 +1789,7 @@ pub fn set_display(hv: &Hypervisor, name: &str, display: DisplayKind) -> Result<
             "VM '{name}' is running; shut it down with stop_vm first (the display changes at the next start)"
         );
     }
-    let xml = graphics::with_display(&inactive_xml(dom)?, display)
+    let xml = graphics::with_display(&dom.get_xml_desc(SET_DISPLAY_XML_FLAGS)?, display)
         .with_context(|| format!("cannot change the display of VM '{name}'"))?;
     hv.with_conn(|conn| {
         Domain::define_xml(conn, &xml)
@@ -3593,6 +3599,15 @@ mod tests {
             .iter()
             .map(|(name, enabled)| ((*name).into(), (*enabled).into()))
             .collect()
+    }
+
+    #[test]
+    fn set_display_reads_the_definition_with_the_security_info_that_carries_passwords() {
+        // libvirt leaves passwd and passwdValidTo out of <graphics> unless VIR_DOMAIN_XML_SECURE is set.
+        assert_eq!(
+            SET_DISPLAY_XML_FLAGS,
+            sys::VIR_DOMAIN_XML_INACTIVE | sys::VIR_DOMAIN_XML_SECURE
+        );
     }
 
     #[test]
