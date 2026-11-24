@@ -319,6 +319,12 @@ Recommended rule, for the file form:
 owner /var/lib/libvirt/images/agent-vms/*.tpm rwk,
 ```
 
+Later the same day this line was deployed as the only swtpm rule through the dotfiles' `sysapply` catalog, and the
+`.tpmdir/**` line was gone. A diskless q35 VM `t-tpmgate` with `tpm-crb` then started from a file-form state volume
+(owner `114:117`, mode 0600, state made by `swtpm_setup` as above). swtpm ran with
+`backend-uri=file:///var/lib/libvirt/images/agent-vms/t-tpmgate.tpm`, and `journalctl -k` held no AppArmor denial. The one
+line is therefore enough for the file form.
+
 ### What it means for the design
 
 Both forms work on a host with the rule, and either lets `reset_vm` keep the UUID and never leave the VM undefined, so the
