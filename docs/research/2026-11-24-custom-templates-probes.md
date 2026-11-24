@@ -178,3 +178,17 @@ owner has to decide whether a changing UUID is acceptable for `reset_vm`, and ch
 stream, console capture, anything the server stores). An alternative worth a later probe is the `<source>` form, which
 would let the server wipe the state as a pool volume; it needs the root-only swtpm log to diagnose, for example
 `sudo tail -n 20 /var/log/swtpm/libvirt/qemu/<vm>-swtpm.log` after a failed start.
+
+### Why TPM state in the pool fails
+
+The swtpm log and the kernel audit log name the cause. swtpm runs as `swtpm` (uid 114) under the AppArmor profile
+`swtpm` (`/etc/apparmor.d/usr.bin.swtpm`), which allows writes only under `/var/lib/libvirt/swtpm/`,
+`/var/lib/swtpm/`, its sockets and its logs. AppArmor refused every attempt to place the state in the pool:
+
+```text
+apparmor="DENIED" operation="mknod" profile="swtpm" name="/var/lib/libvirt/images/agent-vms/t-tp-b.tpmdir/TMP2-00.permall" comm="swtpm" requested_mask="c" denied_mask="c" fsuid=114
+SWTPM_NVRAM_StoreData: Error (fatal) opening /var/lib/libvirt/images/agent-vms/t-tp-b.tpmdir/TMP2-00.permall for write failed, Permission denied
+```
+
+TPM state in the pool therefore needs a root-made rule for the pool directory in
+`/etc/apparmor.d/local/usr.bin.swtpm`, and swtpm ownership of the state, on every host that runs the server.
