@@ -286,7 +286,8 @@ it is built.
    agents made. `create_vm` boots a built image with `disk_image` and takes `extra_isos`; `secure_boot` gains a setup
    mode with no keys enrolled, for enrolling one's own keys; snapshots of a shut-off UEFI VM keep its variables; and a
    VM may hibernate. It takes in the parked idea of agents promoting a VM to a template. Design:
-   [`custom-templates-design.md`](custom-templates-design.md), accepted. Its implementation plan builds the probes
+   [`custom-templates-design.md`](custom-templates-design.md), accepted. Plan:
+   [`custom-templates-implementation-plan.md`](custom-templates-implementation-plan.md), approved; it builds the probes
    first.
 6. **Several VMs together.** An agent can test small networks, such as a client and a server, including mDNS between
    guests. It builds on outcomes 1 and 5. The server creates and deletes networks of its own, owned and capped like
