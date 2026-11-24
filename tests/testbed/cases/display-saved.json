@@ -1,0 +1,17 @@
+[
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dpw",
+      "display": "spice"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "t-dpw",
+        "saved state",
+        "virsh managedsave-remove t-dpw"
+      ]
+    }
+  }
+]

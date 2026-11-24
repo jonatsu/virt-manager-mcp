@@ -14,8 +14,11 @@ Each release's section lists what changed for people who run the server and for 
   `type_text` and `mouse` work with a VNC-only VM.
 - `set_display` changes the display of a shut-off VM that the server may manage to `"spice"`, `"vnc"` or `"both"`. It
   rewrites only the `<graphics>` elements of the persistent definition, and needs `manage.reconfigure`. It refuses a
-  running VM, a VM under a seal, and a display the server did not write: another type than SPICE or VNC, a password, a
-  fixed port, or a listener other than loopback TCP.
+  running VM, a VM under a seal, and a VM with saved state (`virsh managedsave-remove` discards it). It also refuses a
+  VM whose display is more than `create_vm` writes, and names the setting: another type than SPICE or VNC, a
+  password, a fixed port, a listener other than loopback TCP, or any other setting, such as a SPICE clipboard rule or
+  a keymap. It will not remove SPICE from a VM with a `spicevmc` channel or redirected USB device, which libvirt
+  refuses without SPICE graphics.
 - The guest setup guide shows how to enable RDP inside a Windows guest through `exec` and in a GNOME guest with
   `grdctl`. libvirt on the host offers no RDP display, so RDP comes from the guest.
 

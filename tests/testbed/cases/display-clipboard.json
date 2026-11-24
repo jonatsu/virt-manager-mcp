@@ -1,0 +1,16 @@
+[
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dpw",
+      "display": "vnc"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "t-dpw",
+        "`clipboard` setting"
+      ]
+    }
+  }
+]

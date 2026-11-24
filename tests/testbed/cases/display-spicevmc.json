@@ -1,0 +1,26 @@
+[
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dpw",
+      "display": "vnc"
+    },
+    "expect": {
+      "error": true,
+      "contains": [
+        "t-dpw",
+        "spicevmc <channel>"
+      ]
+    }
+  },
+  {
+    "tool": "set_display",
+    "args": {
+      "vm": "t-dpw",
+      "display": "both"
+    },
+    "expect": {
+      "contains": "set the display of 't-dpw' to both"
+    }
+  }
+]

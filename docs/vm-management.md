@@ -53,8 +53,10 @@ max_disk_gib = 32
   client on the host connects to that address and port, also during an OS install. `set_display` changes the display
   of a shut-off VM the server may manage by rewriting only the `<graphics>` elements of its persistent definition,
   and, when SPICE goes, the SPICE audio backend that libvirt refuses without it. It refuses a running VM, a VM under a
-  seal, and a display the server did not write: another type than SPICE or VNC, a password, a fixed port, or a
-  listener other than loopback TCP. One virtio video device serves both displays, and `screenshot`, `send_keys`,
+  seal, a VM with saved state, and a display the server did not write, naming the setting: another type than SPICE
+  or VNC, a password, a fixed port, a listener other than loopback TCP, or any other setting, such as a SPICE
+  clipboard rule or a keymap. It also refuses to remove SPICE from a VM with a `spicevmc` channel or redirected USB
+  device. One virtio video device serves both displays, and `screenshot`, `send_keys`,
   `type_text` and `mouse` work with either, a VNC-only VM included. libvirt offers no RDP display, so enable RDP
   inside the guest instead ([RDP in the guest setup](guest-setup.md#remote-desktop-rdp)).
 

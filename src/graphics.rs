@@ -62,35 +62,77 @@ fn is_loopback(address: &str) -> bool {
     matches!(address, "127.0.0.1" | "::1" | "localhost")
 }
 
-/// Why `set_display` may not replace this display, or `None` when it is one the server writes.
+/// Why `set_display` may not replace this display, or `None` when it is exactly what `create_vm` writes and libvirt
+/// adds back: the attributes `type`, `autoport` (`yes`), `port` and `tlsPort` (`-1`) and `listen` (loopback), a
+/// `<listen type='address'>` child on loopback, and `<image compression='off'/>`. Any other setting would be lost
+/// when the element is replaced, so the reason names it. It never repeats a value, because the definition may hold a
+/// password.
 fn unreplaceable(g: roxmltree::Node<'_, '_>) -> Option<String> {
     let kind = g.attribute("type").unwrap_or_default();
     if !matches!(kind, "spice" | "vnc") {
         return Some(format!("a {kind} display"));
     }
-    if g.has_attribute("passwd") || g.has_attribute("passwdValidTo") {
-        return Some(format!("a {kind} display with a password"));
-    }
-    let automatic = g.attribute("autoport") == Some("yes");
-    for port in ["port", "tlsPort"] {
-        if !automatic && g.attribute(port).is_some_and(|p| p != "-1") {
-            return Some(format!("a {kind} display with a fixed port"));
+    for attr in g.attributes() {
+        let (name, value) = (attr.name(), attr.value());
+        let refused = match name {
+            "type" => None,
+            "passwd" | "passwdValidTo" => Some(format!("a {kind} display with a password")),
+            "autoport" => (value != "yes").then(|| with_setting(kind, name)),
+            "port" | "tlsPort" => {
+                (value != "-1").then(|| format!("a {kind} display with a fixed port"))
+            }
+            "listen" => (!is_loopback(value)).then(|| off_loopback(kind)),
+            "socket" => Some(format!("a {kind} display on a socket")),
+            _ => Some(with_setting(kind, name)),
+        };
+        if refused.is_some() {
+            return refused;
         }
     }
-    let listeners = g
-        .children()
-        .filter(|n| n.has_tag_name("listen"))
-        .map(|n| (n.attribute("type"), n.attribute("address")))
-        .chain(g.attribute("listen").map(|a| (Some("address"), Some(a))));
-    for (kind_of, address) in listeners {
-        if kind_of != Some("address") || address.is_some_and(|a| !is_loopback(a)) {
-            return Some(format!(
-                "a {kind} display that does not listen on the loopback address"
-            ));
+    for child in g.children().filter(roxmltree::Node::is_element) {
+        let tag = child.tag_name().name();
+        let refused = match tag {
+            "listen" => listener_refusal(kind, child),
+            "image" => child
+                .attributes()
+                .find(|a| (a.name(), a.value()) != ("compression", "off"))
+                .map(|a| with_setting(kind, a.name()))
+                .or_else(|| has_element(child).then(|| with_setting(kind, tag))),
+            _ => Some(with_setting(kind, tag)),
+        };
+        if refused.is_some() {
+            return refused;
         }
     }
-    g.has_attribute("socket")
-        .then(|| format!("a {kind} display on a socket"))
+    None
+}
+
+/// Why a `<listen>` child of a `kind` display is not the loopback address listener the server writes, or `None`.
+fn listener_refusal(kind: &str, listen: roxmltree::Node<'_, '_>) -> Option<String> {
+    if listen.attribute("type") != Some("address") {
+        return Some(off_loopback(kind));
+    }
+    for attr in listen.attributes() {
+        match (attr.name(), attr.value()) {
+            ("type", _) => {}
+            ("address", address) if is_loopback(address) => {}
+            ("address", _) => return Some(off_loopback(kind)),
+            (name, _) => return Some(with_setting(kind, name)),
+        }
+    }
+    has_element(listen).then(|| with_setting(kind, "listen"))
+}
+
+fn with_setting(kind: &str, name: &str) -> String {
+    format!("a {kind} display with the `{name}` setting")
+}
+
+fn off_loopback(kind: &str) -> String {
+    format!("a {kind} display that does not listen on the loopback address")
+}
+
+fn has_element(node: roxmltree::Node<'_, '_>) -> bool {
+    node.children().any(|n| n.is_element())
 }
 
 /// `xml`, a domain definition, with its `<graphics>` elements replaced by those of `kind`, and any SPICE audio backend
@@ -99,9 +141,11 @@ fn unreplaceable(g: roxmltree::Node<'_, '_>) -> Option<String> {
 ///
 /// # Errors
 ///
-/// Fails when the XML does not parse or has no `<devices>`, or when an existing display is not one the server writes:
-/// another type than SPICE or VNC, a password, a fixed port, or a listener other than loopback TCP. Replacing such a
-/// display would change what an operator set up.
+/// Fails when the XML does not parse or has no `<devices>`, or when an existing display is more than the server
+/// writes: another type than SPICE or VNC, a password, a fixed port, a listener other than loopback, or any other
+/// setting, such as a SPICE clipboard rule or a keymap. Replacing such a display would drop what an operator set up.
+/// It also fails when the new display has no SPICE and the VM has a `spicevmc` channel or redirected USB device,
+/// which libvirt refuses without SPICE graphics.
 pub fn with_display(xml: &str, kind: DisplayKind) -> Result<String> {
     let doc = roxmltree::Document::parse(xml)?;
     let Some(devices) = doc
@@ -111,6 +155,18 @@ pub fn with_display(xml: &str, kind: DisplayKind) -> Result<String> {
     else {
         bail!("the definition has no <devices>");
     };
+    if !kind.has_spice()
+        && let Some(device) = devices.children().find(|n| {
+            (n.has_tag_name("channel") || n.has_tag_name("redirdev"))
+                && n.attribute("type") == Some("spicevmc")
+        })
+    {
+        bail!(
+            "set_display cannot remove SPICE from this VM: it has a spicevmc <{}> device, and libvirt refuses that \
+             device without SPICE graphics",
+            device.tag_name().name()
+        );
+    }
     // Each edit replaces the byte range with the text.
     let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     for g in graphics_of(devices) {
@@ -276,12 +332,93 @@ mod tests {
     #[test]
     fn set_display_takes_libvirts_written_back_form() {
         let written = domain(
-            "<graphics type='vnc' port='5902' autoport='yes' listen='127.0.0.1'>\
+            "<graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'>\
              <listen type='address' address='127.0.0.1'/></graphics>\
-             <graphics type='spice' port='-1' autoport='yes'><listen type='address'/></graphics>",
+             <graphics type='spice' port='-1' tlsPort='-1' autoport='yes'>\
+             <listen type='address'/><image compression='off'/></graphics>\
+             <graphics type='spice' autoport='yes' listen='::1'><listen type='address' address='::1'/></graphics>",
         );
         let xml = with_display(&written, DisplayKind::Vnc).unwrap();
         assert_eq!(xml, domain(VNC));
+    }
+
+    #[test]
+    fn set_display_refuses_a_setting_it_would_drop_and_names_it() {
+        for (setting, graphics) in [
+            (
+                "clipboard",
+                "<graphics type='spice' autoport='yes'><listen type='address'/>\
+                 <clipboard copypaste='no'/></graphics>",
+            ),
+            (
+                "filetransfer",
+                "<graphics type='spice' autoport='yes'><filetransfer enable='no'/></graphics>",
+            ),
+            (
+                "channel",
+                "<graphics type='spice' autoport='yes'><channel name='main' mode='secure'/></graphics>",
+            ),
+            (
+                "gl",
+                "<graphics type='spice' autoport='yes'><gl enable='yes'/></graphics>",
+            ),
+            (
+                "keymap",
+                "<graphics type='vnc' autoport='yes' keymap='fi'/>",
+            ),
+            (
+                "websocket",
+                "<graphics type='vnc' autoport='yes' websocket='-1'/>",
+            ),
+            (
+                "sharePolicy",
+                "<graphics type='vnc' autoport='yes' sharePolicy='force-shared'/>",
+            ),
+            (
+                "compression",
+                "<graphics type='spice' autoport='yes'><image compression='auto_glz'/></graphics>",
+            ),
+            (
+                "mouse",
+                "<graphics type='spice' autoport='yes'><mouse mode='client'/></graphics>",
+            ),
+            (
+                "fromConfig",
+                "<graphics type='vnc' autoport='yes'><listen type='address' fromConfig='yes'/></graphics>",
+            ),
+            ("autoport", "<graphics type='vnc' autoport='no'/>"),
+        ] {
+            let err = with_display(&domain(graphics), DisplayKind::Spice)
+                .expect_err(setting)
+                .to_string();
+            assert!(
+                err.contains(&format!("`{setting}`")),
+                "{setting} is not named: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_display_refuses_to_drop_spice_from_a_vm_with_spicevmc_devices() {
+        // libvirt refuses `<channel type='spicevmc'>` and `<redirdev type='spicevmc'>` without SPICE graphics.
+        for devices in [
+            "<channel type='spicevmc'><target type='virtio' name='com.redhat.spice.0'/></channel>",
+            "<redirdev bus='usb' type='spicevmc'/>",
+        ] {
+            let xml = domain(&format!("{SPICE}{devices}"));
+            let err = with_display(&xml, DisplayKind::Vnc)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("spicevmc"), "{err}");
+            for kind in [DisplayKind::Spice, DisplayKind::Both] {
+                assert!(with_display(&xml, kind).is_ok());
+            }
+        }
+        // Other devices of those kinds stay out of the way.
+        let xml = domain(&format!(
+            "{SPICE}<channel type='unix'/><redirdev bus='usb' type='tcp'/>"
+        ));
+        assert!(with_display(&xml, DisplayKind::Vnc).is_ok());
     }
 
     #[test]

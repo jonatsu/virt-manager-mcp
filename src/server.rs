@@ -2229,8 +2229,9 @@ impl VirtServer {
             idempotent_hint = true
         ),
         description = "Change the display of a shut-off managed VM to \"spice\", \"vnc\" (127.0.0.1 only, no password) \
-        or \"both\", in its persistent definition. Refuses a running VM and a VM with a display that create_vm did not \
-        write, such as one with a password. start_vm then names the VNC port."
+        or \"both\", in its persistent definition. Refuses a running VM, a VM with saved state, and a VM with a display \
+        that create_vm did not write, such as one with a password or any other setting; the error names it. start_vm \
+        then names the VNC port."
     )]
     async fn set_display(
         &self,

@@ -53,6 +53,7 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["display"]="display display-after"
+  ["display-password"]="display-password display-clipboard display-spicevmc display-saved"
   ["win-rdp"]="win-rdp win-rdp-after"
   ["hibernate"]="hibernate hibernate-after"
   ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-reset uefi-vars-virsh uefi-vars-virsh-after uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
@@ -353,12 +354,25 @@ unit_display() {
   run_case display-after "${config}"
 }
 
-# display-password defines t-dpw with virsh: a VNC display with the password testpw, a definition libvirt returns
-# without the password unless asked for the security info. The case config lists the VM in manage_vms, so the case
-# expects set_display to refuse it and not to repeat the password; this unit then expects the password still in the
-# persistent definition. Nothing here starts a VM.
+# Defines t-dpw, replacing any earlier definition, as a 128 MiB VM without disks whose devices are $1.
+define_dpw() { # devices
+  vsh dominfo t-dpw > /dev/null 2>&1 && { vsh undefine t-dpw --managed-save > /dev/null || return 1; }
+  printf '%s\n' "<domain type='kvm'><name>t-dpw</name><memory unit='MiB'>128</memory><vcpu>1</vcpu>" \
+    "<os><type arch='x86_64' machine='q35'>hvm</type></os><devices>$1</devices></domain>" > "${WORK}/t-dpw.xml"
+  vsh define "${WORK}/t-dpw.xml" > /dev/null
+}
+
+# display-password and its sibling cases run on t-dpw, a VM they define with virsh and the case config lists in
+# allowed_vms and manage_vms, so set_display may act on it. Each case expects set_display to refuse a VM it must not
+# change, and this unit then expects the definition untouched. display-password: a VNC display with the password
+# testpw, which libvirt returns only with the security info, and which neither a reply nor the definition may lose.
+# display-clipboard: a SPICE display with a clipboard rule. display-spicevmc: a SPICE display with a spicevmc channel,
+# where VNC is refused and SPICE with VNC is accepted by libvirt. display-saved: a VM with a managed-save image.
 unit_display_password() {
-  local config=${WORK}/config-display-password.toml
+  local config=${WORK}/config-display-password.toml vnc vnc_pw spice quote="'"
+  vnc="<graphics type='vnc' autoport='yes' listen='127.0.0.1'><listen type='address' address='127.0.0.1'/></graphics>"
+  vnc_pw="${vnc/ listen=/ passwd=${quote}testpw${quote} listen=}"
+  spice="<graphics type='spice' autoport='yes'><listen type='address'/>"
   if vsh dominfo t-dpw > /dev/null 2>&1; then
     record display-password failed "t-dpw exists already"
     return
@@ -369,11 +383,8 @@ unit_display_password() {
     record display-password failed "could not write ${config}"
     return
   }
-  printf '%s\n' "<domain type='kvm'><name>t-dpw</name><memory unit='MiB'>128</memory><vcpu>1</vcpu>" \
-    "<os><type arch='x86_64' machine='q35'>hvm</type></os><devices>" \
-    "<graphics type='vnc' autoport='yes' listen='127.0.0.1' passwd='testpw'>" \
-    "<listen type='address' address='127.0.0.1'/></graphics></devices></domain>" > "${WORK}/t-dpw.xml"
-  vsh define "${WORK}/t-dpw.xml" > /dev/null || {
+
+  define_dpw "${vnc_pw}" || {
     record display-password failed "could not define t-dpw"
     return
   }
@@ -383,7 +394,30 @@ unit_display_password() {
   run_case display-password "${config}"
   vsh dumpxml t-dpw --inactive --security-info | grep -qF "passwd='testpw'" \
     || record display-password failed "the password of t-dpw is gone from its definition"
-  vsh undefine t-dpw > /dev/null || record display-password failed "could not undefine t-dpw"
+
+  if define_dpw "${spice}<clipboard copypaste='no'/></graphics>"; then
+    run_case display-clipboard "${config}"
+    vsh dumpxml t-dpw --inactive | grep -qF "copypaste='no'" \
+      || record display-clipboard failed "the clipboard rule of t-dpw is gone from its definition"
+  else
+    record display-clipboard failed "could not define t-dpw"
+  fi
+
+  if define_dpw "${spice}</graphics><audio id='1' type='spice'/><channel type='spicevmc'><target type='virtio' name='com.redhat.spice.0'/></channel>"; then
+    run_case display-spicevmc "${config}"
+  else
+    record display-spicevmc failed "could not define t-dpw"
+  fi
+
+  if define_dpw "${vnc}" && vsh start t-dpw > /dev/null && wait_until 60 is_state t-dpw running \
+    && vsh managedsave t-dpw > /dev/null && wait_until 60 is_state t-dpw "shut off"; then
+    run_case display-saved "${config}"
+    vsh dominfo t-dpw | grep -qE '^Managed save: +yes' \
+      || record display-saved failed "t-dpw lost its managed-save image"
+  else
+    record display-saved failed "could not make a managed-save image of t-dpw"
+  fi
+  vsh undefine t-dpw --managed-save > /dev/null || record display-password failed "could not undefine t-dpw"
 }
 
 # The directory of the pool agent-vms.

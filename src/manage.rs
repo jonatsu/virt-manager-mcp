@@ -1773,6 +1773,18 @@ pub fn set_cdrom(
     Ok(format!("{what} in {} of '{name}'", cdrom.target))
 }
 
+/// Refuses `set_display` on a VM with a managed-save image: the next start restores the saved memory with the old
+/// display and ignores the new definition. `saved` is whether libvirt reports the image.
+fn refuse_saved_state(name: &str, saved: bool) -> Result<()> {
+    if saved {
+        bail!(
+            "VM '{name}' has saved state, which would restore its old display at the next start; discard the saved \
+             state, and the memory in it, with `virsh managedsave-remove {name}`, then try again"
+        );
+    }
+    Ok(())
+}
+
 /// The flags `set_display` reads a definition with: the persistent one, with the security info. libvirt leaves
 /// `passwd` and `passwdValidTo` out of `<graphics>` unless `VIR_DOMAIN_XML_SECURE` is set, so without it a password
 /// would be neither seen nor kept when the definition is written back.
@@ -1789,6 +1801,11 @@ pub fn set_display(hv: &Hypervisor, name: &str, display: DisplayKind) -> Result<
             "VM '{name}' is running; shut it down with stop_vm first (the display changes at the next start)"
         );
     }
+    refuse_saved_state(
+        name,
+        dom.has_managed_save(0)
+            .map_err(|e| anyhow!("cannot read the saved state of '{name}': {}", e.message()))?,
+    )?;
     let xml = graphics::with_display(&dom.get_xml_desc(SET_DISPLAY_XML_FLAGS)?, display)
         .with_context(|| format!("cannot change the display of VM '{name}'"))?;
     hv.with_conn(|conn| {
@@ -3599,6 +3616,16 @@ mod tests {
             .iter()
             .map(|(name, enabled)| ((*name).into(), (*enabled).into()))
             .collect()
+    }
+
+    #[test]
+    fn set_display_refuses_a_vm_with_saved_state_and_names_the_way_out() {
+        assert!(refuse_saved_state("t-a", false).is_ok());
+        let err = refuse_saved_state("t-a", true).unwrap_err().to_string();
+        assert!(
+            err.contains("'t-a'") && err.contains("virsh managedsave-remove"),
+            "{err}"
+        );
     }
 
     #[test]
