@@ -5,6 +5,8 @@ Each release's section lists what changed for people who run the server and for 
 
 ## Unreleased
 
+## 0.5.1
+
 ### Added
 
 - `create_vm` takes `display`: `"spice"` (the default, as before), `"vnc"` or `"both"`. A VNC display listens on
