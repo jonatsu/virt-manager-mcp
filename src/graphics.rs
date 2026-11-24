@@ -184,10 +184,11 @@ pub fn with_display(xml: &str, kind: DisplayKind) -> Result<String> {
     }
     if edits.is_empty() {
         let end = devices.range().end;
-        let close = end - "</devices>".len();
-        if !xml[close..end].eq("</devices>") {
+        let close = end.checked_sub("</devices>".len());
+        // `get` refuses a range that cuts a multibyte character, which a self-closing element can produce.
+        let Some(close) = close.filter(|&c| xml.get(c..end) == Some("</devices>")) else {
             bail!("the definition's <devices> has no closing tag");
-        }
+        };
         edits.push((close..close, kind.graphics_xml()));
     }
     if !kind.has_spice() {
@@ -484,6 +485,14 @@ mod tests {
     fn set_display_refuses_a_definition_that_is_not_a_domain() {
         assert!(with_display("<domain>", DisplayKind::Vnc).is_err());
         assert!(with_display("<domain><name>t</name></domain>", DisplayKind::Vnc).is_err());
+    }
+
+    #[test]
+    fn set_display_refuses_a_devices_element_without_a_closing_tag_instead_of_panicking() {
+        // The last ten bytes of this element begin inside the two bytes of the attribute name.
+        let xml = "<domain><devices é='abcd'/></domain>";
+        let err = with_display(xml, DisplayKind::Vnc).unwrap_err().to_string();
+        assert!(err.contains("closing tag"), "{err}");
     }
 
     #[test]

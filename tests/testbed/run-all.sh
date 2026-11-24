@@ -53,7 +53,7 @@ declare -A MEMBERS=(
   ["templates-reset-uefi"]="templates-reset-uefi templates-reset-saved"
   ["templates-outside-disk"]="templates-outside-disk-setup templates-outside-disk"
   ["display"]="display display-after"
-  ["display-password"]="display-password display-clipboard display-spicevmc display-saved"
+  ["display-password"]="display-password display-clipboard display-spicevmc display-saved display-vnc-managed display-vnc-unmanaged"
   ["win-rdp"]="win-rdp win-rdp-after"
   ["hibernate"]="hibernate hibernate-after"
   ["uefi-vars"]="uefi-vars uefi-vars-start uefi-vars-guest uefi-vars-reset uefi-vars-virsh uefi-vars-virsh-after uefi-vars-delete uefi-vars-leftover uefi-vars-leftover-after"
@@ -78,6 +78,10 @@ ORDER=()
 WORK=
 # The directory of extra-isos's ISOs; set while the case runs.
 ISO_DIR=
+# Set from the moment win-rdp may have enabled Remote Desktop in t-win11net until win-rdp-after has run, with the config
+# that case needs; cleanup then turns Remote Desktop off again before it shuts the VM off.
+RDP_ENABLED=
+RDP_CONFIG=
 PRE_VMS=
 PRE_VOLS=
 
@@ -368,8 +372,10 @@ define_dpw() { # devices
 # testpw, which libvirt returns only with the security info, and which neither a reply nor the definition may lose.
 # display-clipboard: a SPICE display with a clipboard rule. display-spicevmc: a SPICE display with a spicevmc channel,
 # where VNC is refused and SPICE with VNC is accepted by libvirt. display-saved: a VM with a managed-save image.
+# display-vnc-managed and display-vnc-unmanaged: start_vm names the VNC port only where the VM is in manage_vms.
 unit_display_password() {
-  local config=${WORK}/config-display-password.toml vnc vnc_pw spice quote="'"
+  local config=${WORK}/config-display-password.toml unmanaged=${WORK}/config-display-unmanaged.toml
+  local vnc vnc_pw spice quote="'"
   vnc="<graphics type='vnc' autoport='yes' listen='127.0.0.1'><listen type='address' address='127.0.0.1'/></graphics>"
   vnc_pw="${vnc/ listen=/ passwd=${quote}testpw${quote} listen=}"
   spice="<graphics type='spice' autoport='yes'><listen type='address'/>"
@@ -377,9 +383,11 @@ unit_display_password() {
     record display-password failed "t-dpw exists already"
     return
   fi
-  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-dpw", /' -e 's/^manage_vms = \[/manage_vms = ["t-dpw", /' \
-    "${TESTBED}/config-templates.toml" > "${config}" \
-    && [[ $(grep -cF -e 'allowed_vms = ["t-dpw", ' -e 'manage_vms = ["t-dpw", ' "${config}") == 2 ]] || {
+  sed -e 's/^allowed_vms = \[/allowed_vms = ["t-dpw", /' -e 's/^power_vms = \[/power_vms = ["t-dpw", /' \
+    -e 's/^manage_vms = \[/manage_vms = ["t-dpw", /' "${TESTBED}/config-templates.toml" > "${config}" \
+    && [[ $(grep -cF '= ["t-dpw", ' "${config}") == 3 ]] \
+    && sed '/^manage_vms = /s/"t-dpw", //' "${config}" > "${unmanaged}" \
+    && [[ $(grep -cF '= ["t-dpw", ' "${unmanaged}") == 2 ]] || {
     record display-password failed "could not write ${config}"
     return
   }
@@ -416,6 +424,16 @@ unit_display_password() {
       || record display-saved failed "t-dpw lost its managed-save image"
   else
     record display-saved failed "could not make a managed-save image of t-dpw"
+  fi
+
+  # start_vm names the VNC port of a VM the server may manage, and of no other.
+  if define_dpw "${vnc}"; then
+    run_case display-vnc-managed "${config}"
+    vsh destroy t-dpw > /dev/null 2>&1
+    run_case display-vnc-unmanaged "${unmanaged}"
+    vsh destroy t-dpw > /dev/null 2>&1
+  else
+    record display-vnc-managed failed "could not define t-dpw"
   fi
   vsh undefine t-dpw --managed-save > /dev/null || record display-password failed "could not undefine t-dpw"
 }
@@ -1158,6 +1176,7 @@ unit_win_rdp() {
     win_shut_off t-win11net || record win-rdp failed "could not shut t-win11net off"
     return
   fi
+  RDP_CONFIG=${config} RDP_ENABLED=1
   run_case win-rdp "${config}"
   ip=$(sed -n '/^### vm_addresses/{n;p;q}' "${WORK}/logs/win-rdp.out" \
     | jq -r '[.interfaces[] | select(.source == "lease") | .addresses[].address][0] // empty' 2> /dev/null)
@@ -1167,6 +1186,7 @@ unit_win_rdp() {
     tcp_open "${ip}" 3389 || record win-rdp failed "${ip} port 3389 did not accept a connection after RDP was enabled"
   fi
   run_case win-rdp-after "${config}"
+  RDP_ENABLED=
   if [[ ${ip} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && tcp_open "${ip}" 3389; then
     record win-rdp-after failed "${ip} port 3389 still accepts connections after RDP was disabled"
   fi
@@ -1300,6 +1320,12 @@ cleanup() {
   # An interrupted Windows case leaves t-win11 running, and it holds 4 GiB; t-win11net holds 8 GiB.
   if is_state t-win11 running; then
     win_shut_off > /dev/null 2>&1 || echo "cleanup: could not shut t-win11 off"
+  fi
+  # An interrupted win-rdp leaves Remote Desktop on in the guest's disk: run the case that turns it off first.
+  if [[ -n ${RDP_ENABLED} ]] && is_state t-win11net running; then
+    timeout 120 python3 -I "${TESTBED}/mcp_call.py" "${TESTBED}/cases/win-rdp-after.json" -- \
+      "${BIN}" --config "${RDP_CONFIG}" >> "${WORK}/logs/cleanup.out" 2>&1 \
+      || echo "cleanup: could not turn Remote Desktop off in t-win11net"
   fi
   if is_state t-win11net running; then
     win_shut_off t-win11net > /dev/null 2>&1 || echo "cleanup: could not shut t-win11net off"

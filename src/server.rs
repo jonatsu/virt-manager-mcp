@@ -1205,7 +1205,7 @@ impl VirtServer {
         self.blocking(move |s| {
             let mut msg = format!("VM '{}': {}", p.vm, s.start_vm(&p.vm)?);
             if let Ok(dom) = s.hv.domain(&p.vm) {
-                msg.push_str(&manage::vnc_note(&dom));
+                msg.push_str(&manage::vnc_note(&s.hv, &dom));
             }
             let wait = Duration::from_secs(p.wait_for_agent_secs.min(300));
             if !wait.is_zero() {

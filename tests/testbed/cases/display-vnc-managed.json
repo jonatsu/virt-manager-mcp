@@ -1,0 +1,11 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-dpw"
+    },
+    "expect": {
+      "matches": "'t-dpw'.*; VNC on 127\\.0\\.0\\.1:[0-9]+"
+    }
+  }
+]

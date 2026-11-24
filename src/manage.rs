@@ -1819,9 +1819,13 @@ pub fn set_display(hv: &Hypervisor, name: &str, display: DisplayKind) -> Result<
     ))
 }
 
-/// The suffix `start_vm` adds to its reply: where the VNC display of the running VM listens, or nothing when it has
-/// none or the live definition cannot be read.
-pub fn vnc_note(dom: &Domain) -> String {
+/// The suffix `start_vm` adds to its reply: where the VNC display of the running VM listens, or nothing when the
+/// server may not manage the VM, it has no VNC display, or the live definition cannot be read. The address and port
+/// of a VM the server does not manage are the operator's business.
+pub fn vnc_note(hv: &Hypervisor, dom: &Domain) -> String {
+    if !hv.can_manage(dom) {
+        return String::new();
+    }
     dom.get_xml_desc(0)
         .ok()
         .and_then(|xml| graphics::vnc_endpoint(&xml))

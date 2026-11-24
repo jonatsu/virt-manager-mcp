@@ -79,7 +79,6 @@ agent that runs them with `exec`.
 Only the Pro, Enterprise and Education editions and Windows Server host RDP; Home does not
 ([Microsoft Learn][ms-rdp]). The guest agent runs as `SYSTEM`, so `exec` can make these changes. Run them in
 PowerShell, the default shell:
-The guest agent runs as `SYSTEM`, so `exec` can make these changes. Run them in PowerShell, the default shell:
 
 ```powershell
 Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0

@@ -1,0 +1,12 @@
+[
+  {
+    "tool": "start_vm",
+    "args": {
+      "vm": "t-dpw"
+    },
+    "expect": {
+      "contains": "'t-dpw'",
+      "absent": "VNC"
+    }
+  }
+]
