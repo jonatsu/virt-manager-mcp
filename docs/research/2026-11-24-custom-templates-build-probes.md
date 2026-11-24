@@ -618,3 +618,316 @@ I found no assumption in units 7, 15 or 19 that the real signatures contradict.
 - Unit 7 (the libvirt floor): `get_lib_version` returns `Result<u32, Error>`, and 10010000 fits. No contradiction.
 - Unit 15: `upload_sparse` uses `Stream::send` for data and `virStreamSendHole` for zero runs, as spiked. Two details the unit should keep in mind. `Stream::send` returns the bytes sent, which can be fewer than the buffer, so the code loops. `as_ptr` calls `unwrap` on the stream's pointer, so it must not run after `finish` or `free`. `finish(self)` and `abort(self)` consume the stream; on an error return, `Drop` frees the stream and panics only if the free itself fails. The plan's note that `Stream` panics on drop of an unfinished stream matches this: a drop frees the stream and panics only on a free error, so aborting on each error path stays the safe choice.
 - Unit 19: `create_xml_from` takes `&StoragePool` plus the source `&StorageVol` and a flags value of type `sys::virStorageVolCreateFlags`, so the seal copy needs both a pool handle and the source volume handle on its own connection.
+
+## Probe 8: UEFI hibernation through an explicit firmware path (feeds unit 5)
+
+I ran this on 2026-11-24, on libvirt 12.0.0 and QEMU 10.2.1 (`virsh version` reports API "QEMU 12.0.0"), on
+`qemu:///system`.
+Guest: Debian 13, kernel `6.12.115+deb13.1-cloud-amd64`, the same image as probe 3.
+
+### Answer
+
+Hibernation works through the explicit loader for Secure Boot off and for setup mode. It does not work for Secure Boot
+on, and the refusal comes from the guest, not from libvirt.
+
+- The define-read-redefine sequence works for all three modes. The redefine succeeded, the UUID stayed the same, and
+  libvirt resolved exactly the files in the design's mode table.
+- Off and setup hibernated and resumed. Uptime continued and a `/dev/shm` marker survived.
+- On (enforced Secure Boot) boots, but the kernel starts in lockdown `integrity`, and lockdown forbids hibernation. The
+  guest lists no `disk` in `/sys/power/state`, and `systemctl hibernate` fails inside the guest. libvirt stays out
+  of it: the domain keeps running and no event arrives.
+- Setup mode is not enforced Secure Boot. The guest reports `SecureBoot disabled`, lockdown is `none`, and
+  hibernation works. So for unit 5, `hibernate` is possible with Secure Boot off and in setup mode, and impossible
+  with Secure Boot on, whatever the host does.
+
+### Table
+
+| Mode | Resolved code file / variables template | Redefine | UUID kept | Start | Guest SB state | Lockdown | Hibernate | Resume |
+| -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| off | `OVMF_CODE_4M.fd` / `OVMF_VARS_4M.fd` | ok | yes | ok | `This system doesn't support Secure Boot` | `[none] integrity confidentiality` | ok | ok |
+| setup | `OVMF_CODE_4M.secboot.fd` / `OVMF_VARS_4M.fd` | ok | yes | ok | `SecureBoot disabled`, `Platform is in Setup Mode` | `[none] integrity confidentiality` | ok | ok |
+| on | `OVMF_CODE_4M.ms.fd` / `OVMF_VARS_4M.ms.fd` | ok | yes | ok | `SecureBoot enabled` | `none [integrity] confidentiality` | refused by the guest | not applicable |
+
+All three resolved files match the design's mode table.
+
+### VMs and commands
+
+Each VM `t-ph-<mode>` was a qcow2 overlay of `tpl-debian13.qcow2`, 8 GiB, 1 GiB RAM, one vCPU, `host-passthrough`, a
+guest agent channel, `<on_poweroff>destroy</on_poweroff>`. `POOL` is `/var/lib/libvirt/images/agent-vms`.
+
+```sh
+V="virsh -c qemu:///system"
+$V vol-create-as agent-vms t-ph-<mode>.qcow2 8G --format qcow2 --backing-vol tpl-debian13.qcow2 --backing-vol-format qcow2
+$V define t-ph-<mode>.stage1.xml
+$V dumpxml --inactive t-ph-<mode> > t-ph-<mode>.inactive1.xml     # read loader, template, uuid
+$V define t-ph-<mode>.stage2.xml                                  # same name and uuid
+$V dumpxml --inactive t-ph-<mode>
+```
+
+Stage 1, the autoselected definition. The `<os>` element, with `<smm state='on'/>` for on and setup and `<smm
+state='off'/>` for off, and no `<pm>`:
+
+```xml
+<os firmware='efi'>
+  <type arch='x86_64' machine='q35'>hvm</type>
+  <firmware>
+    <!-- off:   <feature enabled='no' name='secure-boot'/> -->
+    <!-- on:    <feature enabled='yes' name='secure-boot'/><feature enabled='yes' name='enrolled-keys'/> -->
+    <!-- setup: <feature enabled='yes' name='secure-boot'/><feature enabled='no' name='enrolled-keys'/> -->
+  </firmware>
+  <loader type='pflash'/>
+  <nvram format='raw'>POOL/t-ph-<mode>.vars</nvram>
+</os>
+```
+
+`virsh dumpxml --inactive` right after the first define, `<os>` element per mode (libvirt printed double quotes; I
+show it as printed):
+
+```xml
+<!-- off -->
+<os firmware="efi">
+  <type arch="x86_64" machine="pc-q35-10.2">hvm</type>
+  <firmware>
+    <feature enabled="no" name="enrolled-keys"/>
+    <feature enabled="no" name="secure-boot"/>
+  </firmware>
+  <loader readonly="yes" type="pflash" format="raw">/usr/share/OVMF/OVMF_CODE_4M.fd</loader>
+  <nvram template="/usr/share/OVMF/OVMF_VARS_4M.fd" templateFormat="raw" format="raw">POOL/t-ph-off.vars</nvram>
+  <boot dev="hd"/>
+</os>
+
+<!-- setup -->
+  <firmware>
+    <feature enabled="no" name="enrolled-keys"/>
+    <feature enabled="yes" name="secure-boot"/>
+  </firmware>
+  <loader readonly="yes" secure="yes" type="pflash" format="raw">/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>
+  <nvram template="/usr/share/OVMF/OVMF_VARS_4M.fd" templateFormat="raw" format="raw">POOL/t-ph-setup.vars</nvram>
+
+<!-- on -->
+  <firmware>
+    <feature enabled="yes" name="enrolled-keys"/>
+    <feature enabled="yes" name="secure-boot"/>
+  </firmware>
+  <loader readonly="yes" secure="yes" type="pflash" format="raw">/usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>
+  <nvram template="/usr/share/OVMF/OVMF_VARS_4M.ms.fd" templateFormat="raw" format="raw">POOL/t-ph-on.vars</nvram>
+```
+
+(For setup and on I show only the lines that differ from off; the `<type>` and `<boot>` lines were the same.) Note
+that setup resolves `secure="yes"` on the loader, although the guest does not enforce Secure Boot (see the start
+results).
+
+Stage 2, the redefine. I took `uuid`, the loader path, `secure` and the template path from the stage 1 dump. The `<os>`
+has no `firmware` attribute and no `<firmware>` element:
+
+```xml
+<uuid>UUID-FROM-STAGE-1</uuid>
+<os>
+  <type arch='x86_64' machine='q35'>hvm</type>
+  <loader readonly='yes' secure='yes|no' type='pflash' format='raw'>LOADER-FROM-STAGE-1</loader>
+  <nvram template='TEMPLATE-FROM-STAGE-1' templateFormat='raw' format='raw'>POOL/t-ph-<mode>.vars</nvram>
+</os>
+<features><acpi/><apic/><smm state='on|off'/></features>
+<pm><suspend-to-disk enabled='yes'/><suspend-to-mem enabled='no'/></pm>
+```
+
+I used `secure='no'` for off, and `secure='yes'` for setup and on, copying what libvirt resolved. The rest of the
+domain was the probe 3 skeleton.
+
+### Results of the sequence
+
+Each redefine printed `Domain 't-ph-<mode>' defined from t-ph-<mode>.stage2.xml` with exit 0. The UUIDs before and
+after were equal:
+
+| Mode | UUID before and after the redefine |
+| -- | -- |
+| off | `c29b872d-e13c-4c6a-8477-154fd6b9940e` |
+| setup | `ce6888a2-15aa-47d9-9910-c4b4fc924c52` |
+| on | `691e894f-7b30-4d75-b477-7ca59d45ac1b` |
+
+`virsh dumpxml --inactive` after the redefine kept the explicit form, with `machine='pc-q35-10.2'` and
+`<boot dev="hd"/>` added, and `<pm>` held `suspend-to-mem enabled="no"` and
+`suspend-to-disk enabled="yes"`. Example for on:
+
+```xml
+<os>
+  <type arch="x86_64" machine="pc-q35-10.2">hvm</type>
+  <loader readonly="yes" secure="yes" type="pflash" format="raw">/usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>
+  <nvram template="/usr/share/OVMF/OVMF_VARS_4M.ms.fd" templateFormat="raw" format="raw">POOL/t-ph-on.vars</nvram>
+  <boot dev="hd"/>
+</os>
+<pm>
+  <suspend-to-mem enabled="no"/>
+  <suspend-to-disk enabled="yes"/>
+</pm>
+```
+
+`<pm>` with `suspend-to-disk enabled='yes'` is accepted in the explicit form for every mode. That is the case the
+autoselected form refused in probe 3.
+
+### Start and guest state
+
+All three VMs started and the guest agent answered within about 10 seconds. In the guest:
+
+```text
+# off
+$ mokutil --sb-state
+This system doesn't support Secure Boot
+(no SecureBoot-* or SetupMode-* variables in /sys/firmware/efi/efivars)
+$ cat /sys/kernel/security/lockdown
+[none] integrity confidentiality
+[    0.000000] secureboot: Secure boot disabled
+$ cat /sys/power/state ; cat /sys/power/disk
+freeze mem disk
+[platform] shutdown reboot suspend test_resume
+
+# setup
+$ mokutil --sb-state
+SecureBoot disabled
+Platform is in Setup Mode
+SecureBoot variable data: 6 0 0 0 0     SetupMode variable data: 6 0 0 0 1
+$ cat /sys/kernel/security/lockdown
+[none] integrity confidentiality
+[    0.000000] secureboot: Secure boot disabled
+$ cat /sys/power/state ; cat /sys/power/disk
+freeze mem disk
+[platform] shutdown reboot suspend test_resume
+
+# on
+$ mokutil --sb-state
+SecureBoot enabled
+SecureBoot variable data: 6 0 0 0 1     SetupMode variable data: 6 0 0 0 0
+(PK, KEK and db variables present)
+$ cat /sys/kernel/security/lockdown
+none [integrity] confidentiality
+[    0.000000] Kernel is locked down from EFI Secure Boot; see man kernel_lockdown.7
+[    0.000000] secureboot: Secure boot enabled
+[    0.654117] Lockdown: swapper/0: hibernation is restricted; see man kernel_lockdown.7
+$ cat /sys/power/state ; cat /sys/power/disk
+freeze mem
+[disabled]
+```
+
+In setup mode the `secure='yes'` on the loader gives the SMM-capable, Secure Boot capable firmware build, but with no
+PK enrolled the firmware does not enforce anything, so Linux does not lock down. The `on` and `setup` rows differ in
+the guest, even though libvirt gives both `secure="yes"`.
+
+### Guest set-up for hibernation
+
+The same recipe as probe 3, once per VM (the overlay starts from the template each time). The values came out the same
+as in probe 3 for every VM: root UUID `2d5cddec-8777-4aef-9b8d-1d7093e60982`, first swap file block `370688`.
+
+```sh
+fallocate -l 1536M /swapfile; chmod 600 /swapfile; mkswap /swapfile; swapon /swapfile
+echo "/swapfile none swap sw 0 0" >> /etc/fstab
+echo "RESUME=UUID=$UUID" > /etc/initramfs-tools/conf.d/resume
+# GRUB_CMDLINE_LINUX_DEFAULT="resume=UUID=$UUID resume_offset=$OFF"
+update-initramfs -u; update-grub; systemctl reboot
+```
+
+After the reboot, `/proc/cmdline` held both resume parameters and `swapon --show` listed `/swapfile` in all three
+guests. I set up the `on` guest the same way, so its refusal is not a set-up gap.
+
+### Hibernate and resume: off and setup
+
+I started `virsh event --domain t-ph-<mode> --all --loop --timestamp`, wrote a marker to `/dev/shm/marker`, and
+hibernated. The guest agent call returned nothing useful because the agent dies with the guest, so I used
+`virsh domstate --reason`, polled every 4 s. Both modes gave `running (booted)` once, then `shut off (shutdown)` on
+every poll.
+
+Events, off (verbatim):
+
+```text
+2026-11-24 19:32:34.191+0000: event 'agent-lifecycle' for domain 't-ph-off': state: 'disconnected' reason: 'channel event'
+2026-11-24 19:32:34.684+0000: event 'pm-suspend-disk' for domain 't-ph-off'
+2026-11-24 19:32:34.684+0000: event 'lifecycle' for domain 't-ph-off': PMSuspended Disk
+2026-11-24 19:32:34.684+0000: event 'lifecycle' for domain 't-ph-off': Shutdown Finished after guest request
+2026-11-24 19:32:35.053+0000: event 'lifecycle' for domain 't-ph-off': Stopped Shutdown
+```
+
+Events, setup (the same pattern):
+
+```text
+2026-11-24 19:34:13.712+0000: event 'agent-lifecycle' for domain 't-ph-setup': state: 'disconnected' reason: 'channel event'
+2026-11-24 19:34:14.183+0000: event 'pm-suspend-disk' for domain 't-ph-setup'
+2026-11-24 19:34:14.183+0000: event 'lifecycle' for domain 't-ph-setup': PMSuspended Disk
+2026-11-24 19:34:14.183+0000: event 'lifecycle' for domain 't-ph-setup': Shutdown Finished after guest request
+2026-11-24 19:34:14.521+0000: event 'lifecycle' for domain 't-ph-setup': Stopped Shutdown
+```
+
+This matches probe 3: libvirt reports a shut-off VM, with a `PMSuspended Disk` event for an instant. Then `virsh start`:
+
+| Mode | Uptime before | Uptime after resume | `uptime -s` | Marker | Kernel log |
+| -- | -- | -- | -- | -- | -- |
+| off | 136.33 s | 188.25 s | `19:30:14`, unchanged | `marker-627` survived | `hibernation entry`, then `hibernation exit` |
+| setup | 16.74 s | 68.14 s | `19:33:53`, unchanged | `marker-615` survived | `hibernation entry`, then `hibernation exit` |
+
+Kernel log after the resume, off (setup had the same lines): `PM: Image not found (code -22)` at boot,
+`PM: hibernation: hibernation entry`, then `PM: hibernation: hibernation exit`. The timestamps after the restore read
+`[18446744050.508384]`, which is a kernel clock artefact of the restore, not an error. After the start, `virsh domstate
+--reason` said `running (booted)`. Lockdown was still `[none]` in both guests after the resume.
+
+Start events, off:
+
+```text
+2026-11-24 19:33:18.153+0000: event 'agent-lifecycle' for domain 't-ph-off': state: 'disconnected' reason: 'domain started'
+2026-11-24 19:33:18.175+0000: event 'lifecycle' for domain 't-ph-off': Resumed Unpaused
+2026-11-24 19:33:18.178+0000: event 'lifecycle' for domain 't-ph-off': Started Booted
+2026-11-24 19:33:18.793+0000: event 'rtc-change' for domain 't-ph-off': 0
+2026-11-24 19:33:24.219+0000: event 'agent-lifecycle' for domain 't-ph-off': state: 'connected' reason: 'channel event'
+```
+
+### Hibernate: on (refused by the guest)
+
+I ran `systemctl hibernate` in the guest through the guest agent, after the swap file and resume parameters were in
+place and had survived a reboot:
+
+```text
+$ systemctl hibernate; echo "systemctl exit=$?"
+Call to Hibernate failed: Sleep verb 'hibernate' is not configured or configuration is not supported by kernel
+systemctl exit=1
+```
+
+`journalctl -b` in the guest (kernel and systemd lines about hibernation; the guest's hostname is `t-tpl-build`):
+
+```text
+Nov 24 19:35:33 t-tpl-build kernel: Kernel is locked down from EFI Secure Boot; see man kernel_lockdown.7
+Nov 24 19:35:33 t-tpl-build kernel: Lockdown: swapper/0: hibernation is restricted; see man kernel_lockdown.7
+Nov 24 19:35:33 t-tpl-build kernel: Lockdown: resume: hibernation is restricted; see man kernel_lockdown.7
+Nov 24 19:35:47 t-tpl-build kernel: Lockdown: systemd-logind: hibernation is restricted; see man kernel_lockdown.7
+```
+
+The domain stayed `running (booted)` at every poll, and `virsh event` logged nothing for it. libvirt was never asked
+to power the VM off. The refusal is the kernel lockdown in the guest, which enforced Secure Boot switches on. It does
+not depend on libvirt or on the `<pm>` element, which was set to `suspend-to-disk enabled='yes'` in the definition.
+
+One more observation. I ran `virsh dompmsuspend t-ph-on disk`. The command had not returned after 120 s, and I stopped
+it. The domain stayed `running (booted)`, no event arrived, and the guest agent no longer answered `guest-ping` within
+20 s afterwards. I did not find out why, and I did not repeat it. So for the on mode, `dompmsuspend` can hang. A caller
+should not use it as the hibernate path without a timeout, or should refuse `hibernate` for Secure Boot on up front.
+
+### Feeds unit 5
+
+- The design's firmware section can say that an explicit loader and nvram template, read back from the first
+  `dumpxml --inactive`, give hibernation-capable VMs for Secure Boot off and for setup mode. libvirt accepts `<pm>`
+  with `suspend-to-disk` in the explicit form for every mode, and `start_vm` needs no arm for a hibernated VM.
+- `hibernate: true` with Secure Boot on cannot work with this guest, because the kernel locks hibernation down when
+  Secure Boot is enforced. The server should refuse that combination at create time with a clear message, or document
+  it, instead of defining a VM that cannot hibernate.
+- The redefine keeps the UUID only if the stage 2 XML carries the same `<uuid>` and name. I always passed it.
+
+### What I did not test
+
+- Whether a guest without enforced lockdown can hibernate with Secure Boot on (for example `lockdown=none` on the
+  kernel command line, which Secure Boot overrides on most distribution kernels). I did not try changing the guest's
+  lockdown mode.
+- Other guests, kernels, or BIOS firmware.
+- `smm off` with the on or setup loaders (I used `smm on` there).
+- `on_poweroff` other than `destroy`.
+- A second hibernate and resume cycle per mode.
+
+### Cleanup
+
+I destroyed each VM, ran `virsh undefine --nvram t-ph-<mode>`, deleted `t-ph-<mode>.qcow2`, ran `virsh pool-refresh
+agent-vms`, and confirmed with `virsh list --all` and `virsh vol-list agent-vms` that no `t-ph-*` VM or volume remains.
+The `.vars` volumes went with `undefine --nvram`.
